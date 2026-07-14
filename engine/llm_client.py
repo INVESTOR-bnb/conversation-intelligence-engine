@@ -65,6 +65,15 @@ class GeminiLLMClient(LLMClient):
             )
 
         genai.configure(api_key=key)
+
+        # === TEMPORARY DEBUG CODE ===
+        print("\n=== Available Gemini Models (supporting generateContent) ===")
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                print(m.name)
+        print("==========================================================\n")
+        # === END TEMPORARY DEBUG CODE ===
+
         self._model_name = model
         self._model = genai.GenerativeModel(model)
 
