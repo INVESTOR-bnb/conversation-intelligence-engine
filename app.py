@@ -7,7 +7,7 @@ stages run transparently, then inspect the four synthesized outputs with
 their evidence.
 
 Run with: streamlit run app.py
-Requires ANTHROPIC_API_KEY to be set in the environment.
+Requires GEMINI_API_KEY environment variable.
 """
 
 from __future__ import annotations
