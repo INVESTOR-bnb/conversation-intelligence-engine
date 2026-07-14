@@ -42,19 +42,16 @@ class LLMClient(ABC):
 
 
 class GeminiLLMClient(LLMClient):
-    """Implementation backed by the Google Gemini API.
+    """Implementation using the official google-genai SDK (Google AI Studio)."""
 
-    Requires the `google-generativeai` package and a GEMINI_API_KEY environment
-    variable. This is the only place in the codebase that imports the Gemini SDK.
-    """
-
-    def __init__(self, model: str = "gemini-1.5-flash", api_key: Optional[str] = None):
+    def __init__(self, model: str = "gemini-2.0-flash", api_key: Optional[str] = None):
         try:
-            import google.generativeai as genai
+            from google import genai
+            from google.genai import types
         except ImportError as e:
             raise ImportError(
-                "The 'google-generativeai' package is required for GeminiLLMClient. "
-                "Install it with: pip install google-generativeai"
+                "The 'google-genai' package is required. "
+                "Install it with: pip install google-genai"
             ) from e
 
         key = api_key or os.environ.get("GEMINI_API_KEY")
@@ -64,18 +61,9 @@ class GeminiLLMClient(LLMClient):
                 "or pass api_key explicitly."
             )
 
-        genai.configure(api_key=key)
-
-        # === TEMPORARY DEBUG CODE ===
-        print("\n=== Available Gemini Models (supporting generateContent) ===")
-        for m in genai.list_models():
-            if "generateContent" in m.supported_generation_methods:
-                print(m.name)
-        print("==========================================================\n")
-        # === END TEMPORARY DEBUG CODE ===
-
+        self._client = genai.Client(api_key=key)
         self._model_name = model
-        self._model = genai.GenerativeModel(model)
+        self._types = types
 
     def generate_structured(
         self,
@@ -83,12 +71,13 @@ class GeminiLLMClient(LLMClient):
         user_prompt: str,
         response_model: Type[T],
     ) -> T:
-        schema = response_model.model_json_schema()
+        from google.genai import types
+
         full_system = (
             f"{system_prompt}\n\n"
             "You must respond with ONLY valid JSON matching this JSON schema, "
             "with no preamble, no markdown code fences, and no commentary:\n\n"
-            f"{json.dumps(schema, indent=2)}"
+            f"{json.dumps(response_model.model_json_schema(), indent=2)}"
         )
 
         combined_prompt = f"SYSTEM:\n{full_system}\n\nUSER:\n{user_prompt}"
@@ -97,13 +86,15 @@ class GeminiLLMClient(LLMClient):
 
         for attempt in range(2):
             try:
-                response = self._model.generate_content(
+                config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=4000,
+                )
+
+                response = self._client.models.generate_content(
+                    model=self._model_name,
                     contents=combined_prompt,
-                    generation_config={
-                        "response_mime_type": "application/json",
-                        "max_output_tokens": 4000,
-                    },
-                    request_options={"timeout": 30},
+                    config=config,
                 )
 
                 if response.prompt_feedback and response.prompt_feedback.block_reason:
@@ -111,8 +102,8 @@ class GeminiLLMClient(LLMClient):
                         f"Gemini blocked the response due to: {response.prompt_feedback.block_reason}"
                     )
 
-                raw_text = getattr(response, "text", "") or ""
-                raw_text = _strip_code_fences(raw_text).strip()
+                raw_text = (response.text or "").strip()
+                raw_text = _strip_code_fences(raw_text)
 
                 if not raw_text:
                     raise ValueError("Gemini returned an empty response.")
@@ -156,5 +147,5 @@ def _strip_code_fences(text: str) -> str:
 
 
 def build_default_client() -> LLMClient:
-    model = os.environ.get("CIE_MODEL", "gemini-1.5-flash")
+    model = os.environ.get("CIE_MODEL", "gemini-2.0-flash")
     return GeminiLLMClient(model=model)
