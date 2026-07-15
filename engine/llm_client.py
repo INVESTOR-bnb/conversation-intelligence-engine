@@ -44,7 +44,7 @@ class LLMClient(ABC):
 
 
 class OpenRouterLLMClient(LLMClient):
-    """Production-grade OpenRouter client using the OpenAI-compatible API."""
+    """Production-grade OpenRouter client with resilient fallback and backoff."""
 
     FALLBACK_MODELS = [
         "meta-llama/llama-3.3-70b-instruct:free",
@@ -59,6 +59,7 @@ class OpenRouterLLMClient(LLMClient):
         api_key: Optional[str] = None,
         base_url: str = "https://openrouter.ai/api/v1",
         timeout: float = 30.0,
+        max_retries_per_model: int = 3,
     ) -> None:
         key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not key:
@@ -75,6 +76,7 @@ class OpenRouterLLMClient(LLMClient):
         self._fallback_models = self.FALLBACK_MODELS.copy()
         self._model = model
         self._timeout = timeout
+        self._max_retries_per_model = max_retries_per_model
 
     def generate_structured(
         self,
@@ -90,7 +92,9 @@ class OpenRouterLLMClient(LLMClient):
 
         for model in models_to_try:
             self._model = model
-            for attempt in range(3):
+            logger.info("Trying model: %s", model)
+
+            for attempt in range(self._max_retries_per_model):
                 try:
                     messages = [
                         {"role": "system", "content": system_prompt},
@@ -117,39 +121,86 @@ class OpenRouterLLMClient(LLMClient):
                     try:
                         data = json.loads(raw_text)
                     except json.JSONDecodeError as exc:
-                        if attempt == 2:
+                        if attempt == self._max_retries_per_model - 1:
                             raise ValueError(
                                 f"Model did not return valid JSON for {response_model.__name__}. "
                                 f"Raw output:\n{raw_text}"
                             ) from exc
                         logger.warning(
-                            "Malformed JSON received from OpenRouter (attempt %s). Retrying...",
+                            "Malformed JSON received from %s (attempt %s). Retrying...",
+                            self._model,
                             attempt + 1,
                         )
                         time.sleep(0.5 + random.uniform(0, 0.5))
                         continue
 
+                    logger.info("Success using model: %s", self._model)
                     return response_model.model_validate(data)
 
                 except APIError as exc:
                     last_exception = exc
-                    if getattr(exc, "status_code", None) == 429:
+                    status = getattr(exc, "status_code", None)
+
+                    if status == 401 or status == 403:
+                        logger.error(
+                            "Authentication/forbidden error (%s) on model %s. Aborting.",
+                            status,
+                            self._model,
+                        )
+                        raise RuntimeError(
+                            f"Authentication error ({status}) on model {self._model}. "
+                            "Check your OPENROUTER_API_KEY."
+                        ) from exc
+
+                    if status == 429:
+                        logger.warning("Model failed with 429 on %s", self._model)
                         retry_after = 0
                         if hasattr(exc, "response") and exc.response is not None:
-                            retry_after = int(exc.response.headers.get("Retry-After", 0) or 0)
-                        sleep_time = retry_after or ((2 ** attempt) * 0.5 + random.uniform(0, 0.5))
+                            retry_after = int(
+                                exc.response.headers.get("Retry-After", 0) or 0
+                            )
+                        if retry_after > 0:
+                            logger.info("Honoring Retry-After: sleeping %ss", retry_after)
+                            time.sleep(retry_after)
+                        else:
+                            sleep_time = (2 ** attempt) * 0.5 + random.uniform(0, 0.5)
+                            time.sleep(sleep_time)
+                        continue
+
+                    if status in (400, 404):
                         logger.warning(
-                            "429 from %s. Sleeping %.1fs...", self._model, sleep_time
+                            "Model unavailable (%s) on %s. Switching to fallback...",
+                            status,
+                            self._model,
                         )
+                        break  # Move to next model immediately
+
+                    if status in (408, 500, 502, 503, 504):
+                        logger.warning(
+                            "Server error (%s) on %s. Retrying with backoff...",
+                            status,
+                            self._model,
+                        )
+                        sleep_time = (2 ** attempt) * 0.5 + random.uniform(0, 0.5)
                         time.sleep(sleep_time)
                         continue
-                    raise
+
+                    # Other API errors → try next model after logging
+                    logger.warning(
+                        "API error (%s) on %s. Switching to fallback...",
+                        status,
+                        self._model,
+                    )
+                    break
 
                 except Exception as exc:
                     last_exception = exc
-                    if attempt == 2:
-                        break
-                    time.sleep(0.5 + random.uniform(0, 0.5))
+                    logger.warning(
+                        "Unexpected error on model %s: %s. Trying next fallback...",
+                        self._model,
+                        exc,
+                    )
+                    break  # Move to next model
 
         raise RuntimeError(
             f"All fallback models failed for {response_model.__name__}. "
