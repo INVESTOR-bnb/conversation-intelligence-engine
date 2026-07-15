@@ -1,22 +1,8 @@
-"""
-Pipeline orchestrator.
-
-Chains the four independent reasoning stages into a single traceable run.
-Each stage is called through the shared LLMClient abstraction, so the
-underlying model can be swapped without touching this file or any stage
-module.
-
-Kept deliberately thin: this file's only job is sequencing and packaging
-results into a ConversationAnalysis. All actual reasoning logic lives in
-the stage modules.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from engine import decomposition, diagnosis, signal_extraction, synthesis
 from engine.llm_client import LLMClient
 from models.schemas import ConversationAnalysis, RawConversation
 
@@ -32,7 +18,7 @@ STAGE_NAMES = (
 class StageProgress:
     stage_index: int
     stage_name: str
-    total_stages: int = 4
+    total_stages: int = 1
 
 
 ProgressCallback = Optional[Callable[[StageProgress], None]]
@@ -43,32 +29,28 @@ def run_pipeline(
     raw: RawConversation,
     on_progress: ProgressCallback = None,
 ) -> ConversationAnalysis:
-    """Run all four stages in sequence and return the full analysis.
+    """Single structured LLM call (production path for free tier)."""
 
-    on_progress, if provided, is called before each stage begins so a UI
-    can show live progress through the reasoning pipeline.
-    """
+    if on_progress:
+        on_progress(StageProgress(stage_index=0, stage_name="Full Analysis"))
 
-    def _notify(i: int):
-        if on_progress:
-            on_progress(StageProgress(stage_index=i, stage_name=STAGE_NAMES[i]))
+    # Combined system prompt (all stages in one request)
+    combined_system = """You are the complete Conversation Intelligence Engine.
 
-    _notify(0)
-    decomp = decomposition.decompose(client, raw)
+Perform all four stages in a single response and return one JSON object matching the ConversationAnalysis schema:
 
-    _notify(1)
-    signals = signal_extraction.extract_signals(client, decomp)
+1. Conversation Decomposition (turns + phases)
+2. Signal Extraction (intent, trust, risk, decision_readiness, information_quality)
+3. Dynamic Diagnosis (primary dynamic + explanation)
+4. Judgment Synthesis (structural_understanding, strength, weakness, next_action)
 
-    _notify(2)
-    diag = diagnosis.diagnose(client, decomp, signals)
+Be thorough but concise. Ground everything in the provided conversation text."""
 
-    _notify(3)
-    synth = synthesis.synthesize(client, decomp, signals, diag)
+    user_prompt = f"""Analyze this conversation:
 
-    return ConversationAnalysis(
-        raw=raw,
-        decomposition=decomp,
-        signal_extraction=signals,
-        diagnosis=diag,
-        synthesis=synth,
-    )
+{raw.text}
+
+Optional context: {raw.context or "(none)"}"""
+
+    analysis = client.generate_structured(combined_system, user_prompt, ConversationAnalysis)
+    return analysis
