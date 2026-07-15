@@ -12,12 +12,13 @@ import json
 import logging
 import os
 import random
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import Optional, Type, TypeVar
 
 from openai import OpenAI, APIError
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +45,30 @@ class LLMClient(ABC):
 
 
 class OpenRouterLLMClient(LLMClient):
-    """Production-grade OpenRouter client with resilient fallback and backoff."""
+    """
+    Production-grade OpenRouter client with tiered fallback, intelligent
+    error handling, JSON repair, and full observability.
 
-    FALLBACK_MODELS = [
+    Tiering prioritizes models with proven structured JSON reliability.
+    """
+
+    # Tier A: Highest JSON reliability + reasoning (tried first)
+    TIER_A = [
         "meta-llama/llama-3.3-70b-instruct:free",
         "qwen/qwen3-next-80b-a3b-instruct:free",
+    ]
+
+    # Tier B: Strong reasoning, may occasionally need repair
+    TIER_B = [
         "nvidia/nemotron-3-ultra-550b-a55b:free",
+    ]
+
+    # Tier C: Emergency fallback
+    TIER_C = [
         "tencent/hy3:free",
     ]
+
+    FALLBACK_MODELS = TIER_A + TIER_B + TIER_C
 
     def __init__(
         self,
@@ -89,10 +106,14 @@ class OpenRouterLLMClient(LLMClient):
         ]
 
         last_exception: Exception | None = None
+        start_time = time.time()
 
         for model in models_to_try:
             self._model = model
-            logger.info("Trying model: %s", model)
+            logger.info(
+                "Trying model: %s | Pipeline stage: structured_generation",
+                model,
+            )
 
             for attempt in range(self._max_retries_per_model):
                 try:
@@ -111,45 +132,68 @@ class OpenRouterLLMClient(LLMClient):
 
                     content = response.choices[0].message.content
                     if content is None:
-                        raise ValueError("OpenRouter returned empty content.")
+                        raise ValueError("Model returned empty content")
 
                     raw_text = _strip_code_fences(content.strip())
 
-                    if not raw_text:
-                        raise ValueError("OpenRouter returned empty or whitespace-only content.")
-
+                    # JSON Repair Layer
+                    repaired_text = self._repair_json(raw_text)
                     try:
-                        data = json.loads(raw_text)
+                        data = json.loads(repaired_text)
+                        logger.info(
+                            "JSON parsing status: success | model=%s | attempt=%s",
+                            self._model,
+                            attempt + 1,
+                        )
                     except json.JSONDecodeError as exc:
                         if attempt == self._max_retries_per_model - 1:
+                            logger.warning(
+                                "JSON parsing status: failed after repair | model=%s",
+                                self._model,
+                            )
                             raise ValueError(
-                                f"Model did not return valid JSON for {response_model.__name__}. "
-                                f"Raw output:\n{raw_text}"
+                                f"Model did not return valid JSON for {response_model.__name__}"
                             ) from exc
                         logger.warning(
-                            "Malformed JSON received from %s (attempt %s). Retrying...",
-                            self._model,
+                            "Malformed JSON (attempt %s). Retrying with backoff...",
                             attempt + 1,
                         )
                         time.sleep(0.5 + random.uniform(0, 0.5))
                         continue
 
-                    logger.info("Success using model: %s", self._model)
-                    return response_model.model_validate(data)
+                    # Validation Layer
+                    try:
+                        validated = response_model.model_validate(data)
+                        logger.info(
+                            "Validation status: success | model=%s | total_time=%.2fs",
+                            self._model,
+                            time.time() - start_time,
+                        )
+                        logger.info("Final model used: %s", self._model)
+                        return validated
+                    except ValidationError as exc:
+                        logger.warning(
+                            "Validation failed on %s. Missing/invalid fields. "
+                            "Attempting repair or fallback...",
+                            self._model,
+                        )
+                        # For now we treat validation failure as a signal to try next model
+                        # (more advanced per-field regeneration can be added later)
+                        break
 
                 except APIError as exc:
                     last_exception = exc
                     status = getattr(exc, "status_code", None)
 
-                    if status == 401 or status == 403:
+                    if status in (401, 403):
                         logger.error(
-                            "Authentication/forbidden error (%s) on model %s. Aborting.",
+                            "Authentication/forbidden error (%s) on model %s. "
+                            "Aborting all fallbacks.",
                             status,
                             self._model,
                         )
                         raise RuntimeError(
-                            f"Authentication error ({status}) on model {self._model}. "
-                            "Check your OPENROUTER_API_KEY."
+                            f"Authentication error ({status}). Check your OPENROUTER_API_KEY."
                         ) from exc
 
                     if status == 429:
@@ -160,11 +204,9 @@ class OpenRouterLLMClient(LLMClient):
                                 exc.response.headers.get("Retry-After", 0) or 0
                             )
                         if retry_after > 0:
-                            logger.info("Honoring Retry-After: sleeping %ss", retry_after)
                             time.sleep(retry_after)
                         else:
-                            sleep_time = (2 ** attempt) * 0.5 + random.uniform(0, 0.5)
-                            time.sleep(sleep_time)
+                            time.sleep((2 ** attempt) * 0.5 + random.uniform(0, 0.5))
                         continue
 
                     if status in (400, 404):
@@ -173,7 +215,7 @@ class OpenRouterLLMClient(LLMClient):
                             status,
                             self._model,
                         )
-                        break  # Move to next model immediately
+                        break
 
                     if status in (408, 500, 502, 503, 504):
                         logger.warning(
@@ -181,11 +223,9 @@ class OpenRouterLLMClient(LLMClient):
                             status,
                             self._model,
                         )
-                        sleep_time = (2 ** attempt) * 0.5 + random.uniform(0, 0.5)
-                        time.sleep(sleep_time)
+                        time.sleep((2 ** attempt) * 0.5 + random.uniform(0, 0.5))
                         continue
 
-                    # Other API errors → try next model after logging
                     logger.warning(
                         "API error (%s) on %s. Switching to fallback...",
                         status,
@@ -200,12 +240,21 @@ class OpenRouterLLMClient(LLMClient):
                         self._model,
                         exc,
                     )
-                    break  # Move to next model
+                    break
 
         raise RuntimeError(
-            f"All fallback models failed for {response_model.__name__}. "
+            f"All fallback models exhausted for {response_model.__name__}. "
             f"Last error: {last_exception}"
         ) from last_exception
+
+    def _repair_json(self, text: str) -> str:
+        """Lightweight JSON repair for common model mistakes."""
+        text = text.strip()
+        # Remove trailing commas before } or ]
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+        # Remove control characters that break JSON
+        text = re.sub(r"[\x00-\x1F]+", "", text)
+        return text
 
 
 def _strip_code_fences(text: str) -> str:
@@ -221,6 +270,6 @@ def _strip_code_fences(text: str) -> str:
 
 
 def build_default_client() -> LLMClient:
-    """Factory function used by the rest of the application."""
+    """Factory used by the rest of the application."""
     model = os.environ.get("CIE_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
     return OpenRouterLLMClient(model=model)
