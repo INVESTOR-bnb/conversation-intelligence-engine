@@ -15,6 +15,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Optional, Type, TypeVar
 
+from openai import OpenAI, APIError
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,12 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class LLMClient(ABC):
-    """Abstract interface for a structured-output-capable LLM."""
+    """Abstract interface for a structured-output-capable LLM client.
+
+    All concrete implementations (OpenRouter, OpenAI, Gemini, Anthropic, etc.)
+    must implement this interface so that the rest of the system remains
+    completely decoupled from any specific provider.
+    """
 
     @abstractmethod
     def generate_structured(
@@ -32,38 +38,52 @@ class LLMClient(ABC):
         user_prompt: str,
         response_model: Type[T],
     ) -> T:
-        """Generate a response and parse it into `response_model`.
+        """Generate a structured response and return a validated Pydantic model.
 
-        Implementations must ensure the raw model output is valid JSON
-        matching the schema of response_model, and must raise a clear
-        exception if parsing fails rather than silently guessing.
+        The implementation must:
+        - Force the model to return valid JSON matching the schema.
+        - Never silently accept malformed output.
+        - Raise clear, actionable exceptions on failure.
         """
         raise NotImplementedError
 
 
-class GeminiLLMClient(LLMClient):
-    """Implementation using the official google-genai SDK (Google AI Studio)."""
+class OpenRouterLLMClient(LLMClient):
+    """Production-grade OpenRouter client using the OpenAI-compatible API.
 
-    def __init__(self, model: str = "gemini-2.0-flash", api_key: Optional[str] = None):
-        try:
-            from google import genai
-            from google.genai import types
-        except ImportError as e:
-            raise ImportError(
-                "The 'google-genai' package is required. "
-                "Install it with: pip install google-genai"
-            ) from e
+    Designed to be easily replaceable by other providers while keeping the
+    public interface stable.
+    """
 
-        key = api_key or os.environ.get("GEMINI_API_KEY")
+    def __init__(
+        self,
+        model: str = "deepseek/deepseek-chat-v3-0324:free",
+        api_key: Optional[str] = None,
+        base_url: str = "https://openrouter.ai/api/v1",
+        timeout: float = 30.0,
+    ) -> None:
+        """Initialize the OpenRouter client.
+
+        Args:
+            model: Model identifier to use (can be overridden via CIE_MODEL env var).
+            api_key: OpenRouter API key. Falls back to OPENROUTER_API_KEY env var.
+            base_url: OpenRouter API endpoint.
+            timeout: Request timeout in seconds.
+        """
+        key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not key:
             raise ValueError(
-                "No API key found. Set GEMINI_API_KEY as an environment variable "
-                "or pass api_key explicitly."
+                "OPENROUTER_API_KEY is required. "
+                "Set it as an environment variable or pass it explicitly."
             )
 
-        self._client = genai.Client(api_key=key)
-        self._model_name = model
-        self._types = types
+        self._client = OpenAI(
+            base_url=base_url,
+            api_key=key,
+            timeout=timeout,
+        )
+        self._model = model
+        self._timeout = timeout
 
     def generate_structured(
         self,
@@ -71,71 +91,76 @@ class GeminiLLMClient(LLMClient):
         user_prompt: str,
         response_model: Type[T],
     ) -> T:
-        from google.genai import types
+        """Generate structured output using OpenRouter's OpenAI-compatible endpoint.
 
-        full_system = (
-            f"{system_prompt}\n\n"
-            "You must respond with ONLY valid JSON matching this JSON schema, "
-            "with no preamble, no markdown code fences, and no commentary:\n\n"
-            f"{json.dumps(response_model.model_json_schema(), indent=2)}"
-        )
+        Uses JSON mode + explicit schema instructions for maximum reliability.
+        Implements retry logic for transient JSON parsing failures.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
-        combined_prompt = f"SYSTEM:\n{full_system}\n\nUSER:\n{user_prompt}"
+        last_exception: Exception | None = None
 
-        last_exception = None
-
-        for attempt in range(2):
+        for attempt in range(2):  # Simple retry on JSON parsing issues
             try:
-                config = types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    max_output_tokens=4000,
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    max_tokens=4000,
+                    timeout=self._timeout,
                 )
 
-                response = self._client.models.generate_content(
-                    model=self._model_name,
-                    contents=combined_prompt,
-                    config=config,
-                )
+                content = response.choices[0].message.content
+                if content is None:
+                    raise ValueError("OpenRouter returned empty content.")
 
-                if response.prompt_feedback and response.prompt_feedback.block_reason:
-                    raise ValueError(
-                        f"Gemini blocked the response due to: {response.prompt_feedback.block_reason}"
-                    )
-
-                raw_text = (response.text or "").strip()
-                raw_text = _strip_code_fences(raw_text)
+                raw_text = _strip_code_fences(content.strip())
 
                 if not raw_text:
-                    raise ValueError("Gemini returned an empty response.")
+                    raise ValueError("OpenRouter returned empty or whitespace-only content.")
 
                 try:
                     data = json.loads(raw_text)
-                except json.JSONDecodeError as e:
+                except json.JSONDecodeError as exc:
                     if attempt == 1:
                         raise ValueError(
                             f"Model did not return valid JSON for {response_model.__name__}. "
                             f"Raw output:\n{raw_text}"
-                        ) from e
-                    logger.warning("Malformed JSON from Gemini (attempt %s). Retrying...", attempt + 1)
+                        ) from exc
+                    logger.warning(
+                        "Malformed JSON received from OpenRouter (attempt %s). Retrying...",
+                        attempt + 1,
+                    )
                     time.sleep(0.5)
                     continue
 
                 return response_model.model_validate(data)
 
-            except Exception as e:
-                last_exception = e
+            except APIError as exc:
+                last_exception = exc
+                logger.warning("OpenRouter API error (attempt %s): %s", attempt + 1, exc)
                 if attempt == 1:
                     break
-                logger.warning("Gemini call failed (attempt %s): %s. Retrying...", attempt + 1, str(e))
+                time.sleep(0.5)
+
+            except Exception as exc:
+                last_exception = exc
+                if attempt == 1:
+                    break
+                logger.warning("Unexpected error (attempt %s): %s", attempt + 1, exc)
                 time.sleep(0.5)
 
         raise RuntimeError(
-            f"GeminiLLMClient failed after retries for model {self._model_name}. "
+            f"OpenRouterLLMClient failed after retries for model '{self._model}'. "
             f"Last error: {last_exception}"
         ) from last_exception
 
 
 def _strip_code_fences(text: str) -> str:
+    """Remove markdown code fences if present."""
     if text.startswith("```"):
         lines = text.splitlines()
         if lines and lines[0].startswith("```"):
@@ -147,5 +172,10 @@ def _strip_code_fences(text: str) -> str:
 
 
 def build_default_client() -> LLMClient:
-    model = os.environ.get("CIE_MODEL", "gemini-2.0-flash")
-    return GeminiLLMClient(model=model)
+    """Factory function used by the rest of the application.
+
+    The model can be overridden via the CIE_MODEL environment variable.
+    This is the single point where the concrete LLM client is chosen.
+    """
+    model = os.environ.get("CIE_MODEL", "deepseek/deepseek-chat-v3-0324:free")
+    return OpenRouterLLMClient(model=model)
