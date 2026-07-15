@@ -55,10 +55,7 @@ class OpenRouterLLMClient(LLMClient):
     public interface stable.
     """
 
-    def __init__(
-        self,
-        model: str = "deepseek/deepseek-chat-v3-0324:free",
-        api_key: Optional[str] = None,
+    def __init__(self, model: str = "meta-llama/llama-3.3-70b-instruct:free", api_key: Optional[str] = None):
         base_url: str = "https://openrouter.ai/api/v1",
         timeout: float = 30.0,
     ) -> None:
