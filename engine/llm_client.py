@@ -24,12 +24,7 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class LLMClient(ABC):
-    """Abstract interface for a structured-output-capable LLM client.
-
-    All concrete implementations (OpenRouter, OpenAI, Gemini, Anthropic, etc.)
-    must implement this interface so that the rest of the system remains
-    completely decoupled from any specific provider.
-    """
+    """Abstract interface for a structured-output-capable LLM."""
 
     @abstractmethod
     def generate_structured(
@@ -38,35 +33,25 @@ class LLMClient(ABC):
         user_prompt: str,
         response_model: Type[T],
     ) -> T:
-        """Generate a structured response and return a validated Pydantic model.
+        """Generate a response and parse it into `response_model`.
 
-        The implementation must:
-        - Force the model to return valid JSON matching the schema.
-        - Never silently accept malformed output.
-        - Raise clear, actionable exceptions on failure.
+        Implementations must ensure the raw model output is valid JSON
+        matching the schema of response_model, and must raise a clear
+        exception if parsing fails rather than silently guessing.
         """
         raise NotImplementedError
 
 
 class OpenRouterLLMClient(LLMClient):
-    """Production-grade OpenRouter client using the OpenAI-compatible API.
+    """Production-grade OpenRouter client using the OpenAI-compatible API."""
 
-    Designed to be easily replaceable by other providers while keeping the
-    public interface stable.
-    """
-
-    def __init__(self, model: str = "meta-llama/llama-3.3-70b-instruct:free", api_key: Optional[str] = None):
+    def __init__(
+        self,
+        model: str = "meta-llama/llama-3.3-70b-instruct:free",
+        api_key: Optional[str] = None,
         base_url: str = "https://openrouter.ai/api/v1",
         timeout: float = 30.0,
     ) -> None:
-        """Initialize the OpenRouter client.
-
-        Args:
-            model: Model identifier to use (can be overridden via CIE_MODEL env var).
-            api_key: OpenRouter API key. Falls back to OPENROUTER_API_KEY env var.
-            base_url: OpenRouter API endpoint.
-            timeout: Request timeout in seconds.
-        """
         key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not key:
             raise ValueError(
@@ -88,11 +73,6 @@ class OpenRouterLLMClient(LLMClient):
         user_prompt: str,
         response_model: Type[T],
     ) -> T:
-        """Generate structured output using OpenRouter's OpenAI-compatible endpoint.
-
-        Uses JSON mode + explicit schema instructions for maximum reliability.
-        Implements retry logic for transient JSON parsing failures.
-        """
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -100,7 +80,7 @@ class OpenRouterLLMClient(LLMClient):
 
         last_exception: Exception | None = None
 
-        for attempt in range(2):  # Simple retry on JSON parsing issues
+        for attempt in range(2):
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
@@ -169,10 +149,6 @@ def _strip_code_fences(text: str) -> str:
 
 
 def build_default_client() -> LLMClient:
-    """Factory function used by the rest of the application.
-
-    The model can be overridden via the CIE_MODEL environment variable.
-    This is the single point where the concrete LLM client is chosen.
-    """
+    """Factory function used by the rest of the application."""
     model = os.environ.get("CIE_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
     return OpenRouterLLMClient(model=model)
