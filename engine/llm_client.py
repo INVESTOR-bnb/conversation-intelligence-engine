@@ -34,17 +34,23 @@ class LLMClient(ABC):
         user_prompt: str,
         response_model: Type[T],
     ) -> T:
+        """Generate a response and parse it into `response_model`.
+
+        Implementations must ensure the raw model output is valid JSON
+        matching the schema of response_model, and must raise a clear
+        exception if parsing fails rather than silently guessing.
+        """
         raise NotImplementedError
 
 
 class OpenRouterLLMClient(LLMClient):
-    """Production-grade client for OpenRouter (OpenAI-compatible)."""
+    """Production-grade OpenRouter client using the OpenAI-compatible API."""
 
     FALLBACK_MODELS = [
         "meta-llama/llama-3.3-70b-instruct:free",
-        "qwen/qwen2.5-72b-instruct:free",
-        "mistralai/mistral-small-3.1-24b-instruct:free",
-        "deepseek/deepseek-chat:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "tencent/hy3:free",
     ]
 
     def __init__(
@@ -53,12 +59,19 @@ class OpenRouterLLMClient(LLMClient):
         api_key: Optional[str] = None,
         base_url: str = "https://openrouter.ai/api/v1",
         timeout: float = 30.0,
-    ):
+    ) -> None:
         key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not key:
-            raise ValueError("OPENROUTER_API_KEY is required.")
+            raise ValueError(
+                "OPENROUTER_API_KEY is required. "
+                "Set it as an environment variable or pass it explicitly."
+            )
 
-        self._client = OpenAI(base_url=base_url, api_key=key, timeout=timeout)
+        self._client = OpenAI(
+            base_url=base_url,
+            api_key=key,
+            timeout=timeout,
+        )
         self._fallback_models = self.FALLBACK_MODELS.copy()
         self._model = model
         self._timeout = timeout
@@ -73,7 +86,7 @@ class OpenRouterLLMClient(LLMClient):
             m for m in self._fallback_models if m != self._model
         ]
 
-        last_exception = None
+        last_exception: Exception | None = None
 
         for model in models_to_try:
             self._model = model
@@ -93,38 +106,47 @@ class OpenRouterLLMClient(LLMClient):
                     )
 
                     content = response.choices[0].message.content
-                    if not content:
-                        raise ValueError("Empty response from model")
+                    if content is None:
+                        raise ValueError("OpenRouter returned empty content.")
 
                     raw_text = _strip_code_fences(content.strip())
 
+                    if not raw_text:
+                        raise ValueError("OpenRouter returned empty or whitespace-only content.")
+
                     try:
                         data = json.loads(raw_text)
-                    except json.JSONDecodeError as e:
+                    except json.JSONDecodeError as exc:
                         if attempt == 2:
                             raise ValueError(
-                                f"Invalid JSON from {self._model} for {response_model.__name__}"
-                            ) from e
-                        logger.warning("Malformed JSON (attempt %s). Retrying...", attempt + 1)
+                                f"Model did not return valid JSON for {response_model.__name__}. "
+                                f"Raw output:\n{raw_text}"
+                            ) from exc
+                        logger.warning(
+                            "Malformed JSON received from OpenRouter (attempt %s). Retrying...",
+                            attempt + 1,
+                        )
                         time.sleep(0.5 + random.uniform(0, 0.5))
                         continue
 
                     return response_model.model_validate(data)
 
-                except APIError as e:
-                    last_exception = e
-                    if getattr(e, "status_code", None) == 429:
+                except APIError as exc:
+                    last_exception = exc
+                    if getattr(exc, "status_code", None) == 429:
                         retry_after = 0
-                        if hasattr(e, "response") and e.response:
-                            retry_after = int(e.response.headers.get("Retry-After", 0) or 0)
+                        if hasattr(exc, "response") and exc.response is not None:
+                            retry_after = int(exc.response.headers.get("Retry-After", 0) or 0)
                         sleep_time = retry_after or ((2 ** attempt) * 0.5 + random.uniform(0, 0.5))
-                        logger.warning("429 from %s. Sleeping %.1fs...", self._model, sleep_time)
+                        logger.warning(
+                            "429 from %s. Sleeping %.1fs...", self._model, sleep_time
+                        )
                         time.sleep(sleep_time)
                         continue
                     raise
 
-                except Exception as e:
-                    last_exception = e
+                except Exception as exc:
+                    last_exception = exc
                     if attempt == 2:
                         break
                     time.sleep(0.5 + random.uniform(0, 0.5))
@@ -136,6 +158,7 @@ class OpenRouterLLMClient(LLMClient):
 
 
 def _strip_code_fences(text: str) -> str:
+    """Remove markdown code fences if present."""
     if text.startswith("```"):
         lines = text.splitlines()
         if lines and lines[0].startswith("```"):
@@ -147,5 +170,6 @@ def _strip_code_fences(text: str) -> str:
 
 
 def build_default_client() -> LLMClient:
+    """Factory function used by the rest of the application."""
     model = os.environ.get("CIE_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
     return OpenRouterLLMClient(model=model)
