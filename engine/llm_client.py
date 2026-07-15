@@ -174,5 +174,5 @@ def build_default_client() -> LLMClient:
     The model can be overridden via the CIE_MODEL environment variable.
     This is the single point where the concrete LLM client is chosen.
     """
-    model = os.environ.get("CIE_MODEL", "deepseek/deepseek-chat-v3-0324:free")
+    model = os.environ.get("CIE_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
     return OpenRouterLLMClient(model=model)
