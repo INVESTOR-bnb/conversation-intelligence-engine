@@ -1,0 +1,70 @@
+# Revenue Recovery Engine — Stage 1 Prototype
+
+A clickable, mobile-first **frontend prototype** using **fake local data only**.
+It is not production software. There is no backend, database, authentication,
+AI call, messaging integration or payment integration. All "analysis" is
+hand-written mock data or a deliberately simple local placeholder.
+
+This folder is independent of the Python/Streamlit engine in the repository
+root; nothing here calls it.
+
+## Run
+
+```bash
+cd recovery-prototype
+npm install
+npm run dev        # http://localhost:5173 (also exposed on your LAN for phone testing)
+```
+
+Production-style static build: `npm run build`, then `npm run preview`.
+To open it on an Android phone, run `npm run dev` and visit the "Network" URL
+Vite prints, with the phone on the same Wi-Fi.
+
+## Demo controls (Stage-1 only)
+
+The dark bar at the top is a **prototype control, not authentication**.
+
+- **Client Demo / Admin Demo** switches between the two interfaces.
+- **Options → Client Demo views as** picks which fake business the client view
+  shows (Pasom Autos, Fineez Designs Academy, Vee Culinary Arts, or any client
+  added in the admin).
+- **Options → Reset Demo Data** restores the original mock cases (asks for confirmation).
+
+State is saved to this browser's `localStorage` so it survives a refresh. That
+is a demo convenience, not persistence.
+
+## Seeded cases
+
+| Ref | Client | State at start | Shows |
+|---|---|---|---|
+| P-001 | Pasom Autos | Awaiting admin review (mock AI: GREEN) | Approval gate, client sees UNDER REVIEW |
+| P-002 | Fineez Designs Academy | Approved YELLOW | Needs Clarification, diagnostic message |
+| P-003 | Pasom Autos | Approved RED | Installment blocker, no message |
+| P-004 | Pasom Autos | Approved GREEN (admin-edited) | Copy / I Sent It |
+| P-005 | Vee Culinary Arts | Prospect replied → awaiting review | Response loop |
+| P-006 | Vee Culinary Arts | Waiting for prospect (client changed message) | Add Prospect Response |
+| P-007 | Pasom Autos | Won | Recovered view |
+
+## Workflow notes
+
+- Submitting a case puts it in `ANALYZING`. A submitted prospect response puts it
+  in `PROSPECT_REPLIED`. The admin presses **Run Mock Analysis** to move it to
+  `AWAITING_ADMIN_REVIEW`. No AI runs.
+- For cases created during the demo, the placeholder analysis lists only
+  mechanically known facts. It marks everything else Unknown, defaults to YELLOW
+  and proposes **no message**: the admin writes one. Explicit opt-out phrases
+  (e.g. "don't contact me") force RED.
+- Every approval stores both `mockAiProposedMessage` and `adminApprovedMessage`.
+- Client screens receive only `ClientCaseView` (`src/domain/clientView.ts`), a
+  field-by-field projection that contains no analysis, scores or notes.
+
+## Structure
+
+```
+src/domain/      types, labels, client-safe projection, state transitions, mock-analysis placeholder
+src/data/        seed mock data
+src/state/       React store + localStorage
+src/client/      client screens (C01–C13)
+src/admin/       admin screens (A01–A03)
+src/components/  shared UI + demo bar
+```
