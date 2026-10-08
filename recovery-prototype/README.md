@@ -47,6 +47,14 @@ is a demo convenience, not persistence.
 
 ## Workflow notes
 
+- The client adds the historical conversation primarily as **screenshots**
+  (PNG/JPG/WebP, multiple, previewed in order, removable). "Paste conversation
+  instead" is a secondary option. Screenshots stay in the browser as downscaled
+  JPEG copies: there is no upload, storage service or OCR, so the admin reviews
+  them visually. They are admin-only evidence and are never in the client view.
+  Each real phone screenshot uses roughly 300 KB of the browser's ~5 MB local
+  storage. Past that, the demo keeps working but stops saving across refreshes.
+- Prospect responses after a recovery message are still typed/pasted as text.
 - Submitting a case puts it in `ANALYZING`. A submitted prospect response puts it
   in `PROSPECT_REPLIED`. The admin presses **Run Mock Analysis** to move it to
   `AWAITING_ADMIN_REVIEW`. No AI runs.

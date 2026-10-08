@@ -9,7 +9,7 @@ import { navigate } from '../router';
 import { useStore } from '../state/store';
 import { AdminDecision } from './AdminDecision';
 import { clientName } from './ControlRoom';
-import { ConversationView } from './ConversationView';
+import { ConversationView, ScreenshotEvidence } from './ConversationView';
 import { ForensicAnalysisView, StrategyView } from './ForensicAnalysisView';
 
 export function CaseReviewScreen({ id }: { id: string }) {
@@ -62,8 +62,17 @@ export function CaseReviewScreen({ id }: { id: string }) {
         )}
       </Card>
 
-      <Card title="Complete Conversation" aside={<span className="muted small">{c.conversation.length} messages</span>}>
-        <ConversationView messages={c.conversation} />
+      <Card
+        title="Complete Conversation"
+        aside={
+          <span className="muted small">
+            {c.screenshots?.length ? `${c.screenshots.length} screenshot${c.screenshots.length === 1 ? '' : 's'} · ` : ''}
+            {c.conversation.length} text message{c.conversation.length === 1 ? '' : 's'}
+          </span>
+        }
+      >
+        {c.screenshots && c.screenshots.length > 0 && <ScreenshotEvidence shots={c.screenshots} />}
+        {c.screenshots?.length && c.conversation.length === 0 ? null : <ConversationView messages={c.conversation} />}
       </Card>
 
       {(c.approvals.length > 0 || c.sentRecords.length > 0) && <RecoveryHistory c={c} />}

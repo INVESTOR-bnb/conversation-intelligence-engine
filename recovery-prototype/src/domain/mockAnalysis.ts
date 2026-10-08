@@ -70,12 +70,16 @@ export function placeholderAnalysis(c: RecoveryCase, version: number): ForensicA
   const last = c.conversation[c.conversation.length - 1];
   const latestResponse = c.responses[c.responses.length - 1];
   const optOut = c.conversation.some((m) => m.speaker === 'PROSPECT' && detectOptOut(m.text));
+  const shots = c.screenshots?.length ?? 0;
 
   const confirmedFacts = [
     `Product / service: ${c.productService}.`,
     `Lead source: ${c.leadSource}.`,
-    `${c.conversation.length} message(s) on record; ${prospectMsgs.length} attributed to the prospect.`,
   ];
+  if (shots > 0) {
+    confirmedFacts.push(`Historical conversation submitted as ${shots} screenshot(s). Their contents were NOT read (no OCR in Stage 1).`);
+  }
+  confirmedFacts.push(`${c.conversation.length} text message(s) on record; ${prospectMsgs.length} attributed to the prospect.`);
   if (last) confirmedFacts.push(`Last recorded message was from: ${last.speaker.replace('_', ' ').toLowerCase()}.`);
   if (c.sentRecords.length > 0) confirmedFacts.push(`${c.sentRecords.length} recovery message(s) recorded as sent.`);
   if (latestResponse) confirmedFacts.push(`Latest prospect response (verbatim): "${latestResponse.text}"`);
@@ -93,7 +97,9 @@ export function placeholderAnalysis(c: RecoveryCase, version: number): ForensicA
     basedOnMessageCount: c.conversation.length,
     note:
       'Stage-1 placeholder. No real analysis was performed; only mechanically observable facts are listed. ' +
-      'Read the conversation and apply your own judgement before approving.',
+      (shots > 0
+        ? 'Screenshot contents are not read in Stage 1: open the screenshots, read the conversation and apply your own judgement before approving.'
+        : 'Read the conversation and apply your own judgement before approving.'),
     classification: optOut ? 'RED' : 'YELLOW',
     recoveryScore: null,
     confidence: null,
@@ -101,7 +107,11 @@ export function placeholderAnalysis(c: RecoveryCase, version: number): ForensicA
     financialCapability: { level: 'Unknown', evidence: 'Not assessed. Silence or price discussion alone does not establish affordability either way.' },
     offerFit: { level: 'Unknown', evidence: 'Not assessed by placeholder.' },
     lastStrongBuyingSignal: 'Not assessed.',
-    momentumBreakpoint: lastProspect ? `Last prospect message: "${truncate(lastProspect.text, 140)}"` : 'No prospect message identified.',
+    momentumBreakpoint: lastProspect
+      ? `Last prospect message: "${truncate(lastProspect.text, 140)}"`
+      : shots > 0
+        ? 'Not determinable — screenshots are not read in Stage 1.'
+        : 'No prospect message identified.',
     primaryFriction: 'Unknown.',
     secondaryFrictions: [],
     statedObjection: 'Not assessed.',

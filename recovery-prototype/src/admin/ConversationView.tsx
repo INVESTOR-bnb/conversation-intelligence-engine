@@ -1,5 +1,5 @@
 import { formatDate } from '../components/ui';
-import type { ConversationMessage, Speaker } from '../domain/types';
+import type { ConversationMessage, ConversationScreenshot, Speaker } from '../domain/types';
 
 const SPEAKER_LABEL: Record<Speaker, string> = {
   PROSPECT: 'Prospect',
@@ -31,5 +31,26 @@ export function ConversationView({ messages }: { messages: ConversationMessage[]
         </li>
       ))}
     </ol>
+  );
+}
+
+/** Historical conversation screenshots, in the order the client uploaded them. Admin only. */
+export function ScreenshotEvidence({ shots }: { shots: ConversationScreenshot[] }) {
+  const ordered = [...shots].sort((a, b) => a.order - b.order);
+  return (
+    <div className="evidence">
+      <p className="cmp-label">Historical conversation — screenshots in uploaded order</p>
+      <p className="muted small">Not read automatically in Stage 1 (no OCR). Review each screenshot directly.</p>
+      <ol className="evidence-list">
+        {ordered.map((s) => (
+          <li key={s.id} className="evidence-item">
+            <span className="evidence-head">
+              Screenshot {s.order} of {ordered.length} · {s.fileName}
+            </span>
+            <img src={s.dataUrl} alt={`Conversation screenshot ${s.order} of ${ordered.length}`} loading="lazy" width={s.width} height={s.height} />
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }

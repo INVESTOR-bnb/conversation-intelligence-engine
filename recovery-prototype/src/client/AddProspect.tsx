@@ -3,9 +3,10 @@
 import { useState } from 'react';
 import { Button, ErrorBanner, Field, Notice, ScreenHeader } from '../components/ui';
 import { createCase, nextReference } from '../domain/transitions';
-import { LEAD_SOURCES, type LeadSource } from '../domain/types';
+import { LEAD_SOURCES, type ConversationScreenshot, type LeadSource } from '../domain/types';
 import { navigate } from '../router';
 import { useStore } from '../state/store';
+import { ScreenshotUploader } from './ScreenshotUploader';
 
 export function AddProspectScreen() {
   const { data, apply } = useStore();
@@ -15,6 +16,8 @@ export function AddProspectScreen() {
   const [leadSource, setLeadSource] = useState<LeadSource | ''>('');
   const [value, setValue] = useState('');
   const [lastDate, setLastDate] = useState('');
+  const [source, setSource] = useState<'SCREENSHOTS' | 'TEXT'>('SCREENSHOTS');
+  const [screenshots, setScreenshots] = useState<ConversationScreenshot[]>([]);
   const [conversation, setConversation] = useState('');
   const [context, setContext] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -34,7 +37,11 @@ export function AddProspectScreen() {
   };
 
   const submit = () => {
-    if (conversation.trim().length < 20) {
+    if (source === 'SCREENSHOTS' && screenshots.length === 0) {
+      setErrors({ screenshots: 'Add at least one screenshot of the conversation, or choose “Paste conversation instead”.' });
+      return;
+    }
+    if (source === 'TEXT' && conversation.trim().length < 20) {
       setErrors({ conversation: 'Paste the conversation (at least a few messages) so we can understand what happened.' });
       return;
     }
@@ -47,7 +54,9 @@ export function AddProspectScreen() {
         leadSource: leadSource as LeadSource,
         estimatedDealValue: value ? Number(value.replace(/,/g, '')) : null,
         lastInteractionDate: lastDate || null,
-        conversationText: conversation,
+        conversationSource: source,
+        conversationText: source === 'TEXT' ? conversation : '',
+        screenshots: source === 'SCREENSHOTS' ? screenshots : [],
         clientContext: context || null,
       });
       caseId = r.caseId;
@@ -93,15 +102,29 @@ export function AddProspectScreen() {
         </form>
       ) : (
         <form className="card" onSubmit={(e) => { e.preventDefault(); submit(); }} noValidate>
-          <Field
-            label="Sales conversation"
-            hint={<>Paste the historical sales conversation below. Include enough of the conversation for us to understand what happened before the deal stalled.<br /><span className="muted">Tip: starting lines with “Prospect:” or “Business:” helps us tell speakers apart.</span></>}
-            error={errors.conversation}
-          >
-            {(id, d) => (
-              <textarea id={id} aria-describedby={d} rows={12} value={conversation} placeholder={'Prospect: Is it still available?\nBusiness: Yes, it is…'} onChange={(e) => setConversation(e.target.value)} />
-            )}
-          </Field>
+          {source === 'SCREENSHOTS' ? (
+            <>
+              <ScreenshotUploader screenshots={screenshots} onChange={(next) => { setScreenshots(next); setErrors({}); }} error={errors.screenshots} />
+              <button type="button" className="text-link" onClick={() => { setSource('TEXT'); setErrors({}); }}>
+                Paste conversation instead
+              </button>
+            </>
+          ) : (
+            <>
+              <Field
+                label="Sales conversation"
+                hint={<>Paste the historical sales conversation below. Include enough of the conversation for us to understand what happened before the deal stalled.<br /><span className="muted">Tip: starting lines with “Prospect:” or “Business:” helps us tell speakers apart.</span></>}
+                error={errors.conversation}
+              >
+                {(id, d) => (
+                  <textarea id={id} aria-describedby={d} rows={12} value={conversation} placeholder={'Prospect: Is it still available?\nBusiness: Yes, it is…'} onChange={(e) => setConversation(e.target.value)} />
+                )}
+              </Field>
+              <button type="button" className="text-link" onClick={() => { setSource('SCREENSHOTS'); setErrors({}); }}>
+                Upload screenshots instead
+              </button>
+            </>
+          )}
           <Field label="Anything we should know?" optional>
             {(id) => <textarea id={id} rows={3} value={context} onChange={(e) => setContext(e.target.value)} />}
           </Field>

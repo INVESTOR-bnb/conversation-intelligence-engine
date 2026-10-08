@@ -48,6 +48,23 @@ export interface ConversationMessage {
   isRecoveryResponse?: boolean;
 }
 
+/**
+ * A conversation screenshot uploaded by the client. Stage 1 keeps a downscaled
+ * copy locally (data URL) — no upload, storage service or OCR. Private case
+ * evidence: admin only, never part of the client-facing view.
+ */
+export interface ConversationScreenshot {
+  id: string;
+  /** 1-based position in the order the client selected them (chronological). */
+  order: number;
+  fileName: string;
+  originalType: string;
+  originalSizeBytes: number;
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
 export type Level = 'High' | 'Medium-High' | 'Medium' | 'Low-Medium' | 'Low' | 'Unknown';
 
 /** Private forensic intelligence. ADMIN ONLY — never passed to client screens. */
@@ -162,6 +179,9 @@ export interface RecoveryCase {
   reviewReason: 'NEW_SUBMISSION' | 'PROSPECT_RESPONSE' | 'REANALYSIS' | null;
 
   workflowState: WorkflowState;
+  /** Optional so demo data saved before screenshots existed still loads. */
+  conversationSource?: 'SCREENSHOTS' | 'TEXT';
+  screenshots?: ConversationScreenshot[];
   conversation: ConversationMessage[];
 
   analysis: ForensicAnalysis | null;

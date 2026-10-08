@@ -9,6 +9,7 @@ import type {
   ApprovalType,
   Classification,
   Client,
+  ConversationScreenshot,
   LeadSource,
   RecoveryCase,
   TerminalState,
@@ -42,12 +43,18 @@ export interface NewCaseInput {
   leadSource: LeadSource;
   estimatedDealValue: number | null;
   lastInteractionDate: string | null;
+  /** Exactly one of conversationText / screenshots is used, per conversationSource. */
+  conversationSource: 'SCREENSHOTS' | 'TEXT';
   conversationText: string;
+  screenshots: ConversationScreenshot[];
   clientContext: string | null;
 }
 
 export function createCase(data: AppData, input: NewCaseInput): { data: AppData; caseId: string } {
   const client = data.clients.find((cl) => cl.id === input.clientId);
+  const fromScreenshots = input.conversationSource === 'SCREENSHOTS';
+  if (fromScreenshots && input.screenshots.length === 0) throw new Error('Add at least one conversation screenshot.');
+  if (!fromScreenshots && !input.conversationText.trim()) throw new Error('Paste the conversation.');
   const id = newId('case');
   const t = now();
   const c: RecoveryCase = {
@@ -65,7 +72,9 @@ export function createCase(data: AppData, input: NewCaseInput): { data: AppData;
     reviewReason: 'NEW_SUBMISSION',
     // Submission goes straight to ANALYZING; the admin runs the (mock) analysis.
     workflowState: 'ANALYZING',
-    conversation: parseConversation(input.conversationText, client?.businessName),
+    conversationSource: input.conversationSource,
+    screenshots: fromScreenshots ? input.screenshots.map((sc, i) => ({ ...sc, order: i + 1 })) : [],
+    conversation: fromScreenshots ? [] : parseConversation(input.conversationText, client?.businessName),
     analysis: null,
     analysisHistory: [],
     approvals: [],
@@ -73,7 +82,13 @@ export function createCase(data: AppData, input: NewCaseInput): { data: AppData;
     responses: [],
     adminNotes: '',
     outcome: null,
-    timeline: [event('Case submitted by client', 'Case submitted'), event('Queued for mock analysis')],
+    timeline: [
+      event(
+        fromScreenshots ? `Case submitted by client with ${input.screenshots.length} conversation screenshot(s)` : 'Case submitted by client (pasted text)',
+        'Case submitted',
+      ),
+      event('Queued for mock analysis'),
+    ],
   };
   return { data: { ...data, cases: [c, ...data.cases] }, caseId: id };
 }
