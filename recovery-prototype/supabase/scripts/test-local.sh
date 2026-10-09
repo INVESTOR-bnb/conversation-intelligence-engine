@@ -26,8 +26,13 @@ load() { out="$(run "$1")" || { echo "$out"; exit 1; }; }
 
 echo "== Supabase emulation (local only)"
 load "$HERE/tests/local/00_supabase_emulation.sql"
-echo "== Migrations"
-for f in "$HERE"/migrations/*.sql; do echo "   $(basename "$f")"; load "$f"; done
+if [ "${INSTALL:-migrations}" = deploy ]; then
+  echo "== Install via deploy/stage2a1_deploy.sql (single transaction)"
+  load "$HERE/deploy/stage2a1_deploy.sql"
+else
+  echo "== Migrations"
+  for f in "$HERE"/migrations/*.sql; do echo "   $(basename "$f")"; load "$f"; done
+fi
 echo "== Test helpers (local only)"
 load "$HERE/tests/local/01_test_helpers.sql"
 

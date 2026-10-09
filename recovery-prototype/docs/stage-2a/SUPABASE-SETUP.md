@@ -8,7 +8,7 @@ development environment: its network policy blocks `supabase.com` /
 
 1. **Confirm Auth settings** (done 2026-10-09): public sign-ups off, anonymous
    sign-ins off, manual linking off, email confirmation on.
-2. **Apply the migrations, in order**, in *SQL editor* (or `supabase db push`
+2. **Apply the migrations** — use the single-transaction file and steps in `DEPLOY-STAGE-2A-1.md` (preferred). Legacy option: apply them in order, in *SQL editor* (or `supabase db push`
    / `psql` with the connection string):
    1. `supabase/migrations/20261009120000_stage2a1_schema.sql`
    2. `supabase/migrations/20261009120100_stage2a1_security.sql`
