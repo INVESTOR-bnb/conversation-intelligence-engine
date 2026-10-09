@@ -9,9 +9,10 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
     "typecheck": "tsc --noEmit",
-    "test": "npm run test:unit && npm run test:e2e",
+    "test": "npm run test:unit && npm run test:db && npm run test:e2e",
     "test:unit": "playwright test --config playwright.unit.config.ts",
-    "test:e2e": "npm run build && playwright test --config playwright.config.ts"
+    "test:e2e": "npm run build && playwright test --config playwright.config.ts",
+    "test:db": "bash supabase/scripts/test-local.sh"
   },
   "dependencies": {
     "react": "18.3.1",

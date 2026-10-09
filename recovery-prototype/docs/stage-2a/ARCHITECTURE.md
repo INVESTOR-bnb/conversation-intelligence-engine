@@ -107,7 +107,7 @@ reported → separate commit → **stop for founder approval**.
 | Step | Content | Exit criteria |
 |---|---|---|
 | **2A-0** ✅ | Repo audit, committed Playwright suite + unit tests, baseline tag, this document, 2A-1 plan | Stage-1 regression green |
-| 2A-1 | Schema, RLS, guarded RPCs, invite-only auth, founder role, demo/live data adapter | Isolation, escalation, stale-approval and opt-out tests pass locally **and** on the Supabase project |
+| 2A-1 (DB layer done locally) | Schema, RLS, guarded RPCs, invite-only auth, founder role, demo/live data adapter | Isolation, escalation, stale-approval and opt-out tests pass locally **and** on the Supabase project |
 | 2A-2 | Private storage, upload with progress/retry, reorder, content validation, idempotent submit, retention/deletion controls | Upload persistence, invalid-file and partial-failure tests |
 | 2A-3 | `analyze-case` Edge Function, prompt v1, schema validation, usage/cost tracking, synthetic eval set (Sonnet vs Opus) | Real-content, uncertainty, non-commercial, opt-out, failure-safety tests |
 | 2A-4 | Founder review/approval UI with immutable approval history | Edit-and-approve; stale approval blocked |

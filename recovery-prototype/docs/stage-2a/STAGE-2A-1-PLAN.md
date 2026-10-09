@@ -1,7 +1,7 @@
 # Stage 2A-1 — Database, Security and Authentication Plan
 
-Status: **proposed — not authorised.** No Supabase resources exist; no code
-for this increment has been written.
+Status: **authorised 2026-10-09; database layer implemented and verified
+locally only** (see §10). Not yet applied to or tested on Supabase.
 
 Goal: the smallest database + auth layer that enforces client isolation,
 founder authority, evidence versioning, stale-approval protection and
@@ -187,3 +187,53 @@ Cost of 2A-1: **$0** (Supabase Free; no Anthropic usage).
 - Supabase Free projects pause after inactivity and have no backups — acceptable
   only for synthetic data.
 - Supabase's built-in email sending is heavily rate-limited; enough for a few invites.
+
+## 10. Implementation status (2026-10-09)
+
+Implemented (`supabase/`):
+
+| Item | Location |
+|---|---|
+| Schema, constraints, immutability triggers | `migrations/20261009120000_stage2a1_schema.sql` |
+| Default-deny grants, RLS, role helpers | `migrations/20261009120100_stage2a1_security.sql` |
+| Guarded functions (client, founder, service) | `migrations/20261009120200_stage2a1_functions.sql` |
+| One-time founder bootstrap (admin, SQL editor) | `admin/bootstrap_founder.sql` |
+| Local Supabase emulation + test helpers | `tests/local/` (never deployed) |
+| Authorization test suite (143 assertions) | `tests/*.test.sql`, run with `npm run test:db` |
+| Runbook for the founder / remote verification | `docs/stage-2a/SUPABASE-SETUP.md` |
+
+The suite was mutation-checked: deliberately granting clients write access,
+exposing analyses to members, removing the opt-out check and removing the
+stale-evidence check each made the suite fail.
+
+**Deviations from §1–§5 (decided during implementation):**
+
+1. RLS is **enabled, not forced**: guarded SECURITY DEFINER functions run as
+   the table owner and perform their own checks; forcing RLS would make them
+   evaluate client policies. Direct API access is still default-deny.
+2. Clients have **no direct read of `client_recommendations`**; approved content
+   reaches them only through `client_list_cases()` / `client_get_case()`, which
+   show it only while the case awaits client action.
+3. Added `founder_stop_contact` (RED decision without a new analysis — stopping
+   is always safe) and `founder_abandon_analysis` (release a stuck analysis).
+4. Adding any contact restriction increments the evidence version and moves a
+   case that is in review or with the client back to `REANALYZING`, withdrawing
+   any approved message from the client.
+5. The client projection reports `DRAFT` for unsubmitted cases (Stage 1 had no
+   drafts); the live UI must handle it in 2A-2.
+6. `internal_complete_analysis` (service role only) is part of 2A-1 so the
+   analysis lifecycle, failure rollback and stale-evidence rejection could be
+   tested now. No AI is called anywhere.
+
+**Not done in 2A-1 (blocked or deliberately deferred):**
+
+- **Applying migrations to Supabase and remote tests** — blocked: network policy
+  denies `supabase.com`/`supabase.co`; no project URL, anon key or migration
+  access has been provided.
+- **Frontend live mode / sign-in screen / data adapter** — deferred: it needs
+  the new runtime dependency `@supabase/supabase-js` and cannot be exercised
+  against Supabase Auth from this environment. Stage-1 demo is unchanged.
+- **Full-case erasure:** immutable approvals block cascading deletion of a
+  case. Screenshot deletion (30-day retention) is unaffected; a deliberate,
+  audited erasure procedure must be designed in 2A-2 before real data.
+

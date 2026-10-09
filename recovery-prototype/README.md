@@ -33,7 +33,10 @@ preinstalled in the cloud dev environment). On another machine run
 `npx playwright install chromium` once.
 
 Stage 2A planning: `docs/stage-2a/ARCHITECTURE.md` (approved architecture) and
-`docs/stage-2a/STAGE-2A-1-PLAN.md` (next increment, awaiting approval).
+`docs/stage-2a/STAGE-2A-1-PLAN.md` (2A-1 plan and status), `docs/stage-2a/SUPABASE-SETUP.md` (runbook).
+
+Database (Stage 2A-1): `supabase/migrations/` and `npm run test:db` (local
+PostgreSQL with a Supabase emulation; requires PostgreSQL 16 binaries).
 
 ## Demo controls (Stage-1 only)
 
