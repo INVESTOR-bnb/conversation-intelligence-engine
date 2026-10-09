@@ -2,19 +2,23 @@
   "name": "revenue-recovery-engine-prototype",
   "private": true,
   "version": "0.1.0",
-  "description": "Revenue Recovery Engine — Stage 1 clickable frontend prototype (mock local data only)",
+  "description": "Revenue Recovery Engine \u2014 Stage 1 clickable frontend prototype (mock local data only)",
   "type": "module",
   "scripts": {
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "playwright test --config playwright.unit.config.ts",
+    "test:e2e": "npm run build && playwright test --config playwright.config.ts"
   },
   "dependencies": {
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.56.1",
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
     "@vitejs/plugin-react": "4.7.0",

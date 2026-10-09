@@ -20,6 +20,21 @@ Production-style static build: `npm run build`, then `npm run preview`.
 To open it on an Android phone, run `npm run dev` and visit the "Network" URL
 Vite prints, with the phone on the same Wi-Fi.
 
+## Tests
+
+```bash
+npm run test:unit   # domain logic: privacy projection + state-machine guards (no browser)
+npm run test:e2e    # builds, serves and runs the Stage-1 acceptance suite at 390px
+npm test            # both
+```
+
+Uses `@playwright/test` (pinned to 1.56.1, which matches the Chromium build
+preinstalled in the cloud dev environment). On another machine run
+`npx playwright install chromium` once.
+
+Stage 2A planning: `docs/stage-2a/ARCHITECTURE.md` (approved architecture) and
+`docs/stage-2a/STAGE-2A-1-PLAN.md` (next increment, awaiting approval).
+
 ## Demo controls (Stage-1 only)
 
 The dark bar at the top is a **prototype control, not authentication**.
