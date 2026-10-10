@@ -32,6 +32,7 @@ snapshot() { "${RUNAS[@]}" "$PGBIN/pg_dump" -h "$WORK" -p "$PORT" -U postgres --
 policies() { sql "$1" "select string_agg(tablename||'|'||policyname||'|'||cmd||'|'||permissive||'|'||roles::text||'|'||qual, E'\n' order by tablename) from pg_policies where schemaname = 'public' and tablename in ('cases','case_messages','case_screenshots','outcomes')"; }
 overall() { "${PSQL[@]}" -d "$1" -At -F '|' < "$2" | awk -F'|' '$2=="OVERALL"{print $3" ("$4")"}'; }
 status_of() { "${PSQL[@]}" -d "$1" -At -F '|' < "$VERIFY" | awk -F'|' -v n="$2" '$1==n{print $3}'; }
+base_status_of() { "${PSQL[@]}" -d "$1" -At -F '|' < "$BASE_VERIFY" | awk -F'|' -v n="$2" '$1==n{print $3}'; }
 data_rows() { sql "$1" "select (select count(*) from public.businesses)||'/'||(select count(*) from public.cases)||'/'||(select count(*) from public.case_messages)||'/'||(select count(*) from public.outcomes)"; }
 
 pass=0; fail=0
@@ -154,6 +155,17 @@ db=$(new_db helper)
 helper_before=$(sql "$db" "select md5(p.prosrc||coalesce(p.proacl::text,'')||p.prosecdef::text) from pg_proc p where p.oid = to_regprocedure('public.rls_auto_enable()')")
 out=$(run_single "$db" "$DEPLOY" || true)
 check "deploys alongside the helper; helper unchanged; both verifications pass" '! grep -q ERROR <<<"$out" && [ "$(sql "$db" "select md5(p.prosrc||coalesce(p.proacl::text,'"''"')||p.prosecdef::text) from pg_proc p where p.oid = to_regprocedure('"'"'public.rls_auto_enable()'"'"')")" = "$helper_before" ] && [[ "$(overall "$db" "$VERIFY")" == "PASS ("*" 0 fail"* ]] && [[ "$(overall "$db" "$BASE_VERIFY")" == "PASS ("*" 0 fail"* ]]'
+# Regression: 2A-4b adds a newer SCHEMA_DEPLOYED row without a helper fingerprint;
+# 2A-1 verification row 20 must still compare against the 2A-1 deployment entry.
+check "2A-1 verification row 20 is PASS (not INFO) after 2A-4b with the helper unchanged" '[ "$(base_status_of "$db" 20)" = PASS ]'
+sql "$db" "revoke execute on function public.rls_auto_enable() from anon" >/dev/null
+check "row 20 FAILs after 2A-4b if the helper's privileges change (OVERALL FAIL)" '[ "$(base_status_of "$db" 20)" = FAIL ] && [[ "$(overall "$db" "$BASE_VERIFY")" == FAIL* ]]'
+sql "$db" "grant execute on function public.rls_auto_enable() to anon" >/dev/null
+check "row 20 returns to PASS when the helper is restored" '[ "$(base_status_of "$db" 20)" = PASS ]'
+sql "$db" "alter event trigger ensure_rls disable" >/dev/null
+check "row 20 FAILs after 2A-4b if the event trigger ensure_rls is disabled" '[ "$(base_status_of "$db" 20)" = FAIL ]'
+sql "$db" "alter event trigger ensure_rls enable" >/dev/null
+check "row 20 PASS again after re-enabling the event trigger" '[ "$(base_status_of "$db" 20)" = PASS ]'
 out=$(run_single "$db" "$ROLLBACK" || true)
 check "rollback alongside the helper restores 2A-1 policies" '! grep -q ERROR <<<"$out" && [ "$(policies "$db")" = "$base_policies" ]'
 

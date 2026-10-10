@@ -33,9 +33,9 @@ helper_now as (
 helper_recorded as (
   select
     case when to_regclass('public.audit_log') is null then null else
-      (xpath('/row/f/text()', query_to_xml('select details->''preexisting_rls_auto_enable''->>''fingerprint'' as f from public.audit_log where action = ''SCHEMA_DEPLOYED'' order by id desc limit 1', false, true, '')))[1]::text end as fingerprint,
+      (xpath('/row/f/text()', query_to_xml('select details->''preexisting_rls_auto_enable''->>''fingerprint'' as f from public.audit_log where action = ''SCHEMA_DEPLOYED'' and details->>''stage'' = ''2A-1'' order by id desc limit 1', false, true, '')))[1]::text end as fingerprint,
     case when to_regclass('public.audit_log') is null then null else
-      (xpath('/row/b/text()', query_to_xml('select details->''preexisting_rls_auto_enable''->>''body_md5'' as b from public.audit_log where action = ''SCHEMA_DEPLOYED'' order by id desc limit 1', false, true, '')))[1]::text end as body_md5),
+      (xpath('/row/b/text()', query_to_xml('select details->''preexisting_rls_auto_enable''->>''body_md5'' as b from public.audit_log where action = ''SCHEMA_DEPLOYED'' and details->>''stage'' = ''2A-1'' order by id desc limit 1', false, true, '')))[1]::text end as body_md5),
 pub_fn as (
   select p.oid, p.proname, p.prosecdef, p.proconfig
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public'
