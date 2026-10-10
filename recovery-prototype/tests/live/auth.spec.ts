@@ -20,6 +20,8 @@ async function login(page: Page, who: 'founder' | 'client') {
   await page.getByLabel('Email').fill(USERS[who].email);
   await page.getByLabel('Password').fill(USERS[who].password);
   await page.getByRole('button', { name: 'Sign In' }).click();
+  // Sign-in is asynchronous: navigating before it finishes cancels it.
+  await page.waitForURL((u) => !u.pathname.startsWith('/login'));
 }
 
 test.describe('unauthenticated access is blocked', () => {

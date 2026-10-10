@@ -29,6 +29,7 @@ export class MockSupabase {
   refresh = new Map<string, string>(); // refresh token -> user id
   requests: string[] = [];
   whoamiFails = false;
+  authDelayMs = Number(process.env.MOCK_AUTH_DELAY_MS ?? 200);
   /** Makes founder_* calls fail: 'server' = HTTP 500, 'network' = connection dropped. */
   failRpc: false | 'server' | 'network' = false;
   dailyLimit = 20;
@@ -94,6 +95,10 @@ export class MockSupabase {
     const p = url.pathname;
 
     if (p === '/auth/v1/token' && url.searchParams.get('grant_type') === 'password') {
+      // Real Supabase Auth takes a few hundred ms. A realistic delay makes tests
+      // that navigate before sign-in has finished fail every time, not only on
+      // slower CI runners (override with MOCK_AUTH_DELAY_MS).
+      if (this.authDelayMs > 0) await new Promise((r) => setTimeout(r, this.authDelayMs));
       const u = Object.values(USERS).find((x) => x.email === body.email);
       if (!u || !u.password || u.password !== body.password) {
         return json(400, { code: 400, error_code: 'invalid_credentials', msg: 'Invalid login credentials' });

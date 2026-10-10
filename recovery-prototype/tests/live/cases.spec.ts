@@ -18,6 +18,8 @@ async function login(page: Page, who: keyof typeof USERS) {
   await page.getByLabel('Email').fill(USERS[who].email);
   await page.getByLabel('Password').fill(USERS[who].password);
   await page.getByRole('button', { name: 'Sign In' }).click();
+  // Sign-in is asynchronous: navigating before it finishes cancels it.
+  await page.waitForURL((u) => !u.pathname.startsWith('/login'));
 }
 
 const CONVO = 'Prospect: Is the synthetic Corolla still available?\nBusiness: Yes, it is.\nProspect: I will think about it.';
