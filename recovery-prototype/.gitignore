@@ -1,4 +1,8 @@
 node_modules
 dist
+dist-live
 test-results
 playwright-report
+.env
+.env.*
+!.env.example

@@ -201,6 +201,8 @@ Implemented (`supabase/`):
 | Local Supabase emulation + test helpers | `tests/local/` (never deployed) |
 | Authorization test suite (143 assertions) | `tests/*.test.sql`, run with `npm run test:db` |
 | Runbook for the founder / remote verification | `docs/stage-2a/SUPABASE-SETUP.md` |
+| Invite-only sign-in, session, route guards (frontend) | `src/live/`, tests `tests/live/` (mocked Supabase) |
+| HTTPS staging deployment runbook (Cloudflare Pages) | `docs/stage-2a/STAGING-AUTH-DEPLOY.md` |
 
 The suite was mutation-checked: deliberately granting clients write access,
 exposing analyses to members, removing the opt-out check and removing the

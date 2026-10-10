@@ -2,19 +2,21 @@
   "name": "revenue-recovery-engine-prototype",
   "private": true,
   "version": "0.1.0",
-  "description": "Revenue Recovery Engine \u2014 Stage 1 clickable frontend prototype (mock local data only)",
+  "description": "Revenue Recovery Engine — Stage 1 clickable frontend prototype (mock local data only)",
   "type": "module",
   "scripts": {
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
     "typecheck": "tsc --noEmit",
-    "test": "npm run test:unit && npm run test:db && npm run test:e2e",
+    "test": "npm run test:unit && npm run test:db && npm run test:e2e && npm run test:live",
     "test:unit": "playwright test --config playwright.unit.config.ts",
     "test:e2e": "npm run build && playwright test --config playwright.config.ts",
-    "test:db": "bash supabase/scripts/test-local.sh && INSTALL=deploy bash supabase/scripts/test-local.sh && SUPABASE_HELPER=1 INSTALL=deploy bash supabase/scripts/test-local.sh && bash supabase/scripts/test-deploy.sh"
+    "test:db": "bash supabase/scripts/test-local.sh && INSTALL=deploy bash supabase/scripts/test-local.sh && SUPABASE_HELPER=1 INSTALL=deploy bash supabase/scripts/test-local.sh && bash supabase/scripts/test-deploy.sh",
+    "test:live": "playwright test --config playwright.live.config.ts"
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.117.2",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },

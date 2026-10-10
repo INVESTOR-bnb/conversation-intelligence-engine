@@ -25,7 +25,9 @@ Vite prints, with the phone on the same Wi-Fi.
 ```bash
 npm run test:unit   # domain logic: privacy projection + state-machine guards (no browser)
 npm run test:e2e    # builds, serves and runs the Stage-1 acceptance suite at 390px
-npm test            # both
+npm run test:db     # database authorization suite (local PostgreSQL 16)
+npm run test:live   # live sign-in / route-guard suite against a mocked Supabase
+npm test            # all of the above
 ```
 
 Uses `@playwright/test` (pinned to 1.56.1, which matches the Chromium build
@@ -37,6 +39,13 @@ Stage 2A planning: `docs/stage-2a/ARCHITECTURE.md` (approved architecture) and
 
 Database (Stage 2A-1): `supabase/migrations/` and `npm run test:db` (local
 PostgreSQL with a Supabase emulation; requires PostgreSQL 16 binaries).
+
+Live mode (Stage 2A-1): when `VITE_SUPABASE_URL` and
+`VITE_SUPABASE_PUBLISHABLE_KEY` are set at build time (see `.env.example`),
+the app becomes the invite-only staging site (`src/live/`) and the Stage-1
+prototype moves to `/demo` (founder only). Without them, the build is the
+Stage-1 prototype exactly as before. Staging deployment on Cloudflare Pages:
+`docs/stage-2a/STAGING-AUTH-DEPLOY.md`.
 
 ## Demo controls (Stage-1 only)
 

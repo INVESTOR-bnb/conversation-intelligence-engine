@@ -15,9 +15,9 @@ development environment: its network policy blocks `supabase.com` /
    3. `supabase/migrations/20261009120200_stage2a1_functions.sql`
    Do **not** apply anything under `supabase/tests/local/` — that is a local
    emulation of Supabase for testing only.
-3. **Founder account:** Authentication → Users → *Invite user* (your email) →
-   accept and set a password → run `supabase/admin/bootstrap_founder.sql`
-   after replacing the placeholder email.
+3. **Founder account:** follow `STAGING-AUTH-DEPLOY.md` Steps 1–5 (site first,
+   then URL configuration, then a fresh invite, then
+   `supabase/admin/bootstrap_founder.sql` with your email **and** User ID).
 4. **Synthetic clients:** invite two test addresses you control
    (e.g. plus-addresses). Then, signed in as founder through the app/API:
    `founder_create_business('Synthetic Autos A')`, `founder_add_member(...)`.

@@ -53,27 +53,38 @@ for f in "$HERE"/tests/*.test.sql; do
     echo "FAIL $name"; grep -E 'ERROR|FAIL' <<<"$out" | head -5 | sed 's/^/     /'
   fi
 done
-# Administrator bootstrap script: refuses to run unedited; grants founder to an invited user.
-boot="$WORK/bootstrap.sql"
-{ echo "begin; select tests.seed();"
-  cat "$HERE/admin/bootstrap_founder.sql"
-  echo "rollback;"; } > "$boot"
-out="$(run "$boot" || true)"
-if grep -q "Edit v_email before running" <<<"$out"; then
-  pass=$((pass + 1)); echo "PASS admin/bootstrap_founder.sql refuses to run with the placeholder email"
-else
-  failed=$((failed + 1)); echo "FAIL admin/bootstrap_founder.sql ran without being edited"
-fi
-{ echo "begin; select tests.seed();"
-  sed '0,/REPLACE_WITH_FOUNDER_EMAIL/s//invited@synthetic.test/' "$HERE/admin/bootstrap_founder.sql"
-  echo "select tests.ok(exists (select 1 from public.founders where user_id = tests.unassigned()), 'bootstrap grants founder to the invited user');"
-  echo "select tests.login(tests.unassigned()); select tests.is((public.whoami()) ->> 'role', 'FOUNDER', 'bootstrapped user is FOUNDER');"
-  echo "rollback;"; } > "$boot"
-if out="$(run "$boot")"; then
-  n=$(grep -c 'NOTICE:  ok - ' <<<"$out" || true); pass=$((pass + n)); echo "PASS admin/bootstrap_founder.sql ($n assertions)"
-else
-  failed=$((failed + 1)); echo "FAIL admin/bootstrap_founder.sql"; grep -E 'ERROR|FAIL' <<<"$out" | head -3 | sed 's/^/     /'
-fi
+# Administrator bootstrap script (admin/bootstrap_founder.sql).
+UNASSIGNED_ID=00000000-0000-4000-8000-00000000000e
+CLIENT_A_ID=00000000-0000-4000-8000-00000000000a
+# boot_case <name> <email> <user-id> <setup-sql> <expected: GRANTED|refusal text>
+boot_case() {
+  local name="$1" email="$2" uid="$3" setup="$4" expect="$5" f="$WORK/bootstrap.sql"
+  { echo "begin; select tests.seed(); delete from public.founders;"
+    echo "update auth.users set email_confirmed_at = now(), last_sign_in_at = now(), encrypted_password = 'x' where email = 'invited@synthetic.test';"
+    echo "$setup"
+    sed -e "s/REPLACE_WITH_FOUNDER_EMAIL';/$email';/" -e "s/'REPLACE_WITH_FOUNDER_USER_ID';/'$uid';/" "$HERE/admin/bootstrap_founder.sql"
+    if [ "$expect" = GRANTED ]; then
+      echo "select tests.ok(exists (select 1 from public.founders where user_id = '$uid'), 'founder row created');"
+      echo "select tests.ok((select count(*) = 1 from public.audit_log where action = 'FOUNDER_BOOTSTRAPPED'), 'bootstrap is audited');"
+      echo "select tests.login('$uid'); select tests.is((public.whoami()) ->> 'role', 'FOUNDER', 'whoami reports FOUNDER');"
+    fi
+    echo "rollback;"; } > "$f"
+  local out; out="$(run "$f" || true)"
+  if [ "$expect" = GRANTED ]; then
+    if [ "$(grep -c 'NOTICE:  ok - ' <<<"$out")" = 3 ]; then pass=$((pass + 3)); echo "PASS bootstrap: $name"; else failed=$((failed + 1)); echo "FAIL bootstrap: $name"; grep -E 'ERROR|FAIL' <<<"$out" | head -3 | sed 's/^/     /'; fi
+  else
+    if grep -qF "$expect" <<<"$out" && ! grep -q "Founder role granted" <<<"$out"; then pass=$((pass + 1)); echo "PASS bootstrap refuses: $name"; else failed=$((failed + 1)); echo "FAIL bootstrap should refuse: $name"; grep -E 'ERROR|NOTICE' <<<"$out" | head -3 | sed 's/^/     /'; fi
+  fi
+}
+boot_case "unedited placeholders" "REPLACE_WITH_FOUNDER_EMAIL" "REPLACE_WITH_FOUNDER_USER_ID" "" "Edit v_email and v_user_id"
+boot_case "verified invited account" "Invited@Synthetic.test" "$UNASSIGNED_ID" "" GRANTED
+boot_case "email and user ID of different accounts" "invited@synthetic.test" "$CLIENT_A_ID" "" "No account has BOTH"
+boot_case "malformed user ID" "invited@synthetic.test" "not-a-uuid" "" "not a valid user ID"
+boot_case "email not confirmed" "invited@synthetic.test" "$UNASSIGNED_ID" "update auth.users set email_confirmed_at = null where id = '$UNASSIGNED_ID';" "email is not confirmed"
+boot_case "password never set" "invited@synthetic.test" "$UNASSIGNED_ID" "update auth.users set encrypted_password = '' where id = '$UNASSIGNED_ID';" "has not set a password"
+boot_case "never signed in" "invited@synthetic.test" "$UNASSIGNED_ID" "update auth.users set last_sign_in_at = null where id = '$UNASSIGNED_ID';" "never signed in"
+boot_case "client member" "client-a@synthetic.test" "$CLIENT_A_ID" "update auth.users set email_confirmed_at = now(), last_sign_in_at = now(), encrypted_password = 'x' where id = '$CLIENT_A_ID';" "client member"
+boot_case "another founder already exists" "invited@synthetic.test" "$UNASSIGNED_ID" "insert into public.founders (user_id) values (tests.founder());" "A different founder already exists"
 
 echo "== $pass assertions passed; $failed file(s) failed"
 [ "$failed" = 0 ]

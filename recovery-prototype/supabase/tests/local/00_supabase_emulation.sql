@@ -13,6 +13,10 @@ create table auth.users (
   email text unique,
   raw_app_meta_data jsonb not null default '{}'::jsonb,
   raw_user_meta_data jsonb not null default '{}'::jsonb,
+  -- Subset of Supabase auth.users columns used by admin/bootstrap_founder.sql.
+  email_confirmed_at timestamptz,
+  last_sign_in_at timestamptz,
+  encrypted_password text not null default '',
   created_at timestamptz not null default now()
 );
 
