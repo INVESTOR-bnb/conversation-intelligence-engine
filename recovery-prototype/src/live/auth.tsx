@@ -21,6 +21,7 @@ export interface Profile {
   email: string | null;
   role: Role;
   businessName?: string;
+  businessId?: string;
 }
 
 type Status = 'loading' | 'signedOut' | 'signedIn';
@@ -117,6 +118,7 @@ export function AuthProvider({ supabase, children }: { supabase: SupabaseClient;
         email: s.user.email ?? null,
         role: role as Role,
         businessName: (data as { business_name?: string }).business_name,
+        businessId: (data as { business_id?: string }).business_id,
       });
     },
     [supabase],

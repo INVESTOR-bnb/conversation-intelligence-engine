@@ -29,7 +29,11 @@ export interface CleanCase {
 
 export type CaseErrors = Partial<Record<keyof CaseInput, string>>;
 
-export function validateCase(input: CaseInput, today: string = new Date().toISOString().slice(0, 10)): { value?: CleanCase; errors: CaseErrors } {
+export function validateCase(
+  input: CaseInput,
+  today: string = new Date().toISOString().slice(0, 10),
+  source: 'TEXT' | 'SCREENSHOTS' = 'TEXT',
+): { value?: CleanCase; errors: CaseErrors } {
   const errors: CaseErrors = {};
   const reference = input.reference.trim();
   const productService = input.productService.trim();
@@ -52,13 +56,15 @@ export function validateCase(input: CaseInput, today: string = new Date().toISOS
   if (date && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date)))) errors.lastInteractionDate = 'Choose a valid date.';
   else if (date && date > today) errors.lastInteractionDate = 'The last contact cannot be in the future.';
   if (clientContext.length > LIMITS.context) errors.clientContext = `Use at most ${LIMITS.context} characters.`;
-  if (conversation.length < LIMITS.conversationMin) errors.conversation = `Paste the conversation (at least ${LIMITS.conversationMin} characters).`;
+  if (source === 'SCREENSHOTS') {
+    // Screenshots replace the pasted conversation; nothing to check here.
+  } else if (conversation.length < LIMITS.conversationMin) errors.conversation = `Paste the conversation (at least ${LIMITS.conversationMin} characters).`;
   else if (conversation.length > LIMITS.conversationMax) errors.conversation = `The conversation is too long (maximum ${LIMITS.conversationMax.toLocaleString('en')} characters).`;
 
   if (Object.keys(errors).length) return { errors };
   return {
     errors,
-    value: { reference, productService, leadSource: input.leadSource, estimatedValue, lastInteractionDate: date || null, clientContext: clientContext || null, conversation },
+    value: { reference, productService, leadSource: input.leadSource, estimatedValue, lastInteractionDate: date || null, clientContext: clientContext || null, conversation: source === 'SCREENSHOTS' ? '' : conversation },
   };
 }
 

@@ -36,6 +36,8 @@ if [ "${INSTALL:-migrations}" = deploy ]; then
   load "$HERE/deploy/stage2a1_deploy.sql"
   echo "== Install via deploy/stage2a4b_deploy.sql (single transaction)"
   load "$HERE/deploy/stage2a4b_deploy.sql"
+  echo "== Install via deploy/stage2a4c_deploy.sql (single transaction)"
+  load "$HERE/deploy/stage2a4c_deploy.sql"
 else
   echo "== Migrations"
   for f in "$HERE"/migrations/*.sql; do echo "   $(basename "$f")"; load "$f"; done

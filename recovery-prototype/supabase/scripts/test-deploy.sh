@@ -46,7 +46,7 @@ check() { if eval "$2"; then pass=$((pass + 1)); echo "PASS  $1"; else fail=$((f
 # Roles are cluster-wide: use a copy of the emulation whose CREATE ROLEs tolerate re-runs.
 EMU="$WORK/emulation.sql"
 sed 's/^create role \(anon\|authenticated\|service_role\) \(.*\);$/do $r$ begin create role \1 \2; exception when duplicate_object then null; end $r$;/' "$EMULATION" > "$EMU"
-[ "$(grep -c 'duplicate_object' "$EMU")" = 3 ] || { echo "could not prepare emulation copy"; exit 1; }
+[ "$(grep -c 'duplicate_object' "$EMU")" = 4 ] || { echo "could not prepare emulation copy"; exit 1; }
 
 echo "== Generated file"
 check "deploy file matches the three migrations (build --check)" '"$HERE/scripts/build-deploy.sh" --check >/dev/null'

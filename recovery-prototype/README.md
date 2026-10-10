@@ -48,6 +48,8 @@ Stage-1 prototype exactly as before. Staging deployment on Cloudflare Pages:
 `docs/stage-2a/STAGING-AUTH-DEPLOY.md`.
 Stage 2A-4b (client cases, founder case view, founder-only case tables):
 `docs/stage-2a/DEPLOY-STAGE-2A-4B.md`.
+Stage 2A-4c (screenshot intake, private storage, retention runbook):
+`docs/stage-2a/DEPLOY-STAGE-2A-4C.md`.
 
 ## Demo controls (Stage-1 only)
 

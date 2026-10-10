@@ -2,7 +2,7 @@
 // Database-side enforcement of the same rules is tested in supabase/tests/07_onboarding.test.sql.
 
 import { expect, test, type Page } from '@playwright/test';
-import { MOCK_URL, MockSupabase, USERS } from './mockSupabase';
+import { B1, B2, MOCK_URL, MockSupabase, USERS } from './mockSupabase';
 import { ONBOARDING_MESSAGES } from '../../src/live/onboarding';
 
 let mock: MockSupabase;
@@ -131,14 +131,14 @@ test.describe('link client', () => {
     await attempt(USERS.client.id, ONBOARDING_MESSAGES.ALREADY_LINKED);
     await attempt(USERS.founder.id, ONBOARDING_MESSAGES.IS_FOUNDER);
     await attempt('aaaaaaaa-0000-4000-8000-000000000000', ONBOARDING_MESSAGES.USER_NOT_FOUND);
-    expect(mock.members.get(USERS.client.id)).toBe('b1');
+    expect(mock.members.get(USERS.client.id)).toBe(B1);
     expect(mock.audit).toEqual([]);
     // Linking the same account twice: the second attempt is refused.
     await form.getByLabel('Client User ID').fill(USERS.pending.id);
     await form.getByRole('button', { name: 'Link Client' }).click();
     await expect(form.getByRole('status')).toBeVisible();
     await attempt(USERS.pending.id, ONBOARDING_MESSAGES.ALREADY_LINKED);
-    expect([...mock.members.values()].filter((b) => b === 'b2')).toHaveLength(1);
+    expect([...mock.members.values()].filter((b) => b === B2)).toHaveLength(1);
   });
 
   test('invalid link input is explained and nothing is sent', async ({ page }) => {
@@ -158,7 +158,7 @@ test.describe('link client', () => {
     await founderReady(page);
     const form = linkForm(page);
     await form.getByLabel('Business').selectOption({ label: 'Synthetic Academy B' });
-    mock.businesses = mock.businesses.filter((b) => b.id !== 'b2');
+    mock.businesses = mock.businesses.filter((b) => b.id !== B2);
     await form.getByLabel('Client User ID').fill(USERS.pending.id);
     await form.getByRole('button', { name: 'Link Client' }).click();
     await expect(form.getByRole('alert')).toHaveText(ONBOARDING_MESSAGES.BUSINESS_NOT_FOUND);

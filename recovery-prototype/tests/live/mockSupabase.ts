@@ -8,6 +8,10 @@ import type { BrowserContext, Route } from '@playwright/test';
 
 export const MOCK_URL = 'https://mock-project-ref.supabase.co';
 export const MOCK_KEY = 'sb_publishable_TEST_ONLY_not_a_real_key';
+export const B1 = '10000000-0000-4000-8000-0000000000b1';
+export const B2 = '10000000-0000-4000-8000-0000000000b2';
+export const SHOT_BUCKET = 'case-screenshots';
+const SHOT_NAME = /^([0-9a-f-]{36})\/([0-9a-f-]{36})\/(10|[1-9])-([0-9a-f]{64})\.(png|jpg)$/;
 
 const b64url = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
 export const makeJwt = (sub: string, email: string, expOffset = 3600) =>
@@ -34,21 +38,29 @@ export class MockSupabase {
   failRpc: false | 'server' | 'network' = false;
   dailyLimit = 20;
   businesses: { id: string; name: string; industry: string; currency: string }[] = [
-    { id: 'b1', name: 'Synthetic Autos A', industry: 'Automotive', currency: 'NGN' },
-    { id: 'b2', name: 'Synthetic Academy B', industry: 'Training', currency: 'NGN' },
+    { id: B1, name: 'Synthetic Autos A', industry: 'Automotive', currency: 'NGN' },
+    { id: B2, name: 'Synthetic Academy B', industry: 'Training', currency: 'NGN' },
   ];
   /** user id -> business id (a client belongs to exactly one business). */
-  members = new Map<string, string>([[USERS.client.id, 'b1']]);
+  members = new Map<string, string>([[USERS.client.id, B1]]);
   audit: { action: string; business_id: string }[] = [];
   /** Makes client_submit_case fail once: 'server' = HTTP 500, 'lost' = succeeds on the server but the response is lost. */
   failSubmit: false | 'server' | 'lost' = false;
   /** Makes client_create_case fail once after storing the case (response lost). */
   loseCreateResponse = false;
   cases: MockCase[] = [
-    mockCase('a0000000-0000-4000-8000-000000000101', 'b1', 'P-101', 'Synthetic Camry', 'SUBMITTED', 'Prospect: Is the Camry available?\nBusiness: Yes, synthetic.'),
-    mockCase('a0000000-0000-4000-8000-000000000102', 'b1', 'P-102', 'Synthetic Hilux', 'AWAITING_ADMIN_REVIEW', 'Prospect: Price of the Hilux?\nBusiness: Synthetic price.', 'CONTACT_RESTRICTION'),
-    mockCase('a0000000-0000-4000-8000-000000000201', 'b2', 'C-201', 'Synthetic Course', 'SUBMITTED', 'Prospect: When does the course start?'),
+    mockCase('a0000000-0000-4000-8000-000000000101', B1, 'P-101', 'Synthetic Camry', 'SUBMITTED', 'Prospect: Is the Camry available?\nBusiness: Yes, synthetic.'),
+    mockCase('a0000000-0000-4000-8000-000000000102', B1, 'P-102', 'Synthetic Hilux', 'AWAITING_ADMIN_REVIEW', 'Prospect: Price of the Hilux?\nBusiness: Synthetic price.', 'CONTACT_RESTRICTION'),
+    mockCase('a0000000-0000-4000-8000-000000000201', B2, 'C-201', 'Synthetic Course', 'SUBMITTED', 'Prospect: When does the course start?'),
   ];
+  /** Stored files: name -> record (what Supabase Storage keeps). */
+  objects = new Map<string, { owner: string; size: number; mime: string; bytes: Buffer }>();
+  /** case_screenshots rows. */
+  shotRows: { case_id: string; business_id: string; position: number; storage_path: string; mime_type: string; size_bytes: number; sha256: string; file_deleted_at: string | null }[] = [];
+  /** Upload failure injection by position: 'server' (nothing stored) or 'lost' (stored, response lost). Used once. */
+  failUpload = new Map<number, 'server' | 'lost'>();
+  /** Loses the response of the next client_finalize_screenshots (after it ran). */
+  loseFinalizeResponse = false;
   private n = 0;
 
   user(id: string) {
@@ -91,8 +103,8 @@ export class MockSupabase {
 
     const bearer = (req.headers()['authorization'] ?? '').replace(/^Bearer /, '');
     const uid = this.tokens.get(bearer);
-    const body = req.postData() ? JSON.parse(req.postData()!) : {};
     const p = url.pathname;
+    const body = p.startsWith('/storage/') ? {} : req.postData() ? JSON.parse(req.postData()!) : {};
 
     if (p === '/auth/v1/token' && url.searchParams.get('grant_type') === 'password') {
       // Real Supabase Auth takes a few hundred ms. A realistic delay makes tests
@@ -182,11 +194,12 @@ export class MockSupabase {
       const b = body as Record<string, unknown>;
       const existing = this.cases.find((c) => c.business_id === myBusiness && c.idempotency_key === b.p_idempotency_key);
       if (existing) return json(200, existing.id);
+      const source = b.p_conversation_source === 'SCREENSHOTS' ? 'SCREENSHOTS' : 'TEXT';
       const text = String(b.p_conversation_text ?? '').trim();
-      if (text.length < 20) return json(400, { code: 'P0001', message: 'VALIDATION: pasted conversation is too short' });
+      if (source === 'TEXT' && text.length < 20) return json(400, { code: 'P0001', message: 'VALIDATION: pasted conversation is too short' });
       if (this.cases.filter((c) => c.business_id === myBusiness).length >= this.dailyLimit) return json(400, { code: 'P0001', message: 'RATE_LIMITED: daily case limit reached' });
       const c = mockCase(`a0000000-0000-4000-8000-${String(900000000000 + ++this.n)}`, myBusiness, String(b.p_reference), String(b.p_product_service), 'DRAFT', text);
-      Object.assign(c, { idempotency_key: String(b.p_idempotency_key), lead_source: b.p_lead_source, estimated_value: b.p_estimated_value ?? null,
+      Object.assign(c, { conversation_source: source, idempotency_key: String(b.p_idempotency_key), lead_source: b.p_lead_source, estimated_value: b.p_estimated_value ?? null,
         last_interaction_date: b.p_last_interaction_date ?? null, client_context: b.p_client_context ?? null, evidence_version: 0, queued_at: null });
       this.cases.push(c);
       this.audit.push({ action: 'CASE_CREATED', business_id: myBusiness });
@@ -198,11 +211,86 @@ export class MockSupabase {
       if (!myBusiness || !c) return json(404, { code: 'P0002', message: 'NOT_FOUND: case not found' });
       if (this.failSubmit === 'server') { this.failSubmit = false; return json(500, { code: 'XX000', message: 'internal error' }); }
       if (c.workflow_state !== 'DRAFT') return json(400, { code: 'P0001', message: 'INVALID_STATE: only draft cases can be submitted' });
+      const shotCount = this.shotRows.filter((r) => r.case_id === c.id).length;
+      if (c.conversation_source === 'SCREENSHOTS' && (shotCount < 1 || shotCount > 10)) return json(400, { code: 'P0001', message: 'VALIDATION: between 1 and 10 screenshots are required' });
       Object.assign(c, { workflow_state: 'SUBMITTED', evidence_version: c.evidence_version + 1, queued_at: new Date().toISOString() });
       this.audit.push({ action: 'CASE_SUBMITTED', business_id: c.business_id });
       if (this.failSubmit === 'lost') { this.failSubmit = false; return route.abort('failed'); }
       return route.fulfill({ status: 204, headers: cors });
     }
+    // ---- Stage 2A-4c: Storage (same rules as the storage.objects policies) and the two functions.
+    const rls = () => json(400, { statusCode: '403', error: 'Unauthorized', message: 'new row violates row-level security policy' });
+    if (p.startsWith(`/storage/v1/object/${SHOT_BUCKET}/`)) {
+      const name = decodeURIComponent(p.slice(`/storage/v1/object/${SHOT_BUCKET}/`.length));
+      if (req.method() === 'GET') {
+        const o = this.objects.get(name);
+        if (!isFounder || !o) return json(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
+        return route.fulfill({ status: 200, headers: { ...cors, 'content-type': o.mime }, body: o.bytes });
+      }
+      if (req.method() !== 'POST' || req.headers()['x-upsert'] === 'true') return rls();
+      const m = SHOT_NAME.exec(name);
+      const c = m && this.cases.find((x) => x.id === m[2] && x.business_id === m[1]);
+      const prefix = m ? `${m[1]}/${m[2]}/` : '';
+      const used = (pos: string) => [...this.objects.keys()].some((k) => k.startsWith(`${prefix}${pos}-`));
+      if (!m || m[1] !== myBusiness || !c || c.workflow_state !== 'DRAFT' || c.conversation_source !== 'SCREENSHOTS' || used(m[3])
+          || [...this.objects.keys()].filter((k) => k.startsWith(prefix)).length >= 10) return rls();
+      const bytes = req.postDataBuffer() ?? Buffer.alloc(0);
+      const mime = (req.headers()['content-type'] ?? '').split(';')[0];
+      if (bytes.length > 5 * 1024 * 1024) return json(400, { statusCode: '413', error: 'Payload too large', message: 'The object exceeded the maximum allowed size' });
+      if (!['image/png', 'image/jpeg'].includes(mime)) return json(400, { statusCode: '415', error: 'invalid_mime_type', message: `mime type ${mime} is not supported` });
+      const fail = this.failUpload.get(Number(m[3]));
+      if (fail) this.failUpload.delete(Number(m[3]));
+      if (fail === 'server') return json(500, { statusCode: '500', error: 'internal', message: 'internal error' });
+      this.objects.set(name, { owner: uid, size: bytes.length, mime, bytes });
+      if (fail === 'lost') return route.abort('failed');
+      return json(200, { Key: `${SHOT_BUCKET}/${name}`, Id: name });
+    }
+    const ownCase = (id: unknown) => this.cases.find((x) => x.id === id && x.business_id === myBusiness);
+    const filesOf = (c: MockCase) => [...this.objects.entries()].filter(([k]) => k.startsWith(`${c.business_id}/${c.id}/`)).map(([k, o]) => {
+      const m = SHOT_NAME.exec(k);
+      return { name: k, position: m ? Number(m[3]) : null, sha256: m ? m[4] : null, ext: m ? m[5] : null, ...o };
+    });
+    if (p === '/rest/v1/rpc/client_screenshot_status') {
+      const c = myBusiness ? ownCase(body.p_case_id) : undefined;
+      if (!c) return json(404, { code: 'P0002', message: 'NOT_FOUND: case not found' });
+      return json(200, { case_id: c.id, source: c.conversation_source, is_draft: c.workflow_state === 'DRAFT',
+        files: filesOf(c).map((f) => ({ position: f.position, sha256: f.sha256, size: f.size, mime_type: f.mime, registered: this.shotRows.some((r) => r.storage_path === f.name) })),
+        registered_count: this.shotRows.filter((r) => r.case_id === c.id).length });
+    }
+    if (p === '/rest/v1/rpc/client_finalize_screenshots') {
+      const c = myBusiness ? ownCase(body.p_case_id) : undefined;
+      const v = (message: string) => json(400, { code: 'P0001', message });
+      if (!c) return json(404, { code: 'P0002', message: 'NOT_FOUND: case not found' });
+      if (c.workflow_state !== 'DRAFT') return v('INVALID_STATE: only draft cases can take screenshots');
+      if (c.conversation_source !== 'SCREENSHOTS') return v('VALIDATION: this case uses pasted text');
+      const files = filesOf(c);
+      if (!files.length) return v('VALIDATION: no screenshots uploaded');
+      const bad = files.filter((f) => !f.position || f.owner !== uid || f.size < 1 || f.size > 5242880 || f.mime !== (f.ext === 'png' ? 'image/png' : 'image/jpeg'));
+      if (bad.length) return v(`VALIDATION: screenshot failed checks at positions ${bad.map((f) => f.position ?? '?').join(',')}`);
+      const counts = new Map<number, number>();
+      files.forEach((f) => counts.set(f.position!, (counts.get(f.position!) ?? 0) + 1));
+      const dups = [...counts].filter(([, n]) => n > 1).map(([pos]) => pos).sort((a, b) => a - b);
+      if (dups.length) return v(`VALIDATION: conflicting screenshots at positions ${dups.join(',')}`);
+      const max = Math.max(...counts.keys());
+      const gaps = Array.from({ length: max }, (_, i) => i + 1).filter((pos) => !counts.has(pos));
+      if (gaps.length) return v(`VALIDATION: missing screenshots at positions ${gaps.join(',')}`);
+      let added = 0;
+      for (const f of files) {
+        if (this.shotRows.some((r) => r.case_id === c.id && r.position === f.position)) continue;
+        this.shotRows.push({ case_id: c.id, business_id: c.business_id, position: f.position!, storage_path: f.name, mime_type: f.mime, size_bytes: f.size, sha256: f.sha256!, file_deleted_at: null });
+        added++;
+      }
+      if (added) this.audit.push({ action: 'SCREENSHOTS_REGISTERED', business_id: c.business_id });
+      if (this.loseFinalizeResponse) { this.loseFinalizeResponse = false; return route.abort('failed'); }
+      return json(200, { registered: files.length, added });
+    }
+    if (p === '/rest/v1/case_screenshots') {
+      if (!isFounder) return json(200, []);
+      const rows = this.shotRows.filter((r) => filterMatches(url, 'case_id', r.case_id)).sort((a, b) => a.position - b.position)
+        .map((r, i) => ({ id: `s${i}-${r.position}`, position: r.position, storage_path: r.storage_path, mime_type: r.mime_type, size_bytes: r.size_bytes, file_deleted_at: r.file_deleted_at }));
+      return json(200, rows);
+    }
+
     // The two onboarding functions, with the same checks and error texts as the database.
     if (p === '/rest/v1/rpc/founder_create_business') {
       if (!isFounder) return forbidden();
@@ -212,7 +300,7 @@ export class MockSupabase {
       if (name.length < 1 || name.length > 120 || industry.length > 120 || !/^[A-Z]{3}$/.test(currency)) {
         return json(400, { code: '23514', message: 'new row for relation "businesses" violates check constraint "businesses_name_check"' });
       }
-      const id = `b${this.businesses.length + 1}-${++this.n}`;
+      const id = `10000000-0000-4000-8000-${String(100000000000 + ++this.n)}`;
       this.businesses.push({ id, name, industry, currency });
       this.audit.push({ action: 'BUSINESS_CREATED', business_id: id });
       return json(200, id);
@@ -236,7 +324,7 @@ export class MockSupabase {
 export interface MockCase {
   id: string; business_id: string; reference: string; product_service: string; lead_source: unknown; estimated_value: unknown;
   last_interaction_date: unknown; client_context: unknown; workflow_state: string; review_reason: string | null; evidence_version: number;
-  created_at: string; queued_at: string | null; idempotency_key: string; conversation: string;
+  created_at: string; queued_at: string | null; idempotency_key: string; conversation: string; conversation_source: 'TEXT' | 'SCREENSHOTS';
 }
 
 let clock = Date.UTC(2026, 9, 1);
@@ -244,7 +332,7 @@ function mockCase(id: string, business_id: string, reference: string, product_se
   clock += 60_000;
   return { id, business_id, reference, product_service, lead_source: 'Referral', estimated_value: null, last_interaction_date: null, client_context: null,
     workflow_state, review_reason, evidence_version: workflow_state === 'DRAFT' ? 0 : 1, created_at: new Date(clock).toISOString(),
-    queued_at: workflow_state === 'DRAFT' ? null : new Date(clock).toISOString(), idempotency_key: id, conversation };
+    queued_at: workflow_state === 'DRAFT' ? null : new Date(clock).toISOString(), idempotency_key: id, conversation, conversation_source: 'TEXT' };
 }
 
 /** Same mapping as public.client_list_cases(). */

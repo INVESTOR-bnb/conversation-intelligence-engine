@@ -332,3 +332,13 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ---------- live screenshot intake (Stage 2A-4c) ---------- */
+.mode-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+.shot-actions { display: flex; gap: 0.25rem; }
+.shot-actions .shot-remove { flex: 1; }
+.shot-move { min-height: 40px; min-width: 40px; border: 1px solid var(--border); background: #fff; border-radius: var(--radius-sm); font-weight: 700; cursor: pointer; }
+.shot-move:disabled { opacity: 0.4; cursor: default; }
+.shot-state { font-size: 0.75rem; font-weight: 600; color: var(--text-2); }
+.shots-full { list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; }
+.shot-full img { width: 100%; height: auto; border-radius: var(--radius-sm); border: 1px solid var(--border); display: block; }

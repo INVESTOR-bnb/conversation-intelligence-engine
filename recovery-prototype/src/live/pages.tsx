@@ -7,6 +7,9 @@ import { parseAuthCallback } from './authCallback';
 import { caseErrorMessage, clientStatusLabel, founderStateLabel, isAlreadySubmitted, LEAD_SOURCES, LIMITS, newRequestId, validateCase, type CaseErrors } from './cases';
 import { BUSINESS_NAME_MAX, INDUSTRY_MAX, onboardingErrorMessage, validateBusiness, validateLink, type BusinessErrors } from './onboarding';
 import { navigate, safeNext } from './router';
+import { DRAFT_KEY, FounderScreenshots, releaseShots, resultMessage, ResumeDraft, ScreenshotPicker } from './screenshotUi';
+import { completeScreenshotCase, fetchStatus, type ShotState } from './screenshotUpload';
+import { SHOT_MESSAGES, summarizeStatus, type ProcessedShot } from './screenshots';
 
 export const MIN_PASSWORD_LENGTH = 10;
 
@@ -407,7 +410,7 @@ function LinkClientForm({ businesses, onLinked }: { businesses: BusinessRow[]; o
 interface FounderCaseDetail {
   id: string; reference: string; product_service: string; lead_source: string; estimated_value: number | null;
   last_interaction_date: string | null; client_context: string | null; workflow_state: string; evidence_version: number;
-  created_at: string; queued_at: string | null; businesses: { name: string; currency: string } | null;
+  created_at: string; queued_at: string | null; conversation_source: 'TEXT' | 'SCREENSHOTS'; businesses: { name: string; currency: string } | null;
 }
 
 /** Read-only founder view of one case. All text is rendered as plain text (React escapes it; never HTML). */
@@ -421,7 +424,7 @@ export function FounderCasePage({ caseId }: { caseId: string }) {
     let active = true;
     (async () => {
       const [c, m] = await Promise.all([
-        supabase.from('cases').select('id, reference, product_service, lead_source, estimated_value, last_interaction_date, client_context, workflow_state, evidence_version, created_at, queued_at, businesses(name, currency)')
+        supabase.from('cases').select('id, reference, product_service, lead_source, estimated_value, last_interaction_date, client_context, workflow_state, evidence_version, created_at, queued_at, conversation_source, businesses(name, currency)')
           .eq('id', caseId).maybeSingle(),
         supabase.from('case_messages').select('body').eq('case_id', caseId).eq('kind', 'PASTED_CONVERSATION').order('created_at').limit(1),
       ]);
@@ -463,9 +466,15 @@ export function FounderCasePage({ caseId }: { caseId: string }) {
               <p className="message-card faded" data-testid="founder-case-context">{row.client_context}</p>
             </Card>
           )}
-          <Card title="Pasted conversation">
-            {conversation === null ? <EmptyState title="No pasted conversation." /> : <pre className="message-card prospect" data-testid="case-conversation">{conversation}</pre>}
-          </Card>
+          {row.conversation_source === 'SCREENSHOTS' ? (
+            <Card title="Screenshots">
+              <FounderScreenshots caseId={row.id} />
+            </Card>
+          ) : (
+            <Card title="Pasted conversation">
+              {conversation === null ? <EmptyState title="No pasted conversation." /> : <pre className="message-card prospect" data-testid="case-conversation">{conversation}</pre>}
+            </Card>
+          )}
           <Notice>Read-only. Analysis and recommendations arrive in a later Stage 2A step.</Notice>
         </>
       )}
@@ -481,6 +490,8 @@ export function ClientWorkspace() {
   const [error, setError] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<string | null>(null);
+  const [shotDrafts, setShotDrafts] = useState<Record<string, string>>({}); // draft id -> summary label
+  const [resuming, setResuming] = useState<string | null>(null);
   const seq = useRef(0);
 
   // Client-safe projection only (server-side function); clients cannot read case tables directly.
@@ -491,7 +502,21 @@ export function ClientWorkspace() {
     if (err) setError('Could not load your cases.');
     else {
       setError(null);
-      setRows(((data ?? []) as ClientRow[]).map(({ id, reference, product_service, status }) => ({ id, reference, product_service, status })));
+      const list = ((data ?? []) as ClientRow[]).map(({ id, reference, product_service, status }) => ({ id, reference, product_service, status }));
+      setRows(list);
+      // Drafts: screenshot drafts are continued, not just submitted.
+      const found: Record<string, string> = {};
+      for (const r of list.filter((x) => x.status === 'DRAFT')) {
+        const st = await fetchStatus(supabase, r.id);
+        if ('error' in st || st.status.source !== 'SCREENSHOTS') continue;
+        const sum = summarizeStatus(st.status);
+        found[r.id] = sum.unusable ? 'Draft — cannot be completed (conflicting screenshots)' : `Draft — upload incomplete (${sum.uploaded.length} saved)`;
+      }
+      if (mine !== seq.current) return;
+      setShotDrafts(found);
+      let saved: string | null = null;
+      try { saved = localStorage.getItem(DRAFT_KEY); } catch { /* ignore */ }
+      if (saved && found[saved]) setResuming((cur) => cur ?? saved);
     }
   }, [supabase]);
 
@@ -523,9 +548,12 @@ export function ClientWorkspace() {
             <li key={r.id} className="list-row">
               <span>
                 <span className="list-title">{r.reference} — {r.product_service}</span>
-                <span className="muted small" data-testid="client-case-status">{clientStatusLabel(r.status)}</span>
+                <span className="muted small" data-testid="client-case-status">{shotDrafts[r.id] ?? clientStatusLabel(r.status)}</span>
               </span>
-              {r.status === 'DRAFT' && (
+              {r.status === 'DRAFT' && shotDrafts[r.id] && (
+                <Button small variant="secondary" onClick={() => setResuming(resuming === r.id ? null : r.id)}>{resuming === r.id ? 'Close' : 'Continue'}</Button>
+              )}
+              {r.status === 'DRAFT' && !shotDrafts[r.id] && (
                 <Button small onClick={() => void submitDraft(r.id)} disabled={submitting !== null}>{submitting === r.id ? 'Submitting…' : 'Submit'}</Button>
               )}
             </li>
@@ -533,6 +561,10 @@ export function ClientWorkspace() {
         </ul>
       )}
       <ErrorBanner message={rowError} />
+      {resuming && rows?.some((r) => r.id === resuming) && (
+        <ResumeDraft key={resuming} caseId={resuming} reference={rows.find((r) => r.id === resuming)!.reference}
+          onDone={async () => { setResuming(null); await load(); }} />
+      )}
       <NewCaseForm onSaved={load} />
     </Shell>
   );
@@ -550,6 +582,81 @@ function NewCaseForm({ onSaved }: { onSaved: () => Promise<void> }) {
   // One request ID per case being entered. Kept across retries so a repeated
   // tap or a retry after a dropped connection returns the same case.
   const requestId = useRef(newRequestId());
+  const { profile } = useAuth();
+  const [mode, setMode] = useState<'TEXT' | 'SCREENSHOTS'>('TEXT');
+  const [shots, setShots] = useState<ProcessedShot[]>([]);
+  const [shotStates, setShotStates] = useState<Record<string, ShotState>>({});
+  const [startOver, setStartOver] = useState(false);
+  const shotRequestId = useRef(newRequestId());
+  const assigned = useRef(new Map<string, number>());
+  const shotsRef = useRef(shots);
+  shotsRef.current = shots;
+  useEffect(() => () => releaseShots(shotsRef.current), []);
+
+  const submitScreenshots = async () => {
+    setError(null);
+    setSuccess(null);
+    const { value, errors: errs } = validateCase(form, undefined, 'SCREENSHOTS');
+    setErrors(errs);
+    if (!value) return;
+    if (shots.length === 0) {
+      setError(SHOT_MESSAGES.NONE);
+      return;
+    }
+    if (!profile?.businessId) {
+      setError(caseErrorMessage({ code: '42501' }));
+      return;
+    }
+    setBusy(true);
+    const created = await supabase.rpc('client_create_case', {
+      p_idempotency_key: shotRequestId.current,
+      p_reference: value.reference,
+      p_product_service: value.productService,
+      p_lead_source: value.leadSource,
+      p_conversation_source: 'SCREENSHOTS',
+      p_conversation_text: null,
+      p_estimated_value: value.estimatedValue,
+      p_last_interaction_date: value.lastInteractionDate,
+      p_client_context: value.clientContext,
+    });
+    if (created.error || typeof created.data !== 'string') {
+      setError(caseErrorMessage(created.error));
+      setBusy(false);
+      return;
+    }
+    try { localStorage.setItem(DRAFT_KEY, created.data); } catch { /* ignore */ }
+    const r = await completeScreenshotCase(supabase, {
+      businessId: profile.businessId, caseId: created.data, shots, assigned: assigned.current,
+      onState: (id, st) => setShotStates((m) => ({ ...m, [id]: st })),
+    });
+    if (r.ok) {
+      try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
+      setSuccess(`Case ${value.reference} submitted for review with ${shots.length} screenshot${shots.length === 1 ? '' : 's'}.`);
+      releaseShots(shots);
+      setShots([]);
+      setShotStates({});
+      setForm(EMPTY_CASE);
+      setErrors({});
+      setStartOver(false);
+      shotRequestId.current = newRequestId();
+      assigned.current = new Map();
+    } else {
+      setError(resultMessage(r));
+      setStartOver(r.kind === 'conflict' || r.kind === 'invalid');
+    }
+    await onSaved();
+    setBusy(false);
+  };
+
+  // A draft that can never be completed: keep the selected screenshots, start a fresh case.
+  const startNewCase = () => {
+    try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
+    shotRequestId.current = newRequestId();
+    assigned.current = new Map();
+    setShotStates({});
+    setStartOver(false);
+    setError(null);
+  };
   const set = (k: keyof typeof EMPTY_CASE) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   return (
@@ -560,6 +667,10 @@ function NewCaseForm({ onSaved }: { onSaved: () => Promise<void> }) {
       onSubmit={async (e) => {
         e.preventDefault();
         if (busy) return;
+        if (mode === 'SCREENSHOTS') {
+          await submitScreenshots();
+          return;
+        }
         setError(null);
         setSuccess(null);
         const { value, errors: errs } = validateCase(form);
@@ -620,12 +731,28 @@ function NewCaseForm({ onSaved }: { onSaved: () => Promise<void> }) {
       <Field label="Context for the reviewer" optional error={errors.clientContext}>
         {(id, d) => <textarea id={id} aria-describedby={d} rows={3} value={form.clientContext} onChange={set('clientContext')} />}
       </Field>
-      <Field label="Pasted conversation" hint="Paste a made-up WhatsApp conversation, oldest message first." error={errors.conversation}>
-        {(id, d) => <textarea id={id} aria-describedby={d} rows={8} value={form.conversation} onChange={set('conversation')} />}
-      </Field>
+      <div className="mode-toggle" role="group" aria-label="How will you share the conversation?">
+        <button type="button" className={`btn btn-small ${mode === 'TEXT' ? 'btn-primary' : 'btn-secondary'}`} aria-pressed={mode === 'TEXT'} disabled={busy} onClick={() => setMode('TEXT')}>Paste conversation</button>
+        <button type="button" className={`btn btn-small ${mode === 'SCREENSHOTS' ? 'btn-primary' : 'btn-secondary'}`} aria-pressed={mode === 'SCREENSHOTS'} disabled={busy} onClick={() => setMode('SCREENSHOTS')}>Upload screenshots</button>
+      </div>
+      {mode === 'TEXT' ? (
+        <Field label="Pasted conversation" hint="Paste a made-up WhatsApp conversation, oldest message first." error={errors.conversation}>
+          {(id, d) => <textarea id={id} aria-describedby={d} rows={8} value={form.conversation} onChange={set('conversation')} />}
+        </Field>
+      ) : (
+        <>
+          <Notice tone="warn">Synthetic screenshots only — no real customer conversations.</Notice>
+          <ScreenshotPicker shots={shots} onChange={setShots} states={shotStates} locked={busy || assigned.current.size > 0} />
+        </>
+      )}
       <ErrorBanner message={error} />
       <SuccessNote message={success} />
-      <Button type="submit" block disabled={busy}>{busy ? 'Submitting…' : 'Submit Case'}</Button>
+      {mode === 'SCREENSHOTS' && startOver && (
+        <Button block variant="secondary" onClick={startNewCase} disabled={busy}>Start a New Case With These Screenshots</Button>
+      )}
+      <Button type="submit" block disabled={busy || (mode === 'SCREENSHOTS' && startOver)}>
+        {busy ? 'Submitting…' : mode === 'SCREENSHOTS' && assigned.current.size > 0 ? 'Retry' : 'Submit Case'}
+      </Button>
     </form>
   );
 }

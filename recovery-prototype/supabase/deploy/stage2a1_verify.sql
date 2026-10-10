@@ -18,6 +18,8 @@ api_functions(name) as (values
   ('client_list_cases'), ('client_get_case'), ('founder_start_analysis'), ('founder_abandon_analysis'),
   ('founder_request_reanalysis'), ('founder_approve'), ('founder_stop_contact'), ('founder_add_restriction'),
   ('founder_dismiss_ai_restriction'), ('founder_add_note'), ('founder_pause_case')),
+-- Functions added by later stages (allowed, not required, by this 2A-1 check).
+later_api_functions(name) as (values ('client_screenshot_status'), ('client_finalize_screenshots')),
 -- Supabase's pre-existing auto-RLS helper (event-trigger function; cannot be
 -- called directly). Excluded from the API-privilege checks, checked in row 20.
 helper as (
@@ -89,11 +91,12 @@ checks(ord, check_name, status, detail) as (
   union all
   select 10, 'authenticated executes exactly the API functions',
     case when not exists (select 1 from pub_fn f where has_function_privilege('authenticated', f.oid, 'EXECUTE')
-                            and f.proname not in (select name from api_functions))
-          and (select count(*) from pub_fn f where has_function_privilege('authenticated', f.oid, 'EXECUTE')) = 20
+                            and f.proname not in (select name from api_functions union all select name from later_api_functions))
+          and (select count(*) from pub_fn f where has_function_privilege('authenticated', f.oid, 'EXECUTE')
+                 and f.proname in (select name from api_functions)) = 20
          then 'PASS' else 'FAIL' end,
     coalesce((select 'unexpected: ' || string_agg(proname, ', ') from pub_fn f where has_function_privilege('authenticated', f.oid, 'EXECUTE')
-              and f.proname not in (select name from api_functions)), 'as expected')
+              and f.proname not in (select name from api_functions union all select name from later_api_functions)), 'as expected')
   union all
   select 11, 'internal_complete_analysis is server-side only',
     case when exists (select 1 from pub_fn where proname = 'internal_complete_analysis'
@@ -104,7 +107,8 @@ checks(ord, check_name, status, detail) as (
   union all
   select 12, 'Private helpers: authenticated runs only role checks',
     case when coalesce((select string_agg(proname, ',' order by proname) from all_fn
-                        where nspname = 'private' and has_function_privilege('authenticated', oid, 'EXECUTE')), '') = 'is_founder,is_member'
+                        where nspname = 'private' and has_function_privilege('authenticated', oid, 'EXECUTE')), '')
+           in ('is_founder,is_member', 'is_founder,is_member,screenshot_upload_allowed') -- the latter once Stage 2A-4c is deployed
          then 'PASS' else 'FAIL' end,
     coalesce((select string_agg(proname, ',' order by proname) from all_fn where nspname = 'private' and has_function_privilege('authenticated', oid, 'EXECUTE')), 'none')
   union all

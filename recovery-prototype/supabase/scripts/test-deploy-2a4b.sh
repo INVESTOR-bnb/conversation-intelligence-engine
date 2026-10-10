@@ -40,7 +40,7 @@ check() { if eval "$2"; then pass=$((pass + 1)); echo "PASS  $1"; else fail=$((f
 
 EMU="$WORK/emulation.sql"
 sed 's/^create role \(anon\|authenticated\|service_role\) \(.*\);$/do $r$ begin create role \1 \2; exception when duplicate_object then null; end $r$;/' "$EMULATION" > "$EMU"
-[ "$(grep -c 'duplicate_object' "$EMU")" = 3 ] || { echo "could not prepare emulation copy"; exit 1; }
+[ "$(grep -c 'duplicate_object' "$EMU")" = 4 ] || { echo "could not prepare emulation copy"; exit 1; }
 
 # new_db [helper] [no2a1]: emulation (+ optional Supabase helper) + Stage 2A-1.
 new_db() {
