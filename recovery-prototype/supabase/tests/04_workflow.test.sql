@@ -9,7 +9,7 @@ select public.client_create_case('20000000-0000-4000-8000-000000000001', 'P-1', 
   'Prospect: Is the car available?' || chr(10) || 'Business: Yes.') as case1 \gset
 select tests.is(public.client_create_case('20000000-0000-4000-8000-000000000001', 'P-1 retry', 'Different', 'Google', 'TEXT',
   'Prospect: a retried submission with other text'), :'case1'::uuid, 'same idempotency key returns the same case (no duplicate)');
-select tests.is(tests.count('select 1 from public.cases'), 1::bigint, 'retry created no second case');
+select tests.is(tests.count('select 1 from public.client_list_cases()'), 1::bigint, 'retry created no second case');
 select tests.is((select status from public.client_list_cases() where id = :'case1'), 'DRAFT', 'new case is DRAFT');
 select tests.throws($$select public.client_create_case(gen_random_uuid(), 'P', 'X', 'Referral', 'TEXT', 'too short')$$, '^VALIDATION', 'pasted conversation must be long enough');
 select tests.throws($$select public.client_create_case(gen_random_uuid(), 'P', 'X', 'Billboard', 'TEXT', 'Prospect: long enough synthetic text')$$, 'lead_source', 'unknown lead source rejected');

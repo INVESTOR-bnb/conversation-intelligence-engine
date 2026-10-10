@@ -1,9 +1,10 @@
 // Live (authenticated) pages. Reuses the Stage-1 UI building blocks; no redesign.
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Button, Card, EmptyState, ErrorBanner, Field, Notice, ScreenHeader } from '../components/ui';
+import { Button, Card, EmptyState, ErrorBanner, Field, formatDate, Notice, ScreenHeader } from '../components/ui';
 import { useAuth } from './auth';
 import { parseAuthCallback } from './authCallback';
+import { caseErrorMessage, clientStatusLabel, founderStateLabel, isAlreadySubmitted, LEAD_SOURCES, LIMITS, newRequestId, validateCase, type CaseErrors } from './cases';
 import { BUSINESS_NAME_MAX, INDUSTRY_MAX, onboardingErrorMessage, validateBusiness, validateLink, type BusinessErrors } from './onboarding';
 import { navigate, safeNext } from './router';
 
@@ -199,12 +200,13 @@ export function NotFound() {
 }
 
 interface BusinessRow { id: string; name: string; industry: string; currency: string }
+interface FounderCaseRow { id: string; reference: string; product_service: string; workflow_state: string; created_at: string; businesses: { name: string } | null }
 
 export function FounderWorkspace() {
   const { supabase, profile } = useAuth();
   const [businesses, setBusinesses] = useState<BusinessRow[] | null>(null);
   const [memberCounts, setMemberCounts] = useState<Record<string, number>>({});
-  const [caseCount, setCaseCount] = useState<number | null>(null);
+  const [cases, setCases] = useState<FounderCaseRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const seq = useRef(0);
 
@@ -214,7 +216,9 @@ export function FounderWorkspace() {
     const [b, m, c] = await Promise.all([
       supabase.from('businesses').select('id, name, industry, currency').order('name'),
       supabase.from('business_members').select('business_id'),
-      supabase.from('cases').select('id', { count: 'exact', head: true }),
+      // Drafts are the client's unfinished work; the founder sees submitted cases.
+      supabase.from('cases').select('id, reference, product_service, workflow_state, created_at, businesses(name)')
+        .neq('workflow_state', 'DRAFT').order('created_at', { ascending: false }).limit(100),
     ]);
     if (mine !== seq.current) return;
     if (b.error || m.error || c.error) {
@@ -226,7 +230,7 @@ export function FounderWorkspace() {
     const counts: Record<string, number> = {};
     for (const r of (m.data ?? []) as { business_id: string }[]) counts[r.business_id] = (counts[r.business_id] ?? 0) + 1;
     setMemberCounts(counts);
-    setCaseCount(c.count ?? 0);
+    setCases((c.data ?? []) as unknown as FounderCaseRow[]);
   }, [supabase]);
 
   useEffect(() => {
@@ -242,7 +246,7 @@ export function FounderWorkspace() {
       <ErrorBanner message={error} />
       <div className="stats">
         <div className="stat"><span className="stat-num" data-testid="founder-business-count">{businesses ? businesses.length : '…'}</span><span className="stat-label">Businesses</span></div>
-        <div className="stat"><span className="stat-num" data-testid="founder-case-count">{caseCount ?? '…'}</span><span className="stat-label">Cases</span></div>
+        <div className="stat"><span className="stat-num" data-testid="founder-case-count">{cases ? cases.length : '…'}</span><span className="stat-label">Submitted cases</span></div>
       </div>
       <Card title="Businesses">
         {businesses && businesses.length === 0 ? (
@@ -262,9 +266,25 @@ export function FounderWorkspace() {
           </ul>
         )}
       </Card>
+      <Card title="Submitted cases">
+        {cases && cases.length === 0 ? (
+          <EmptyState title="No submitted cases yet." />
+        ) : (
+          <ul className="list" data-testid="founder-case-list">
+            {(cases ?? []).map((c) => (
+              <li key={c.id} className="list-row">
+                <a href={`/app/founder/case/${c.id}`} onClick={(e) => { e.preventDefault(); navigate(`/app/founder/case/${c.id}`); }}>
+                  <span className="list-title">{c.reference} — {c.product_service}</span>
+                  <span className="muted small">{c.businesses?.name ?? 'Unknown business'} · {founderStateLabel(c.workflow_state)} · {formatDate(c.created_at)}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
       <CreateBusinessForm onCreated={load} />
       <LinkClientForm businesses={businesses ?? []} onLinked={load} />
-      <Notice>Use synthetic businesses and test accounts only. The live case workflow arrives in later Stage 2A steps.</Notice>
+      <Notice>Use synthetic businesses, test accounts and made-up conversations only. Analysis and recommendations arrive in later Stage 2A steps.</Notice>
       <Button block variant="secondary" onClick={() => { window.location.href = '/demo'; }}>Open Stage-1 prototype (mock data)</Button>
     </Shell>
   );
@@ -384,25 +404,112 @@ function LinkClientForm({ businesses, onLinked }: { businesses: BusinessRow[]; o
   );
 }
 
+interface FounderCaseDetail {
+  id: string; reference: string; product_service: string; lead_source: string; estimated_value: number | null;
+  last_interaction_date: string | null; client_context: string | null; workflow_state: string; evidence_version: number;
+  created_at: string; queued_at: string | null; businesses: { name: string; currency: string } | null;
+}
+
+/** Read-only founder view of one case. All text is rendered as plain text (React escapes it; never HTML). */
+export function FounderCasePage({ caseId }: { caseId: string }) {
+  const { supabase } = useAuth();
+  const [row, setRow] = useState<FounderCaseDetail | null | undefined>(undefined);
+  const [conversation, setConversation] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const [c, m] = await Promise.all([
+        supabase.from('cases').select('id, reference, product_service, lead_source, estimated_value, last_interaction_date, client_context, workflow_state, evidence_version, created_at, queued_at, businesses(name, currency)')
+          .eq('id', caseId).maybeSingle(),
+        supabase.from('case_messages').select('body').eq('case_id', caseId).eq('kind', 'PASTED_CONVERSATION').order('created_at').limit(1),
+      ]);
+      if (!active) return;
+      if (c.error || m.error) {
+        setError('Could not load this case.');
+        return;
+      }
+      setRow((c.data as unknown as FounderCaseDetail | null) ?? null);
+      setConversation(((m.data ?? []) as { body: string }[])[0]?.body ?? null);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [supabase, caseId]);
+
+  const back = () => navigate('/app/founder');
+  return (
+    <Shell>
+      <ScreenHeader title={row ? `${row.reference} — ${row.product_service}` : 'Case'} subtitle={row?.businesses?.name} onBack={back} backLabel="Founder workspace" />
+      <ErrorBanner message={error} />
+      {row === undefined && !error && <p className="muted" role="status">Loading…</p>}
+      {row === null && <EmptyState title="Case not found." />}
+      {row && (
+        <>
+          <Card title="Details">
+            <dl className="kv" data-testid="founder-case-details">
+              <div><dt>Status</dt><dd>{founderStateLabel(row.workflow_state)}</dd></div>
+              <div><dt>Lead source</dt><dd>{row.lead_source}</dd></div>
+              <div><dt>Estimated value</dt><dd>{row.estimated_value == null ? '—' : `${row.businesses?.currency ?? ''} ${Number(row.estimated_value).toLocaleString('en')}`}</dd></div>
+              <div><dt>Last contact</dt><dd>{formatDate(row.last_interaction_date)}</dd></div>
+              <div><dt>Created</dt><dd>{formatDate(row.created_at, true)}</dd></div>
+              <div><dt>Submitted</dt><dd>{formatDate(row.queued_at, true)}</dd></div>
+              <div><dt>Evidence version</dt><dd>{row.evidence_version}</dd></div>
+            </dl>
+          </Card>
+          {row.client_context && (
+            <Card title="Client context">
+              <p className="message-card faded" data-testid="founder-case-context">{row.client_context}</p>
+            </Card>
+          )}
+          <Card title="Pasted conversation">
+            {conversation === null ? <EmptyState title="No pasted conversation." /> : <pre className="message-card prospect" data-testid="case-conversation">{conversation}</pre>}
+          </Card>
+          <Notice>Read-only. Analysis and recommendations arrive in a later Stage 2A step.</Notice>
+        </>
+      )}
+    </Shell>
+  );
+}
+
 interface ClientRow { id: string; reference: string; product_service: string; status: string }
 
 export function ClientWorkspace() {
   const { supabase, profile } = useAuth();
   const [rows, setRows] = useState<ClientRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [rowError, setRowError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState<string | null>(null);
+  const seq = useRef(0);
+
+  // Client-safe projection only (server-side function); clients cannot read case tables directly.
+  const load = useCallback(async () => {
+    const mine = ++seq.current;
+    const { data, error: err } = await supabase.rpc('client_list_cases');
+    if (mine !== seq.current) return;
+    if (err) setError('Could not load your cases.');
+    else {
+      setError(null);
+      setRows(((data ?? []) as ClientRow[]).map(({ id, reference, product_service, status }) => ({ id, reference, product_service, status })));
+    }
+  }, [supabase]);
 
   useEffect(() => {
-    let active = true;
-    // Client-safe projection only (server-side function); no private fields exist in it.
-    supabase.rpc('client_list_cases').then(({ data, error: err }) => {
-      if (!active) return;
-      if (err) setError('Could not load your cases.');
-      else setRows(((data ?? []) as ClientRow[]).map(({ id, reference, product_service, status }) => ({ id, reference, product_service, status })));
-    });
+    void load();
     return () => {
-      active = false;
+      seq.current++;
     };
-  }, [supabase]);
+  }, [load]);
+
+  const submitDraft = async (id: string) => {
+    setRowError(null);
+    setSubmitting(id);
+    const { error: err } = await supabase.rpc('client_submit_case', { p_case_id: id });
+    if (err && !isAlreadySubmitted(err)) setRowError(caseErrorMessage(err));
+    await load();
+    setSubmitting(null);
+  };
 
   return (
     <Shell>
@@ -414,11 +521,111 @@ export function ClientWorkspace() {
         <ul className="list" data-testid="client-cases">
           {rows.map((r) => (
             <li key={r.id} className="list-row">
-              <span><span className="list-title">{r.reference} — {r.product_service}</span><span className="muted small">{r.status.replace('_', ' ').toLowerCase()}</span></span>
+              <span>
+                <span className="list-title">{r.reference} — {r.product_service}</span>
+                <span className="muted small" data-testid="client-case-status">{clientStatusLabel(r.status)}</span>
+              </span>
+              {r.status === 'DRAFT' && (
+                <Button small onClick={() => void submitDraft(r.id)} disabled={submitting !== null}>{submitting === r.id ? 'Submitting…' : 'Submit'}</Button>
+              )}
             </li>
           ))}
         </ul>
       )}
+      <ErrorBanner message={rowError} />
+      <NewCaseForm onSaved={load} />
     </Shell>
+  );
+}
+
+const EMPTY_CASE = { reference: '', productService: '', leadSource: '', estimatedValue: '', lastInteractionDate: '', clientContext: '', conversation: '' };
+
+function NewCaseForm({ onSaved }: { onSaved: () => Promise<void> }) {
+  const { supabase } = useAuth();
+  const [form, setForm] = useState(EMPTY_CASE);
+  const [errors, setErrors] = useState<CaseErrors>({});
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // One request ID per case being entered. Kept across retries so a repeated
+  // tap or a retry after a dropped connection returns the same case.
+  const requestId = useRef(newRequestId());
+  const set = (k: keyof typeof EMPTY_CASE) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  return (
+    <form
+      className="card"
+      noValidate
+      aria-labelledby="new-case-title"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (busy) return;
+        setError(null);
+        setSuccess(null);
+        const { value, errors: errs } = validateCase(form);
+        setErrors(errs);
+        if (!value) return;
+        setBusy(true);
+        const created = await supabase.rpc('client_create_case', {
+          p_idempotency_key: requestId.current,
+          p_reference: value.reference,
+          p_product_service: value.productService,
+          p_lead_source: value.leadSource,
+          p_conversation_source: 'TEXT',
+          p_conversation_text: value.conversation,
+          p_estimated_value: value.estimatedValue,
+          p_last_interaction_date: value.lastInteractionDate,
+          p_client_context: value.clientContext,
+        });
+        if (created.error || typeof created.data !== 'string') {
+          setError(caseErrorMessage(created.error));
+          setBusy(false);
+          return;
+        }
+        const submitted = await supabase.rpc('client_submit_case', { p_case_id: created.data });
+        if (submitted.error && !isAlreadySubmitted(submitted.error)) {
+          setError(`Saved as a draft but not submitted: ${caseErrorMessage(submitted.error)} Tap “Submit Case” again, or use Submit in the list.`);
+        } else {
+          setSuccess(`Case ${value.reference} submitted for review.`);
+          setForm(EMPTY_CASE);
+          setErrors({});
+          requestId.current = newRequestId();
+        }
+        await onSaved();
+        setBusy(false);
+      }}
+    >
+      <h2 className="card-title" id="new-case-title">New case</h2>
+      <Notice tone="warn">Synthetic test data only — do not paste real customer names, phone numbers or conversations.</Notice>
+      <Field label="Reference" hint="Your own label, for example TEST-001." error={errors.reference}>
+        {(id, d) => <input id={id} aria-describedby={d} maxLength={LIMITS.reference + 10} autoComplete="off" value={form.reference} onChange={set('reference')} />}
+      </Field>
+      <Field label="Product or service" error={errors.productService}>
+        {(id, d) => <input id={id} aria-describedby={d} maxLength={LIMITS.product + 10} value={form.productService} onChange={set('productService')} />}
+      </Field>
+      <Field label="Lead source" error={errors.leadSource}>
+        {(id, d) => (
+          <select id={id} aria-describedby={d} value={form.leadSource} onChange={set('leadSource')}>
+            <option value="">Choose…</option>
+            {LEAD_SOURCES.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+        )}
+      </Field>
+      <Field label="Estimated value" optional error={errors.estimatedValue}>
+        {(id, d) => <input id={id} aria-describedby={d} inputMode="decimal" autoComplete="off" value={form.estimatedValue} onChange={set('estimatedValue')} />}
+      </Field>
+      <Field label="Last contact date" optional error={errors.lastInteractionDate}>
+        {(id, d) => <input id={id} aria-describedby={d} type="date" value={form.lastInteractionDate} onChange={set('lastInteractionDate')} />}
+      </Field>
+      <Field label="Context for the reviewer" optional error={errors.clientContext}>
+        {(id, d) => <textarea id={id} aria-describedby={d} rows={3} value={form.clientContext} onChange={set('clientContext')} />}
+      </Field>
+      <Field label="Pasted conversation" hint="Paste a made-up WhatsApp conversation, oldest message first." error={errors.conversation}>
+        {(id, d) => <textarea id={id} aria-describedby={d} rows={8} value={form.conversation} onChange={set('conversation')} />}
+      </Field>
+      <ErrorBanner message={error} />
+      <SuccessNote message={success} />
+      <Button type="submit" block disabled={busy}>{busy ? 'Submitting…' : 'Submit Case'}</Button>
+    </form>
   );
 }

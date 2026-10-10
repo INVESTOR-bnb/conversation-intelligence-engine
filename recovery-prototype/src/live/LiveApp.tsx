@@ -5,8 +5,9 @@ import { App as Stage1App } from '../App';
 import { StoreProvider } from '../state/store';
 import { useAuth, type Role } from './auth';
 import { looksLikeAuthCallback } from './authCallback';
+import { founderCaseIdFromPath } from './cases';
 import {
-  AccountPending, AuthCallbackPage, ClientWorkspace, FounderWorkspace, Loading, LoginPage, NotAuthorized, NotFound, SetPasswordPage,
+  AccountPending, AuthCallbackPage, ClientWorkspace, FounderCasePage, FounderWorkspace, Loading, LoginPage, NotAuthorized, NotFound, SetPasswordPage,
 } from './pages';
 import { navigate, usePathname } from './router';
 
@@ -41,6 +42,9 @@ export function LiveApp() {
   // Supabase redirects to the Site URL (often the root) with tokens or errors
   // in the fragment. Handle that wherever it lands, before any other routing.
   if (looksLikeAuthCallback(window.location.hash, window.location.search)) return <AuthCallbackPage />;
+
+  const founderCaseId = founderCaseIdFromPath(path);
+  if (founderCaseId) return <Protected roles={['FOUNDER']}><FounderCasePage caseId={founderCaseId} /></Protected>;
 
   switch (path) {
     case '/':

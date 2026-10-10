@@ -15,7 +15,8 @@ select public.founder_add_note(:'b_case', 'SECRET-B-FOUNDER-NOTE');
 
 -- ---- Client A
 select tests.login(tests.client_a());
-select tests.is(tests.count('select 1 from public.cases'), 1::bigint, 'A sees exactly its own one case');
+-- Since 2A-4b clients read case tables only through client_* functions (never directly).
+select tests.is(tests.count('select 1 from public.cases'), 0::bigint, 'A reads zero case rows directly (even its own; uses client_list_cases)');
 select tests.is(tests.count(format('select 1 from public.cases where id = %L', :'b_case')), 0::bigint, 'A cannot select B''s case');
 select tests.is(tests.count('select 1 from public.businesses'), 1::bigint, 'A sees only its own business');
 select tests.is(tests.count(format('select 1 from public.case_messages where business_id = %L', tests.biz_b())), 0::bigint, 'A cannot read B''s messages');

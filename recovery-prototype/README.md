@@ -46,6 +46,8 @@ the app becomes the invite-only staging site (`src/live/`) and the Stage-1
 prototype moves to `/demo` (founder only). Without them, the build is the
 Stage-1 prototype exactly as before. Staging deployment on Cloudflare Pages:
 `docs/stage-2a/STAGING-AUTH-DEPLOY.md`.
+Stage 2A-4b (client cases, founder case view, founder-only case tables):
+`docs/stage-2a/DEPLOY-STAGE-2A-4B.md`.
 
 ## Demo controls (Stage-1 only)
 

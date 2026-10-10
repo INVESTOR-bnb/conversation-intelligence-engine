@@ -31,6 +31,7 @@ export class MockSupabase {
   whoamiFails = false;
   /** Makes founder_* calls fail: 'server' = HTTP 500, 'network' = connection dropped. */
   failRpc: false | 'server' | 'network' = false;
+  dailyLimit = 20;
   businesses: { id: string; name: string; industry: string; currency: string }[] = [
     { id: 'b1', name: 'Synthetic Autos A', industry: 'Automotive', currency: 'NGN' },
     { id: 'b2', name: 'Synthetic Academy B', industry: 'Training', currency: 'NGN' },
@@ -38,6 +39,15 @@ export class MockSupabase {
   /** user id -> business id (a client belongs to exactly one business). */
   members = new Map<string, string>([[USERS.client.id, 'b1']]);
   audit: { action: string; business_id: string }[] = [];
+  /** Makes client_submit_case fail once: 'server' = HTTP 500, 'lost' = succeeds on the server but the response is lost. */
+  failSubmit: false | 'server' | 'lost' = false;
+  /** Makes client_create_case fail once after storing the case (response lost). */
+  loseCreateResponse = false;
+  cases: MockCase[] = [
+    mockCase('a0000000-0000-4000-8000-000000000101', 'b1', 'P-101', 'Synthetic Camry', 'SUBMITTED', 'Prospect: Is the Camry available?\nBusiness: Yes, synthetic.'),
+    mockCase('a0000000-0000-4000-8000-000000000102', 'b1', 'P-102', 'Synthetic Hilux', 'AWAITING_ADMIN_REVIEW', 'Prospect: Price of the Hilux?\nBusiness: Synthetic price.', 'CONTACT_RESTRICTION'),
+    mockCase('a0000000-0000-4000-8000-000000000201', 'b2', 'C-201', 'Synthetic Course', 'SUBMITTED', 'Prospect: When does the course start?'),
+  ];
   private n = 0;
 
   user(id: string) {
@@ -139,12 +149,54 @@ export class MockSupabase {
       return json(200, rows);
     }
     if (p === '/rest/v1/cases') {
-      const total = isFounder ? 3 : 0;
-      return json(200, req.method() === 'HEAD' ? undefined : [], { 'content-range': `*/${total}` });
+      // RLS since 2A-4b: case tables are founder-only; clients get no rows.
+      if (!isFounder) return json(200, []);
+      let rows = this.cases.filter((c) => filterMatches(url, 'id', c.id) && filterMatches(url, 'workflow_state', c.workflow_state));
+      rows = rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
+      const withBiz = rows.map((c) => {
+        const b = this.businesses.find((x) => x.id === c.business_id);
+        const { conversation: _c, idempotency_key: _k, ...row } = c;
+        return { ...row, businesses: b ? { name: b.name, currency: b.currency } : null };
+      });
+      return json(200, withBiz, { 'content-range': `0-${Math.max(withBiz.length - 1, 0)}/${withBiz.length}` });
+    }
+    if (p === '/rest/v1/case_messages') {
+      if (!isFounder) return json(200, []);
+      const rows = this.cases.filter((c) => filterMatches(url, 'case_id', c.id)).map((c) => ({ case_id: c.id, kind: 'PASTED_CONVERSATION', body: c.conversation }));
+      return json(200, rows);
     }
     if (p === '/rest/v1/rpc/client_list_cases') {
-      if (myBusiness !== 'b1') return json(200, []);
-      return json(200, [{ id: 'k1', reference: 'P-101', product_service: 'Synthetic Camry', status: 'UNDER_REVIEW', classification: null, approved_message: null }]);
+      if (!myBusiness) return json(200, []);
+      return json(200, this.cases.filter((c) => c.business_id === myBusiness).map((c) => ({
+        id: c.id, reference: c.reference, product_service: c.product_service, status: clientStatus(c.workflow_state),
+        classification: null, deal_situation: null, next_action: null, approved_message: null,
+      })));
+    }
+    if (p === '/rest/v1/rpc/client_create_case') {
+      if (!myBusiness) return json(403, { code: '42501', message: 'FORBIDDEN: client access required' });
+      const b = body as Record<string, unknown>;
+      const existing = this.cases.find((c) => c.business_id === myBusiness && c.idempotency_key === b.p_idempotency_key);
+      if (existing) return json(200, existing.id);
+      const text = String(b.p_conversation_text ?? '').trim();
+      if (text.length < 20) return json(400, { code: 'P0001', message: 'VALIDATION: pasted conversation is too short' });
+      if (this.cases.filter((c) => c.business_id === myBusiness).length >= this.dailyLimit) return json(400, { code: 'P0001', message: 'RATE_LIMITED: daily case limit reached' });
+      const c = mockCase(`a0000000-0000-4000-8000-${String(900000000000 + ++this.n)}`, myBusiness, String(b.p_reference), String(b.p_product_service), 'DRAFT', text);
+      Object.assign(c, { idempotency_key: String(b.p_idempotency_key), lead_source: b.p_lead_source, estimated_value: b.p_estimated_value ?? null,
+        last_interaction_date: b.p_last_interaction_date ?? null, client_context: b.p_client_context ?? null, evidence_version: 0, queued_at: null });
+      this.cases.push(c);
+      this.audit.push({ action: 'CASE_CREATED', business_id: myBusiness });
+      if (this.loseCreateResponse) { this.loseCreateResponse = false; return route.abort('failed'); }
+      return json(200, c.id);
+    }
+    if (p === '/rest/v1/rpc/client_submit_case') {
+      const c = this.cases.find((x) => x.id === body.p_case_id && x.business_id === myBusiness);
+      if (!myBusiness || !c) return json(404, { code: 'P0002', message: 'NOT_FOUND: case not found' });
+      if (this.failSubmit === 'server') { this.failSubmit = false; return json(500, { code: 'XX000', message: 'internal error' }); }
+      if (c.workflow_state !== 'DRAFT') return json(400, { code: 'P0001', message: 'INVALID_STATE: only draft cases can be submitted' });
+      Object.assign(c, { workflow_state: 'SUBMITTED', evidence_version: c.evidence_version + 1, queued_at: new Date().toISOString() });
+      this.audit.push({ action: 'CASE_SUBMITTED', business_id: c.business_id });
+      if (this.failSubmit === 'lost') { this.failSubmit = false; return route.abort('failed'); }
+      return route.fulfill({ status: 204, headers: cors });
     }
     // The two onboarding functions, with the same checks and error texts as the database.
     if (p === '/rest/v1/rpc/founder_create_business') {
@@ -174,4 +226,36 @@ export class MockSupabase {
     }
     return json(404, { message: `mock: no handler for ${req.method()} ${p}` });
   }
+}
+
+export interface MockCase {
+  id: string; business_id: string; reference: string; product_service: string; lead_source: unknown; estimated_value: unknown;
+  last_interaction_date: unknown; client_context: unknown; workflow_state: string; review_reason: string | null; evidence_version: number;
+  created_at: string; queued_at: string | null; idempotency_key: string; conversation: string;
+}
+
+let clock = Date.UTC(2026, 9, 1);
+function mockCase(id: string, business_id: string, reference: string, product_service: string, workflow_state: string, conversation: string, review_reason: string | null = null): MockCase {
+  clock += 60_000;
+  return { id, business_id, reference, product_service, lead_source: 'Referral', estimated_value: null, last_interaction_date: null, client_context: null,
+    workflow_state, review_reason, evidence_version: workflow_state === 'DRAFT' ? 0 : 1, created_at: new Date(clock).toISOString(),
+    queued_at: workflow_state === 'DRAFT' ? null : new Date(clock).toISOString(), idempotency_key: id, conversation };
+}
+
+/** Same mapping as public.client_list_cases(). */
+function clientStatus(state: string) {
+  if (state === 'DRAFT') return 'DRAFT';
+  if (['SUBMITTED', 'ANALYZING', 'AWAITING_ADMIN_REVIEW', 'PROSPECT_REPLIED', 'REANALYZING'].includes(state)) return 'UNDER_REVIEW';
+  if (state === 'CLIENT_ACTION_REQUIRED') return 'ACTION_REQUIRED';
+  if (state === 'WAITING_FOR_PROSPECT') return 'WAITING';
+  return state;
+}
+
+/** Minimal PostgREST filter support: col=eq.X / col=neq.X. */
+function filterMatches(url: URL, col: string, value: string) {
+  const f = url.searchParams.get(col);
+  if (!f) return true;
+  if (f.startsWith('eq.')) return value === f.slice(3);
+  if (f.startsWith('neq.')) return value !== f.slice(4);
+  return true;
 }

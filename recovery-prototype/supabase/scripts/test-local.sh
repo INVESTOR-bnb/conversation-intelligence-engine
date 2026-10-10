@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the Stage 2A-1 migrations and authorization tests against a throwaway
+# Runs the Stage 2A migrations (or deployment files) and authorization tests against a throwaway
 # local PostgreSQL with a minimal Supabase emulation. No network, no secrets.
 # This does NOT prove behaviour on Supabase itself; re-run equivalent tests there.
 set -euo pipefail
@@ -34,6 +34,8 @@ fi
 if [ "${INSTALL:-migrations}" = deploy ]; then
   echo "== Install via deploy/stage2a1_deploy.sql (single transaction)"
   load "$HERE/deploy/stage2a1_deploy.sql"
+  echo "== Install via deploy/stage2a4b_deploy.sql (single transaction)"
+  load "$HERE/deploy/stage2a4b_deploy.sql"
 else
   echo "== Migrations"
   for f in "$HERE"/migrations/*.sql; do echo "   $(basename "$f")"; load "$f"; done

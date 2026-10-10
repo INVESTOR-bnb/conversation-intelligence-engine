@@ -2,6 +2,7 @@
 // keeps its own hash router under /demo.
 
 import { useEffect, useState } from 'react';
+import { founderCaseIdFromPath } from './cases';
 
 export const LIVE_PATHS = ['/login', '/auth/callback', '/auth/set-password', '/app', '/app/founder', '/app/client', '/demo'] as const;
 
@@ -33,5 +34,7 @@ export function safeNext(next: string | null | undefined): string {
   if (!next || !next.startsWith('/') || next.startsWith('//') || next.includes('\\')) return '/app';
   const path = next.split(/[?#]/)[0];
   const allowed = ['/app', '/app/founder', '/app/client', '/demo'];
-  return allowed.includes(path) ? path : '/app';
+  if (allowed.includes(path)) return path;
+  const caseId = founderCaseIdFromPath(path);
+  return caseId ? `/app/founder/case/${caseId}` : '/app';
 }
