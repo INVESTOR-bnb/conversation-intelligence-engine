@@ -15,6 +15,15 @@ Status: **prepared and tested locally — not deployed.** Deploy only after foun
 - **Refuses to run** (and changes nothing) if Stage 2A-1 is already installed,
   if schema `public` already contains other tables/functions/types, or if the
   database is missing Supabase's `auth` schema or API roles.
+- **Tolerates exactly one pre-existing object**: Supabase's auto-RLS helper
+  `public.rls_auto_enable()` with its event trigger `ensure_rls`, and only if it
+  matches the founder-verified definition in
+  `supabase/deploy/known/rls_auto_enable.verified.sql` on every property
+  (body, return type, language, owner, SECURITY DEFINER, `search_path`, single
+  `ensure_rls` trigger on `ddl_command_end`, no other callers or dependents).
+  It is **never modified**: the migrations skip it when tightening function
+  privileges, and the self-check aborts the deployment if its definition,
+  owner, privileges or event trigger changed during deployment.
 - **Self-checks before committing**: if row level security, privileges,
   function permissions or the immutability triggers are not as designed, the
   whole deployment is rolled back.
@@ -48,14 +57,17 @@ the pages below look cramped.
    destructive operations, that is caused by words such as `on delete cascade`
    and `before truncate` in the definitions; the file contains no DROP, DELETE
    or TRUNCATE statements. Confirm to run.
-6. **Expected result:** "Success. No rows returned" (the confirmation notices
-   may not be displayed). Any error means **nothing was changed**: take a
+6. **Expected result:** "Success. No rows returned" (the confirmation notices,
+   including "Verified pre-existing Supabase function public.rls_auto_enable()
+   … left unchanged", may not be displayed). Any error means **nothing was changed**: take a
    screenshot of the message and stop — do not run it again or edit it.
 7. **Verify.** **New query** → copy and paste
    `recovery-prototype/supabase/deploy/stage2a1_verify.sql` the same way → **Run**.
-   The first row must be **OVERALL | PASS** with **0 fail**. Expect
-   "16 pass, 0 fail, 3 info" or "15 pass, 0 fail, 4 info" (row 16 may be INFO
-   on Supabase because its internal admin role has its own default grants).
+   The first row must be **OVERALL | PASS** with **0 fail**. On the staging
+   project expect "17 pass, 0 fail, 3 info" or "16 pass, 0 fail, 4 info"
+   (row 16 may be INFO on Supabase because its internal admin role has its own
+   default grants). **Row 20** must be **PASS**: Supabase's `rls_auto_enable`
+   helper is unchanged since deployment.
    Take a screenshot of the whole result.
 8. **Manual check:** **Project Settings → Data API** (or **API**): the exposed
    schemas must be `public` and `graphql_public` only — **not** `private`.
@@ -78,3 +90,21 @@ behaviour and the authorization rules **as modelled**. They cannot prove:
 | Data API (PostgREST), GraphQL (pg_graphql), Auth JWT claims | Real request-time behaviour of roles and claims (e.g. `service_role` claim for `internal_complete_analysis`) is emulated, not exercised. | Remote API tests with synthetic users (next step) |
 | Deleting auth users later | Deleting a user who has **approved** a recommendation is blocked: the foreign key tries to null `approvals.founder_id`, which the immutability trigger forbids. Intentional (approver identity is kept) but surprising in the dashboard. | Known limitation; erasure procedure due in 2A-2 |
 | Supabase CLI migration history | The SQL Editor does not record migrations in `supabase_migrations.schema_migrations`. If the CLI is used later, mark these three versions as applied (`supabase migration repair --status applied 20261009120000 20261009120100 20261009120200`) before `db push`. | Documented here |
+
+## Change log
+
+**2026-10-10 — pre-existing `public.rls_auto_enable()`.** The first live run
+was refused (correctly) because the staging project contains Supabase's
+auto-RLS helper. After founder verification of its definition and metadata:
+the guard accepts that exact object only; the two blanket `REVOKE ... ON ALL
+FUNCTIONS IN SCHEMA public` statements in the migrations now skip it (so its
+privileges are not altered); the post-install self-check and the verification
+script exempt it from the "no function callable by anon" rule (an
+event-trigger function cannot be called directly — tested) and check it is
+unchanged; regression tests cover the verified function and 15 tampered or
+unexpected variants. Two latent guard bugs were found and fixed at the same
+time: plain-text failure messages raised "malformed array literal" instead of
+the intended explanation (deployment still aborted safely), and the helper
+fingerprint compared privilege lists in their stored order rather than
+canonically.
+

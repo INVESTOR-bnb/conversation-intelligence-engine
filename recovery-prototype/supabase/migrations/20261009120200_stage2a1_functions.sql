@@ -734,7 +734,22 @@ end $$;
 
 -- ---------------------------------------------------------------- execute grants (default deny)
 
-revoke all on all functions in schema public from public, anon, authenticated, service_role;
+-- Revoke on every function in public EXCEPT Supabase's pre-existing auto-RLS
+-- helper public.rls_auto_enable() (an event-trigger function: it cannot be
+-- called directly, and the deployment guard requires it to stay unmodified).
+do $revoke$
+declare
+  v_fn regprocedure;
+begin
+  for v_fn in
+    select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and not (p.proname = 'rls_auto_enable' and p.prorettype = 'event_trigger'::regtype)
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated, service_role', v_fn);
+  end loop;
+end
+$revoke$;
 revoke all on all functions in schema private from public, anon, authenticated, service_role;
 grant execute on function private.is_founder() to authenticated;
 grant execute on function private.is_member(uuid) to authenticated;

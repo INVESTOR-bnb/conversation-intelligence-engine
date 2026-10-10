@@ -12,6 +12,36 @@ MIGRATIONS=(
   20261009120200_stage2a1_functions.sql
 )
 
+KNOWN="$HERE/deploy/known/rls_auto_enable.verified.sql"
+
+# Function body (prosrc) of the verified pre-existing helper: the text between
+# "AS $function$" and the closing "$function$" of the pg_get_functiondef output.
+verified_body() {
+  python3 -I - "$KNOWN" <<'PY'
+import sys
+src = open(sys.argv[1], encoding="utf-8").read()
+start = src.find("AS $function$")
+end = src.rfind("$function$")
+if start < 0 or end <= start + len("AS $function$"):
+    sys.exit("verified definition is malformed: " + sys.argv[1])
+body = src[start + len("AS $function$"):end]
+if "$verified_rls_auto_enable$" in body or "__VERIFIED_RLS_AUTO_ENABLE_BODY__" in body:
+    sys.exit("verified body contains a reserved delimiter")
+sys.stdout.write(body)
+PY
+}
+
+guard() {
+  python3 -I - "$HERE/deploy/parts/10_preflight_guard.sql" <(verified_body) <<'PY'
+import sys
+guard = open(sys.argv[1], encoding="utf-8").read()
+body = open(sys.argv[2], encoding="utf-8").read()
+if guard.count("__VERIFIED_RLS_AUTO_ENABLE_BODY__") != 1 or not body.strip():
+    sys.exit("cannot inject verified body into the preflight guard")
+sys.stdout.write(guard.replace("__VERIFIED_RLS_AUTO_ENABLE_BODY__", body))
+PY
+}
+
 generate() {
   local hashes=()
   for m in "${MIGRATIONS[@]}"; do hashes+=("$(sha256sum "$HERE/migrations/$m" | cut -d' ' -f1)"); done
@@ -28,11 +58,13 @@ generate() {
 -- Source migrations (sha256):
 HEADER
   for i in "${!MIGRATIONS[@]}"; do echo "--   ${MIGRATIONS[$i]}  ${hashes[$i]}"; done
+  echo "-- Verified pre-existing object (left unchanged):"
+  echo "--   deploy/known/rls_auto_enable.verified.sql  $(sha256sum "$KNOWN" | cut -d' ' -f1)"
   echo "-- ==================================================================="
   echo
   echo "begin;"
   echo
-  cat "$HERE/deploy/parts/10_preflight_guard.sql"
+  guard
   for i in "${!MIGRATIONS[@]}"; do
     echo
     echo "-- >>>>>>>>>>>>>>>>>>>> BEGIN MIGRATION ${MIGRATIONS[$i]} >>>>>>>>>>>>>>>>>>>>"
@@ -48,7 +80,9 @@ HEADER
     sep=","; [ "$i" = "$((${#MIGRATIONS[@]} - 1))" ] && sep=""
     echo "  jsonb_build_object('file', '${MIGRATIONS[$i]}', 'sha256', '${hashes[$i]}')$sep"
   done
-  echo ")));"
+  echo "), 'preexisting_rls_auto_enable', case when current_setting('rre.rls_auto_enable_fingerprint', true) <> '' then"
+  echo "  jsonb_build_object('fingerprint', current_setting('rre.rls_auto_enable_fingerprint', true),"
+  echo "                     'body_md5', current_setting('rre.rls_auto_enable_body_md5', true)) end));"
   echo
   echo "commit;"
   echo "-- END OF DEPLOYMENT FILE — if this line is missing, the copy is incomplete: do not run."

@@ -18,8 +18,11 @@ select tests.is(
 
 select tests.is(
   (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-   where n.nspname in ('public', 'private') and has_function_privilege('anon', p.oid, 'EXECUTE')), 0::bigint,
-  'anon cannot execute any public or private function');
+   where n.nspname in ('public', 'private') and has_function_privilege('anon', p.oid, 'EXECUTE')
+     -- Supabase's pre-existing auto-RLS helper keeps its platform grants by design;
+     -- it is an event-trigger function and cannot be called directly.
+     and not (n.nspname = 'public' and p.proname = 'rls_auto_enable' and p.prorettype = 'event_trigger'::regtype)), 0::bigint,
+  'anon cannot execute any public or private function (except the uncallable Supabase event-trigger helper)');
 
 select tests.is(
   (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace

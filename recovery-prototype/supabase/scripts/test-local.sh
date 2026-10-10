@@ -26,6 +26,11 @@ load() { out="$(run "$1")" || { echo "$out"; exit 1; }; }
 
 echo "== Supabase emulation (local only)"
 load "$HERE/tests/local/00_supabase_emulation.sql"
+if [ "${SUPABASE_HELPER:-0}" = 1 ]; then
+  echo "== Pre-existing Supabase helper public.rls_auto_enable() + event trigger ensure_rls"
+  load "$HERE/deploy/known/rls_auto_enable.verified.sql"
+  echo "create event trigger ensure_rls on ddl_command_end execute function public.rls_auto_enable();" > "$WORK/et.sql"; load "$WORK/et.sql"
+fi
 if [ "${INSTALL:-migrations}" = deploy ]; then
   echo "== Install via deploy/stage2a1_deploy.sql (single transaction)"
   load "$HERE/deploy/stage2a1_deploy.sql"

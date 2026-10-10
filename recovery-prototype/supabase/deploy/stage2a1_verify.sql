@@ -18,9 +18,28 @@ api_functions(name) as (values
   ('client_list_cases'), ('client_get_case'), ('founder_start_analysis'), ('founder_abandon_analysis'),
   ('founder_request_reanalysis'), ('founder_approve'), ('founder_stop_contact'), ('founder_add_restriction'),
   ('founder_dismiss_ai_restriction'), ('founder_add_note'), ('founder_pause_case')),
+-- Supabase's pre-existing auto-RLS helper (event-trigger function; cannot be
+-- called directly). Excluded from the API-privilege checks, checked in row 20.
+helper as (
+  select p.oid from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and p.proname = 'rls_auto_enable' and p.pronargs = 0
+    and p.prorettype = 'event_trigger'::regtype),
+helper_now as (
+  select md5(concat_ws('|', p.prosrc, coalesce((select string_agg(a::text, ',' order by a::text) from unnest(p.proacl) a), 'NULL'), pg_get_userbyid(p.proowner), p.prosecdef::text,
+                       coalesce(p.proconfig::text, 'NULL'), et.evtname, et.evtevent, et.evtenabled::text,
+                       coalesce(et.evttags::text, 'NULL'), pg_get_userbyid(et.evtowner))) as fingerprint,
+         md5(btrim(regexp_replace(p.prosrc, '\s+', ' ', 'g'))) as body_md5
+  from pg_proc p join pg_event_trigger et on et.evtfoid = p.oid where p.oid in (select oid from helper)),
+helper_recorded as (
+  select
+    case when to_regclass('public.audit_log') is null then null else
+      (xpath('/row/f/text()', query_to_xml('select details->''preexisting_rls_auto_enable''->>''fingerprint'' as f from public.audit_log where action = ''SCHEMA_DEPLOYED'' order by id desc limit 1', false, true, '')))[1]::text end as fingerprint,
+    case when to_regclass('public.audit_log') is null then null else
+      (xpath('/row/b/text()', query_to_xml('select details->''preexisting_rls_auto_enable''->>''body_md5'' as b from public.audit_log where action = ''SCHEMA_DEPLOYED'' order by id desc limit 1', false, true, '')))[1]::text end as body_md5),
 pub_fn as (
   select p.oid, p.proname, p.prosecdef, p.proconfig
-  from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public'),
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public'
+    and p.oid not in (select oid from helper)),
 all_fn as (
   select p.oid, p.proname, n.nspname, p.prosecdef, p.proconfig
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname in ('public', 'private')),
@@ -63,8 +82,10 @@ checks(ord, check_name, status, detail) as (
     coalesce((select 'missing: ' || string_agg(a.name, ', ') from api_functions a where not exists (select 1 from pub_fn f where f.proname = a.name)), 'none missing')
   union all
   select 9, 'anon cannot execute any function',
-    case when not exists (select 1 from all_fn where has_function_privilege('anon', oid, 'EXECUTE')) then 'PASS' else 'FAIL' end,
-    coalesce((select string_agg(nspname || '.' || proname, ', ') from all_fn where has_function_privilege('anon', oid, 'EXECUTE')), 'none')
+    case when not exists (select 1 from all_fn where has_function_privilege('anon', oid, 'EXECUTE')
+                          and oid not in (select oid from helper)) then 'PASS' else 'FAIL' end,
+    coalesce((select string_agg(nspname || '.' || proname, ', ') from all_fn where has_function_privilege('anon', oid, 'EXECUTE')
+              and oid not in (select oid from helper)), 'none (Supabase event-trigger helper excluded: not callable)')
   union all
   select 10, 'authenticated executes exactly the API functions',
     case when not exists (select 1 from pub_fn f where has_function_privilege('authenticated', f.oid, 'EXECUTE')
@@ -125,6 +146,17 @@ checks(ord, check_name, status, detail) as (
   select 18, 'Data present', 'INFO',
     case when to_regclass('public.cases') is null then 'tables missing'
          else (xpath('/row/c/text()', query_to_xml('select count(*) as c from public.businesses', false, true, '')))[1]::text::bigint || ' business(es), ' || (xpath('/row/c/text()', query_to_xml('select count(*) as c from public.cases', false, true, '')))[1]::text::bigint || ' case(s) — expected 0 right after deployment' end
+  union all
+  select 20, 'Supabase auto-RLS helper rls_auto_enable unchanged since deployment',
+    case when not exists (select 1 from helper) then 'INFO'
+         when (select fingerprint from helper_recorded) is null then 'INFO'
+         when (select fingerprint from helper_now) = (select fingerprint from helper_recorded)
+          and (select body_md5 from helper_now) = (select body_md5 from helper_recorded) then 'PASS'
+         else 'FAIL' end,
+    case when not exists (select 1 from helper) then 'not present in this database'
+         when (select fingerprint from helper_recorded) is null then 'present, but no fingerprint was recorded at deployment'
+         when (select fingerprint from helper_now) = (select fingerprint from helper_recorded) then 'definition, owner, privileges and event trigger ensure_rls identical to deployment time'
+         else 'CHANGED since deployment (definition, privileges, owner or event trigger ensure_rls) — investigate' end
   union all
   select 19, 'API exposure of schema private', 'INFO',
     'cannot be checked from SQL: in Settings → API, exposed schemas must NOT include "private"'

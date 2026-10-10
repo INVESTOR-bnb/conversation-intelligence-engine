@@ -9,8 +9,10 @@
 --
 -- Source migrations (sha256):
 --   20261009120000_stage2a1_schema.sql  7637b2bc224a7295cb5565e3719becd8da3af332099d8341c0d5b9d4210801dc
---   20261009120100_stage2a1_security.sql  396d959e064a3d091afcae41a1837fecb945dc86324bf6d582e92d538b8cd976
---   20261009120200_stage2a1_functions.sql  fb2510a66e1cbe782134ee3ce1d56d776346150734b87b903a88dea1e83fd25d
+--   20261009120100_stage2a1_security.sql  519719283de701e50ecf435afcd223085e6cc8b4730eeedc3931b39106211dc9
+--   20261009120200_stage2a1_functions.sql  59636379ba9ff7ae99e3f433ee953ab4432cfe9691e481ca70cc8e96fcd35c49
+-- Verified pre-existing object (left unchanged):
+--   deploy/known/rls_auto_enable.verified.sql  b21d88816c445d14cef5032c3cd4abaebc1db2001fcb3435022ab6b496182ca4
 -- ===================================================================
 
 begin;
@@ -18,26 +20,65 @@ begin;
 -- ===================================================================
 -- PREFLIGHT GUARD — refuses to deploy unless this is a clean Supabase
 -- database ready for Stage 2A-1. Raising here aborts the transaction.
+--
+-- The only pre-existing object tolerated in schema public is Supabase's
+-- verified auto-RLS helper public.rls_auto_enable() (see
+-- supabase/deploy/known/README.md), and only if every property below matches.
+-- It is never modified: its fingerprint is re-checked before COMMIT.
 -- ===================================================================
 do $preflight$
 declare
   v_problems text[] := '{}';
   v_role text;
   v_existing text;
+  -- Verified body, copied by scripts/build-deploy.sh from
+  -- deploy/known/rls_auto_enable.verified.sql (reference data, never executed).
+  v_expected_body constant text := $verified_rls_auto_enable$
+DECLARE
+  cmd record;
+  tbl name;
+BEGIN
+  FOR cmd IN
+    SELECT *
+    FROM pg_event_trigger_ddl_commands()
+    WHERE command_tag IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+      AND object_type IN ('table','partitioned table')
+  LOOP
+     IF cmd.schema_name IS NOT NULL AND cmd.schema_name IN ('public') AND cmd.schema_name NOT IN ('pg_catalog','information_schema') AND cmd.schema_name NOT LIKE 'pg_toast%' AND cmd.schema_name NOT LIKE 'pg_temp%' THEN
+      BEGIN
+        SELECT c.relname INTO tbl FROM pg_catalog.pg_class c WHERE c.oid = cmd.objid;
+        EXECUTE format('alter table if exists %I.%I enable row level security', cmd.schema_name, tbl);
+        RAISE LOG 'rls_auto_enable: enabled RLS on %', cmd.object_identity;
+      EXCEPTION
+        WHEN OTHERS THEN
+          RAISE LOG 'rls_auto_enable: failed to enable RLS on %', cmd.object_identity;
+      END;
+     ELSE
+        RAISE LOG 'rls_auto_enable: skip % (either system schema or not in enforced list: %.)', cmd.object_identity, cmd.schema_name;
+     END IF;
+  END LOOP;
+END;
+$verified_rls_auto_enable$;
+  v_overloads integer;
+  v_fn record;
+  v_issues text[] := '{}';
+  v_allowed oid;
+  v_fingerprint text := '';
+  v_body_md5 text := '';
 begin
   if current_setting('server_version_num')::int < 150000 then
-    v_problems := v_problems || 'PostgreSQL 15 or newer is required';
+    v_problems := array_append(v_problems, 'PostgreSQL 15 or newer is required'::text);
   end if;
 
   -- Supabase prerequisites the migrations rely on.
   if to_regclass('auth.users') is null then
-    v_problems := v_problems || 'auth.users is missing (is this a Supabase database?)';
+    v_problems := array_append(v_problems, 'auth.users is missing (is this a Supabase database?)'::text);
   end if;
   if to_regprocedure('auth.uid()') is null then
-    v_problems := v_problems || 'auth.uid() is missing';
+    v_problems := array_append(v_problems, 'auth.uid() is missing'::text);
   end if;
   if to_regprocedure('auth.jwt()') is null then
-    v_problems := v_problems || 'auth.jwt() is missing';
+    v_problems := array_append(v_problems, 'auth.jwt() is missing'::text);
   end if;
   foreach v_role in array array['anon', 'authenticated', 'service_role'] loop
     if not exists (select 1 from pg_roles where rolname = v_role) then
@@ -51,8 +92,73 @@ begin
     raise exception 'DEPLOYMENT REFUSED: Stage 2A-1 appears to be already installed (found public.cases, public.founders, public.workflow_state or schema private). Nothing was changed.';
   end if;
 
+  -- Verified pre-existing Supabase helper: public.rls_auto_enable().
+  select count(*) into v_overloads
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+  where n.nspname = 'public' and p.proname = 'rls_auto_enable';
+
+  if v_overloads > 0 then
+    if v_overloads <> 1 then
+      v_issues := v_issues || format('%s overloads exist (expected exactly one)', v_overloads);
+    end if;
+    select p.oid, p.prokind, p.pronargs, p.prorettype, l.lanname, pg_get_userbyid(p.proowner) as owner,
+           p.prosecdef, p.proconfig, p.prosrc, p.proacl
+      into v_fn
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace join pg_language l on l.oid = p.prolang
+    where n.nspname = 'public' and p.proname = 'rls_auto_enable'
+    order by p.pronargs, p.oid
+    limit 1;
+
+    if v_fn.prokind <> 'f' then v_issues := array_append(v_issues, 'not a plain function'::text); end if;
+    if v_fn.pronargs <> 0 then v_issues := array_append(v_issues, 'takes arguments'::text); end if;
+    if v_fn.prorettype <> 'event_trigger'::regtype then
+      v_issues := v_issues || format('returns %s, not event_trigger', v_fn.prorettype::regtype);
+    end if;
+    if v_fn.lanname <> 'plpgsql' then v_issues := v_issues || format('language %s, not plpgsql', v_fn.lanname); end if;
+    if v_fn.owner <> 'postgres' then v_issues := v_issues || format('owned by %s, not postgres', v_fn.owner); end if;
+    if not v_fn.prosecdef then v_issues := array_append(v_issues, 'not SECURITY DEFINER'::text); end if;
+    if v_fn.proconfig is distinct from array['search_path=pg_catalog'] then
+      v_issues := v_issues || format('settings %s, expected exactly {search_path=pg_catalog}', coalesce(v_fn.proconfig::text, '(none)'));
+    end if;
+    if btrim(regexp_replace(v_fn.prosrc, '\s+', ' ', 'g')) <> btrim(regexp_replace(v_expected_body, '\s+', ' ', 'g')) then
+      v_issues := array_append(v_issues, 'function body differs from the verified definition'::text);
+    end if;
+    if (select count(*) from pg_event_trigger et where et.evtfoid = v_fn.oid) <> 1
+       or not exists (select 1 from pg_event_trigger et
+                      where et.evtfoid = v_fn.oid and et.evtname = 'ensure_rls' and et.evtevent = 'ddl_command_end') then
+      v_issues := array_append(v_issues, 'not called by exactly one event trigger named ensure_rls on ddl_command_end'::text);
+    end if;
+    if exists (select 1 from pg_trigger t where t.tgfoid = v_fn.oid) then
+      v_issues := array_append(v_issues, 'called by a table trigger'::text);
+    end if;
+    if exists (select 1 from pg_depend d where d.refclassid = 'pg_proc'::regclass and d.refobjid = v_fn.oid
+               and d.classid <> 'pg_event_trigger'::regclass) then
+      v_issues := array_append(v_issues, 'other objects depend on it'::text);
+    end if;
+
+    if array_length(v_issues, 1) > 0 then
+      v_problems := v_problems || format('public.rls_auto_enable() does not match the verified Supabase definition (%s)',
+                                         array_to_string(v_issues, '; '));
+    else
+      v_allowed := v_fn.oid;
+      -- Fingerprint of everything the deployment must leave untouched.
+      select md5(concat_ws('|', p.prosrc, coalesce((select string_agg(a::text, ',' order by a::text) from unnest(p.proacl) a), 'NULL'), pg_get_userbyid(p.proowner), p.prosecdef::text,
+                           coalesce(p.proconfig::text, 'NULL'), et.evtname, et.evtevent, et.evtenabled::text,
+                           coalesce(et.evttags::text, 'NULL'), pg_get_userbyid(et.evtowner)))
+        into v_fingerprint
+      from pg_proc p join pg_event_trigger et on et.evtfoid = p.oid
+      where p.oid = v_fn.oid;
+      v_body_md5 := md5(btrim(regexp_replace(v_fn.prosrc, '\s+', ' ', 'g')));
+      raise notice 'Verified pre-existing Supabase function public.rls_auto_enable() (event trigger ensure_rls): left unchanged';
+    end if;
+  end if;
+  -- Transaction-local: read by the post-install self-check and the audit entry.
+  perform set_config('rre.rls_auto_enable_fingerprint', coalesce(v_fingerprint, ''), true);
+  perform set_config('rre.rls_auto_enable_body_md5', coalesce(v_body_md5, ''), true);
+
   -- The migrations tighten privileges on everything in schema public, so they
-  -- must not run over unrelated objects. Extension-owned objects are ignored.
+  -- must not run over unrelated objects. Extension-owned objects and the
+  -- verified helper above are ignored; everything else is refused.
   select string_agg(format('%s %s', kind, name), ', ' order by name) into v_existing
   from (
     select case c.relkind when 'r' then 'table' when 'v' then 'view' when 'm' then 'materialized view'
@@ -65,6 +171,7 @@ begin
     select 'function', p.proname::text
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
+      and p.oid is distinct from v_allowed
       and not exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
     union all
     select 'type', t.typname::text
@@ -422,7 +529,22 @@ grant execute on function private.is_member(uuid) to authenticated;
 -- default. Remove that for existing and future objects.
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
-revoke all on all functions in schema public from public, anon, authenticated;
+-- Revoke on every function in public EXCEPT Supabase's pre-existing auto-RLS
+-- helper public.rls_auto_enable() (an event-trigger function: it cannot be
+-- called directly, and the deployment guard requires it to stay unmodified).
+do $revoke$
+declare
+  v_fn regprocedure;
+begin
+  for v_fn in
+    select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and not (p.proname = 'rls_auto_enable' and p.prorettype = 'event_trigger'::regtype)
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated', v_fn);
+  end loop;
+end
+$revoke$;
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
 alter default privileges in schema public revoke all on functions from public, anon, authenticated;
@@ -1230,7 +1352,22 @@ end $$;
 
 -- ---------------------------------------------------------------- execute grants (default deny)
 
-revoke all on all functions in schema public from public, anon, authenticated, service_role;
+-- Revoke on every function in public EXCEPT Supabase's pre-existing auto-RLS
+-- helper public.rls_auto_enable() (an event-trigger function: it cannot be
+-- called directly, and the deployment guard requires it to stay unmodified).
+do $revoke$
+declare
+  v_fn regprocedure;
+begin
+  for v_fn in
+    select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and not (p.proname = 'rls_auto_enable' and p.prorettype = 'event_trigger'::regtype)
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated, service_role', v_fn);
+  end loop;
+end
+$revoke$;
 revoke all on all functions in schema private from public, anon, authenticated, service_role;
 grant execute on function private.is_founder() to authenticated;
 grant execute on function private.is_member(uuid) to authenticated;
@@ -1271,7 +1408,25 @@ do $postcheck$
 declare
   v_problems text[] := '{}';
   v_n bigint;
+  -- Set by the preflight guard only when the verified Supabase helper is present.
+  v_expected_fp text := coalesce(current_setting('rre.rls_auto_enable_fingerprint', true), '');
+  v_helper oid := case when coalesce(current_setting('rre.rls_auto_enable_fingerprint', true), '') <> ''
+                       then to_regprocedure('public.rls_auto_enable()') end;
+  v_now_fp text;
 begin
+  -- The verified pre-existing helper and its event trigger must be exactly as found.
+  if v_expected_fp <> '' then
+    select md5(concat_ws('|', p.prosrc, coalesce((select string_agg(a::text, ',' order by a::text) from unnest(p.proacl) a), 'NULL'), pg_get_userbyid(p.proowner), p.prosecdef::text,
+                         coalesce(p.proconfig::text, 'NULL'), et.evtname, et.evtevent, et.evtenabled::text,
+                         coalesce(et.evttags::text, 'NULL'), pg_get_userbyid(et.evtowner)))
+      into v_now_fp
+    from pg_proc p join pg_event_trigger et on et.evtfoid = p.oid
+    where p.oid = v_helper;
+    if v_now_fp is distinct from v_expected_fp then
+      v_problems := array_append(v_problems, 'public.rls_auto_enable() or event trigger ensure_rls was changed during deployment'::text);
+    end if;
+  end if;
+
   select count(*) into v_n from pg_tables where schemaname = 'public' and not rowsecurity;
   if v_n > 0 then v_problems := v_problems || format('%s public table(s) without RLS', v_n); end if;
 
@@ -1284,7 +1439,8 @@ begin
   if v_n > 0 then v_problems := v_problems || format('authenticated holds %s non-SELECT table privilege(s)', v_n); end if;
 
   select count(*) into v_n from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-  where n.nspname in ('public', 'private') and has_function_privilege('anon', p.oid, 'EXECUTE');
+  where n.nspname in ('public', 'private') and has_function_privilege('anon', p.oid, 'EXECUTE')
+    and p.oid is distinct from v_helper; -- event-trigger function: cannot be called directly
   if v_n > 0 then v_problems := v_problems || format('anon can execute %s function(s)', v_n); end if;
 
   select count(*) into v_n from pg_policies where schemaname = 'public' and cmd <> 'SELECT';
@@ -1293,15 +1449,15 @@ begin
   if has_function_privilege('authenticated',
        'public.internal_complete_analysis(uuid, public.analysis_status, text, text, jsonb, public.classification, text, jsonb, integer, integer, numeric, text)',
        'EXECUTE') then
-    v_problems := v_problems || 'authenticated can execute internal_complete_analysis';
+    v_problems := array_append(v_problems, 'authenticated can execute internal_complete_analysis'::text);
   end if;
 
   select count(*) into v_n from pg_trigger
   where tgname in ('approvals_immutable', 'approvals_no_truncate', 'audit_log_immutable', 'audit_log_no_truncate') and tgenabled <> 'D';
-  if v_n <> 4 then v_problems := v_problems || 'immutability triggers missing or disabled'; end if;
+  if v_n <> 4 then v_problems := array_append(v_problems, 'immutability triggers missing or disabled'::text); end if;
 
   if (select count(*) from public.founders) <> 0 then
-    v_problems := v_problems || 'founders table is not empty';
+    v_problems := array_append(v_problems, 'founders table is not empty'::text);
   end if;
 
   if array_length(v_problems, 1) > 0 then
@@ -1314,9 +1470,11 @@ $postcheck$;
 insert into public.audit_log (actor, actor_role, action, details)
 values (null, 'SYSTEM', 'SCHEMA_DEPLOYED', jsonb_build_object('stage', '2A-1', 'migrations', jsonb_build_array(
   jsonb_build_object('file', '20261009120000_stage2a1_schema.sql', 'sha256', '7637b2bc224a7295cb5565e3719becd8da3af332099d8341c0d5b9d4210801dc'),
-  jsonb_build_object('file', '20261009120100_stage2a1_security.sql', 'sha256', '396d959e064a3d091afcae41a1837fecb945dc86324bf6d582e92d538b8cd976'),
-  jsonb_build_object('file', '20261009120200_stage2a1_functions.sql', 'sha256', 'fb2510a66e1cbe782134ee3ce1d56d776346150734b87b903a88dea1e83fd25d')
-)));
+  jsonb_build_object('file', '20261009120100_stage2a1_security.sql', 'sha256', '519719283de701e50ecf435afcd223085e6cc8b4730eeedc3931b39106211dc9'),
+  jsonb_build_object('file', '20261009120200_stage2a1_functions.sql', 'sha256', '59636379ba9ff7ae99e3f433ee953ab4432cfe9691e481ca70cc8e96fcd35c49')
+), 'preexisting_rls_auto_enable', case when current_setting('rre.rls_auto_enable_fingerprint', true) <> '' then
+  jsonb_build_object('fingerprint', current_setting('rre.rls_auto_enable_fingerprint', true),
+                     'body_md5', current_setting('rre.rls_auto_enable_body_md5', true)) end));
 
 commit;
 -- END OF DEPLOYMENT FILE — if this line is missing, the copy is incomplete: do not run.

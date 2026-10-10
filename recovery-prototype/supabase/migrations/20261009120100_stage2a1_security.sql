@@ -57,7 +57,22 @@ grant execute on function private.is_member(uuid) to authenticated;
 -- default. Remove that for existing and future objects.
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
-revoke all on all functions in schema public from public, anon, authenticated;
+-- Revoke on every function in public EXCEPT Supabase's pre-existing auto-RLS
+-- helper public.rls_auto_enable() (an event-trigger function: it cannot be
+-- called directly, and the deployment guard requires it to stay unmodified).
+do $revoke$
+declare
+  v_fn regprocedure;
+begin
+  for v_fn in
+    select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and not (p.proname = 'rls_auto_enable' and p.prorettype = 'event_trigger'::regtype)
+  loop
+    execute format('revoke all on function %s from public, anon, authenticated', v_fn);
+  end loop;
+end
+$revoke$;
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
 alter default privileges in schema public revoke all on functions from public, anon, authenticated;
