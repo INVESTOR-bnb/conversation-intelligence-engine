@@ -147,6 +147,30 @@ founder only.
 
 ---
 
+## Step 7 — Onboard a synthetic client (Stage 2A-4a)
+
+Synthetic data only: a made-up business name and a test address you control
+(for example `you+client1@gmail.com`).
+
+1. Founder workspace → **Create business** → name (e.g. "Synthetic Autos A"),
+   optional industry, currency (default NGN) → **Create Business**. The list
+   and count update.
+2. Supabase → Authentication → Users → **Invite user** → the test address.
+3. Open that invitation on the phone (a private/incognito tab avoids signing
+   the founder out), set a password. The screen shows **Account not yet
+   authorised** and a **User ID**. Copy it.
+4. Back as founder → **Link client** → choose the business → paste the User ID
+   → **Link Client**.
+5. On the client's screen tap **Check again**: it shows **Your cases** for
+   that business only.
+
+The database refuses (and the screen explains): linking the founder account,
+linking an account that already belongs to a business, unknown User IDs, and
+any non-founder trying either action. Each successful action writes one
+audit-log entry (`BUSINESS_CREATED`, `MEMBER_ADDED`).
+
+---
+
 ## What the app enforces, and what it does not
 
 - The role comes **only** from the database (`public.whoami()`), never from

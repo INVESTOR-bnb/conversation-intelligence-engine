@@ -1,9 +1,10 @@
 // Live (authenticated) pages. Reuses the Stage-1 UI building blocks; no redesign.
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button, Card, EmptyState, ErrorBanner, Field, Notice, ScreenHeader } from '../components/ui';
 import { useAuth } from './auth';
 import { parseAuthCallback } from './authCallback';
+import { BUSINESS_NAME_MAX, INDUSTRY_MAX, onboardingErrorMessage, validateBusiness, validateLink, type BusinessErrors } from './onboarding';
 import { navigate, safeNext } from './router';
 
 export const MIN_PASSWORD_LENGTH = 10;
@@ -197,44 +198,189 @@ export function NotFound() {
   );
 }
 
+interface BusinessRow { id: string; name: string; industry: string; currency: string }
+
 export function FounderWorkspace() {
   const { supabase, profile } = useAuth();
-  const [counts, setCounts] = useState<{ businesses: number; cases: number } | null>(null);
-  const [names, setNames] = useState<string[]>([]);
+  const [businesses, setBusinesses] = useState<BusinessRow[] | null>(null);
+  const [memberCounts, setMemberCounts] = useState<Record<string, number>>({});
+  const [caseCount, setCaseCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const seq = useRef(0);
+
+  // Reads are enforced by RLS: these rows are only returned to founders.
+  const load = useCallback(async () => {
+    const mine = ++seq.current;
+    const [b, m, c] = await Promise.all([
+      supabase.from('businesses').select('id, name, industry, currency').order('name'),
+      supabase.from('business_members').select('business_id'),
+      supabase.from('cases').select('id', { count: 'exact', head: true }),
+    ]);
+    if (mine !== seq.current) return;
+    if (b.error || m.error || c.error) {
+      setError('Could not load workspace data.');
+      return;
+    }
+    setError(null);
+    setBusinesses((b.data ?? []) as BusinessRow[]);
+    const counts: Record<string, number> = {};
+    for (const r of (m.data ?? []) as { business_id: string }[]) counts[r.business_id] = (counts[r.business_id] ?? 0) + 1;
+    setMemberCounts(counts);
+    setCaseCount(c.count ?? 0);
+  }, [supabase]);
 
   useEffect(() => {
-    let active = true;
-    (async () => {
-      // Reads are enforced by RLS: these rows are only returned to founders.
-      const [b, c] = await Promise.all([
-        supabase.from('businesses').select('name').order('name'),
-        supabase.from('cases').select('id', { count: 'exact', head: true }),
-      ]);
-      if (!active) return;
-      if (b.error || c.error) return setError('Could not load workspace data.');
-      setNames((b.data ?? []).map((r: { name: string }) => r.name));
-      setCounts({ businesses: (b.data ?? []).length, cases: c.count ?? 0 });
-    })();
+    void load();
     return () => {
-      active = false;
+      seq.current++;
     };
-  }, [supabase]);
+  }, [load]);
 
   return (
     <Shell>
       <ScreenHeader title="Founder workspace" subtitle={profile?.email ?? undefined} />
       <ErrorBanner message={error} />
       <div className="stats">
-        <div className="stat"><span className="stat-num" data-testid="founder-business-count">{counts ? counts.businesses : '…'}</span><span className="stat-label">Businesses</span></div>
-        <div className="stat"><span className="stat-num" data-testid="founder-case-count">{counts ? counts.cases : '…'}</span><span className="stat-label">Cases</span></div>
+        <div className="stat"><span className="stat-num" data-testid="founder-business-count">{businesses ? businesses.length : '…'}</span><span className="stat-label">Businesses</span></div>
+        <div className="stat"><span className="stat-num" data-testid="founder-case-count">{caseCount ?? '…'}</span><span className="stat-label">Cases</span></div>
       </div>
       <Card title="Businesses">
-        {names.length === 0 ? <EmptyState title="No businesses yet." /> : <ul className="bullets">{names.map((n) => <li key={n}>{n}</li>)}</ul>}
+        {businesses && businesses.length === 0 ? (
+          <EmptyState title="No businesses yet." />
+        ) : (
+          <ul className="list" data-testid="founder-business-list">
+            {(businesses ?? []).map((b) => (
+              <li key={b.id} className="list-row">
+                <span>
+                  <span className="list-title">{b.name}</span>
+                  <span className="muted small">
+                    {[b.industry, b.currency].filter(Boolean).join(' · ')} · {memberCounts[b.id] ?? 0} linked client{(memberCounts[b.id] ?? 0) === 1 ? '' : 's'}
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </Card>
-      <Notice>The live case workflow arrives in later Stage 2A steps. The Stage-1 prototype (mock data) remains available below.</Notice>
+      <CreateBusinessForm onCreated={load} />
+      <LinkClientForm businesses={businesses ?? []} onLinked={load} />
+      <Notice>Use synthetic businesses and test accounts only. The live case workflow arrives in later Stage 2A steps.</Notice>
       <Button block variant="secondary" onClick={() => { window.location.href = '/demo'; }}>Open Stage-1 prototype (mock data)</Button>
     </Shell>
+  );
+}
+
+function SuccessNote({ message }: { message: string | null }) {
+  if (!message) return null;
+  return <div className="banner banner-info" role="status">{message}</div>;
+}
+
+function CreateBusinessForm({ onCreated }: { onCreated: () => Promise<void> }) {
+  const { supabase } = useAuth();
+  const [name, setName] = useState('');
+  const [industry, setIndustry] = useState('');
+  const [currency, setCurrency] = useState('NGN');
+  const [errors, setErrors] = useState<BusinessErrors>({});
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <form
+      className="card"
+      noValidate
+      aria-labelledby="create-business-title"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (busy) return;
+        setSuccess(null);
+        setError(null);
+        const { value, errors: errs } = validateBusiness({ name, industry, currency });
+        setErrors(errs);
+        if (!value) return;
+        setBusy(true);
+        const { error: err } = await supabase.rpc('founder_create_business', { p_name: value.name, p_industry: value.industry, p_currency: value.currency });
+        if (err) {
+          setError(onboardingErrorMessage(err));
+        } else {
+          setSuccess(`Business “${value.name}” created.`);
+          setName('');
+          setIndustry('');
+          setCurrency('NGN');
+          await onCreated();
+        }
+        setBusy(false);
+      }}
+    >
+      <h2 className="card-title" id="create-business-title">Create business</h2>
+      <Field label="Business name" error={errors.name}>
+        {(id, d) => <input id={id} aria-describedby={d} maxLength={BUSINESS_NAME_MAX + 20} value={name} onChange={(e) => setName(e.target.value)} />}
+      </Field>
+      <Field label="Industry" optional error={errors.industry}>
+        {(id, d) => <input id={id} aria-describedby={d} maxLength={INDUSTRY_MAX + 20} value={industry} onChange={(e) => setIndustry(e.target.value)} />}
+      </Field>
+      <Field label="Currency" hint="3-letter code, for example NGN." error={errors.currency}>
+        {(id, d) => <input id={id} aria-describedby={d} maxLength={3} autoCapitalize="characters" autoComplete="off" value={currency} onChange={(e) => setCurrency(e.target.value)} />}
+      </Field>
+      <ErrorBanner message={error} />
+      <SuccessNote message={success} />
+      <Button type="submit" block disabled={busy}>{busy ? 'Creating…' : 'Create Business'}</Button>
+    </form>
+  );
+}
+
+function LinkClientForm({ businesses, onLinked }: { businesses: BusinessRow[]; onLinked: () => Promise<void> }) {
+  const { supabase } = useAuth();
+  const [businessId, setBusinessId] = useState('');
+  const [userId, setUserId] = useState('');
+  const [errors, setErrors] = useState<{ business?: string; userId?: string }>({});
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <form
+      className="card"
+      noValidate
+      aria-labelledby="link-client-title"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (busy) return;
+        setSuccess(null);
+        setError(null);
+        const { value, errors: errs } = validateLink(businessId, userId);
+        setErrors(errs);
+        if (!value) return;
+        setBusy(true);
+        const { error: err } = await supabase.rpc('founder_add_member', { p_business_id: value.businessId, p_user_id: value.userId });
+        if (err) {
+          setError(onboardingErrorMessage(err));
+        } else {
+          const name = businesses.find((b) => b.id === value.businessId)?.name ?? 'the business';
+          setSuccess(`Client linked to “${name}”. Ask them to tap “Check again” or reload the page.`);
+          setUserId('');
+          await onLinked();
+        }
+        setBusy(false);
+      }}
+    >
+      <h2 className="card-title" id="link-client-title">Link client</h2>
+      <p className="muted small">Invite the client from the Supabase dashboard first. After they set a password they see their User ID — paste it here.</p>
+      <Field label="Business" error={errors.business}>
+        {(id, d) => (
+          <select id={id} aria-describedby={d} value={businessId} onChange={(e) => setBusinessId(e.target.value)}>
+            <option value="">Choose a business…</option>
+            {businesses.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+        )}
+      </Field>
+      <Field label="Client User ID" error={errors.userId}>
+        {(id, d) => <input id={id} aria-describedby={d} autoComplete="off" autoCapitalize="none" spellCheck={false} value={userId} onChange={(e) => setUserId(e.target.value)} />}
+      </Field>
+      <ErrorBanner message={error} />
+      <SuccessNote message={success} />
+      <Button type="submit" block disabled={busy || businesses.length === 0}>{busy ? 'Linking…' : 'Link Client'}</Button>
+    </form>
   );
 }
 

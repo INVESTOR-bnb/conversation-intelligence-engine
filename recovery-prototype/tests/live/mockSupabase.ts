@@ -1,7 +1,8 @@
 // A small in-memory imitation of the Supabase Auth + Data API endpoints the
 // frontend calls, installed with Playwright request interception. It mirrors
 // the server-side rules that matter for the UI: tokens are validated, roles
-// come from the server (whoami), founder-only tables return nothing to others.
+// come from the server (whoami), founder-only tables return nothing to others,
+// and the onboarding functions apply the database's checks and error texts.
 
 import type { BrowserContext, Route } from '@playwright/test';
 
@@ -19,6 +20,8 @@ export const USERS: Record<string, MockUser> = {
   // Client whose (user-editable) metadata falsely claims FOUNDER: must be ignored.
   client: { id: 'c0000000-0000-4000-8000-000000000002', email: 'client@synthetic.test', password: 'client-pass-123', role: 'CLIENT', metadata: { role: 'FOUNDER' } },
   invited: { id: 'e0000000-0000-4000-8000-000000000003', email: 'invited@synthetic.test', password: '', role: 'NONE' },
+  // Has accepted an invitation and set a password, but is not linked to any business yet.
+  pending: { id: 'd0000000-0000-4000-8000-000000000004', email: 'pending@synthetic.test', password: 'pending-pass-123', role: 'NONE' },
 };
 
 export class MockSupabase {
@@ -26,6 +29,15 @@ export class MockSupabase {
   refresh = new Map<string, string>(); // refresh token -> user id
   requests: string[] = [];
   whoamiFails = false;
+  /** Makes founder_* calls fail: 'server' = HTTP 500, 'network' = connection dropped. */
+  failRpc: false | 'server' | 'network' = false;
+  businesses: { id: string; name: string; industry: string; currency: string }[] = [
+    { id: 'b1', name: 'Synthetic Autos A', industry: 'Automotive', currency: 'NGN' },
+    { id: 'b2', name: 'Synthetic Academy B', industry: 'Training', currency: 'NGN' },
+  ];
+  /** user id -> business id (a client belongs to exactly one business). */
+  members = new Map<string, string>([[USERS.client.id, 'b1']]);
+  audit: { action: string; business_id: string }[] = [];
   private n = 0;
 
   user(id: string) {
@@ -103,25 +115,62 @@ export class MockSupabase {
 
     // Data API: anon (no user token) gets nothing.
     if (!uid) return json(401, { code: '42501', message: 'permission denied' });
+    if (this.failRpc && p.startsWith('/rest/v1/rpc/founder_')) {
+      return this.failRpc === 'network' ? route.abort('failed') : json(500, { code: 'XX000', message: 'internal error' });
+    }
     const u = this.user(uid);
+    const isFounder = u.role === 'FOUNDER';
+    const myBusiness = this.members.get(uid);
+    const forbidden = () => json(403, { code: '42501', message: 'FORBIDDEN: founder access required' });
     if (p === '/rest/v1/rpc/whoami') {
       if (this.whoamiFails) return json(500, { message: 'internal error' });
-      if (u.role === 'FOUNDER') return json(200, { user_id: u.id, role: 'FOUNDER' });
-      if (u.role === 'CLIENT') return json(200, { user_id: u.id, role: 'CLIENT', business_id: 'b1', business_name: 'Synthetic Autos A', currency: 'NGN' });
+      if (isFounder) return json(200, { user_id: u.id, role: 'FOUNDER' });
+      const b = this.businesses.find((x) => x.id === myBusiness);
+      if (b) return json(200, { user_id: u.id, role: 'CLIENT', business_id: b.id, business_name: b.name, currency: b.currency });
       return json(200, { user_id: u.id, role: 'NONE' });
     }
     if (p === '/rest/v1/businesses') {
-      // RLS: founders see all businesses; this mock's client has none visible here.
-      const rows = u.role === 'FOUNDER' ? [{ name: 'Synthetic Academy B' }, { name: 'Synthetic Autos A' }] : [];
+      // RLS: founders see all businesses, a client only its own.
+      const rows = this.businesses.filter((b) => isFounder || b.id === myBusiness).sort((a, b) => a.name.localeCompare(b.name));
       return json(200, rows, { 'content-range': `0-${Math.max(rows.length - 1, 0)}/${rows.length}` });
     }
+    if (p === '/rest/v1/business_members') {
+      const rows = [...this.members].filter(([user]) => isFounder || user === uid).map(([user_id, business_id]) => ({ user_id, business_id }));
+      return json(200, rows);
+    }
     if (p === '/rest/v1/cases') {
-      const total = u.role === 'FOUNDER' ? 3 : 0;
+      const total = isFounder ? 3 : 0;
       return json(200, req.method() === 'HEAD' ? undefined : [], { 'content-range': `*/${total}` });
     }
     if (p === '/rest/v1/rpc/client_list_cases') {
-      if (u.role !== 'CLIENT') return json(200, []);
+      if (myBusiness !== 'b1') return json(200, []);
       return json(200, [{ id: 'k1', reference: 'P-101', product_service: 'Synthetic Camry', status: 'UNDER_REVIEW', classification: null, approved_message: null }]);
+    }
+    // The two onboarding functions, with the same checks and error texts as the database.
+    if (p === '/rest/v1/rpc/founder_create_business') {
+      if (!isFounder) return forbidden();
+      const name = String(body.p_name ?? '').trim();
+      const industry = String(body.p_industry ?? '').trim();
+      const currency = String(body.p_currency ?? 'NGN').trim().toUpperCase();
+      if (name.length < 1 || name.length > 120 || industry.length > 120 || !/^[A-Z]{3}$/.test(currency)) {
+        return json(400, { code: '23514', message: 'new row for relation "businesses" violates check constraint "businesses_name_check"' });
+      }
+      const id = `b${this.businesses.length + 1}-${++this.n}`;
+      this.businesses.push({ id, name, industry, currency });
+      this.audit.push({ action: 'BUSINESS_CREATED', business_id: id });
+      return json(200, id);
+    }
+    if (p === '/rest/v1/rpc/founder_add_member') {
+      if (!isFounder) return forbidden();
+      const { p_business_id: bid, p_user_id: target } = body as { p_business_id: string; p_user_id: string };
+      if (!this.businesses.some((b) => b.id === bid)) return json(404, { code: 'P0002', message: 'NOT_FOUND: business not found' });
+      const t = Object.values(USERS).find((x) => x.id === target);
+      if (!t) return json(404, { code: 'P0002', message: 'NOT_FOUND: user not found' });
+      if (t.role === 'FOUNDER') return json(400, { code: 'P0001', message: 'VALIDATION: a founder cannot be a client member' });
+      if (this.members.has(target)) return json(400, { code: 'P0001', message: 'VALIDATION: user already belongs to a business' });
+      this.members.set(target, bid);
+      this.audit.push({ action: 'MEMBER_ADDED', business_id: bid });
+      return route.fulfill({ status: 204, headers: cors });
     }
     return json(404, { message: `mock: no handler for ${req.method()} ${p}` });
   }
