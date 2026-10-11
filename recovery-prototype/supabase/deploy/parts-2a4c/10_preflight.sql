@@ -38,14 +38,23 @@ begin
     if v_other is not null then
       v_problems := array_append(v_problems, 'storage.objects already has policies (' || v_other || '); review them before deploying'::text);
     end if;
-    if exists (select 1 from storage.buckets where id = 'case-screenshots' and public) then
-      v_problems := array_append(v_problems, 'bucket case-screenshots exists and is PUBLIC'::text);
+    if has_table_privilege(current_user, 'storage.buckets', 'SELECT') then  -- (no short-circuit in PL/pgSQL AND)
+      if exists (select 1 from storage.buckets where id = 'case-screenshots' and public) then
+        v_problems := array_append(v_problems, 'bucket case-screenshots exists and is PUBLIC'::text);
+      end if;
     end if;
   end if;
   -- The security-definer helpers read storage.objects (owned by Supabase's storage role);
   -- they only see every row if their owner (the deploying role) bypasses RLS.
   if not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user) then
     v_problems := array_append(v_problems, format('role %s cannot bypass RLS, so the helpers could not see stored files', current_user));
+  end if;
+  -- The deploying role will own the helpers; they read storage.objects with its privileges.
+  if to_regclass('storage.objects') is not null and not has_table_privilege(current_user, 'storage.objects', 'SELECT') then
+    v_problems := array_append(v_problems, format('role %s lacks SELECT on storage.objects (the helpers need it)', current_user));
+  end if;
+  if to_regclass('storage.buckets') is not null and not has_table_privilege(current_user, 'storage.buckets', 'SELECT, INSERT, UPDATE') then
+    v_problems := array_append(v_problems, format('role %s lacks SELECT/INSERT/UPDATE on storage.buckets (needed to create the bucket)', current_user));
   end if;
 
   if cardinality(v_problems) > 0 then

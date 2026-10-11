@@ -88,6 +88,7 @@ check "verification reports FAIL before deployment" '[[ "$(overall "$db" "$VERIF
 out=$(run_file "$db" "$DEPLOY" || true)
 check "deployment succeeds with preflight and self-check" '! grep -q ERROR <<<"$out" && grep -q "Preflight passed" <<<"$out" && grep -q "Post-install self-check passed" <<<"$out"'
 check "2A-4c, 2A-4b and 2A-1 verifications all OVERALL PASS" 'all_pass "$db"'
+echo "      (2A-4c verify: $(overall "$db" "$VERIFY"))"
 check "2A-1 verification rows 10 and 12 PASS with the new functions" '[ "$(row "$db" "$V1" 10)" = PASS ] && [ "$(row "$db" "$V1" 12)" = PASS ]'
 check "deployment changed no data (businesses, cases, records, audit history)" '[ "$(data_rows "$db")" = "$rows" ]'
 seed_file "$db"
@@ -114,6 +115,12 @@ check "self-check aborts if the bucket became public" 'grep -q "DEPLOYMENT ABORT
 awk '/POST-INSTALL SELF-CHECK/ && !done {print "grant execute on function private.screenshot_objects(uuid, uuid) to authenticated; -- weakness"; done=1} {print}' "$DEPLOY" > "$broken"
 db=$(new_db); before=$(snapshot "$db"); out=$(run_file "$db" "$broken" || true)
 check "self-check aborts on excess function privileges" 'grep -q "DEPLOYMENT ABORTED" <<<"$out" && [ "$(snapshot "$db")" = "$before" ]'
+awk '/POST-INSTALL SELF-CHECK/ && !done {print "alter table storage.objects disable row level security; -- weakness"; done=1} {print}' "$DEPLOY" > "$broken"
+db=$(new_db); before=$(snapshot "$db"); out=$(run_file "$db" "$broken" || true)
+check "self-check aborts if RLS on storage.objects is switched off during the deployment" 'grep -q "DEPLOYMENT ABORTED.*row level security is not enabled" <<<"$out" && [ "$(snapshot "$db")" = "$before" ]'
+awk '/POST-INSTALL SELF-CHECK/ && !done {print "alter policy rre_case_screenshots_insert on storage.objects with check (bucket_id = '"'"'case-screenshots'"'"' or private.screenshot_upload_allowed(name)); -- weakness"; done=1} {print}' "$DEPLOY" > "$broken"
+db=$(new_db); before=$(snapshot "$db"); out=$(run_file "$db" "$broken" || true)
+check "self-check aborts if a policy expression differs from the reviewed one" 'grep -q "DEPLOYMENT ABORTED.*policy expressions differ" <<<"$out" && [ "$(snapshot "$db")" = "$before" ]'
 head -n "$(grep -n "POST-INSTALL SELF-CHECK" "$DEPLOY" | head -1 | cut -d: -f1)" "$DEPLOY" > "$broken"
 db=$(new_db); before=$(snapshot "$db"); run_single "$db" "$broken" >/dev/null 2>&1 || true
 check "truncated copy without COMMIT leaves nothing behind" '[ "$(snapshot "$db")" = "$before" ]'
@@ -147,6 +154,48 @@ sql "$deployed" "revoke execute on function public.client_screenshot_status(uuid
 check "2A-1 row 10 still FAILs on any other authenticated function" '[ "$(row "$deployed" "$V1" 10)" = FAIL ]'
 sql "$deployed" "drop function public.extra_fn()" >/dev/null
 check "all verifications back to PASS after reverting" 'all_pass "$deployed"'
+
+echo "== Regression: weaknesses found in the d10e27c audit are now detected"
+# (a) RLS switched off on storage.objects: previously no verify row checked it.
+sql "$deployed" "alter table storage.objects disable row level security" >/dev/null
+check "RLS off on storage.objects: row 12 FAIL, OVERALL FAIL" '[ "$(row "$deployed" "$VERIFY" 12)" = FAIL ] && [[ "$(overall "$deployed" "$VERIFY")" == FAIL* ]]'
+sql "$deployed" "alter table storage.objects enable row level security" >/dev/null
+# (b) a policy expression edited in place: names and substrings still match.
+sql "$deployed" "alter policy rre_case_screenshots_insert on storage.objects with check ((bucket_id = 'case-screenshots' and private.screenshot_upload_allowed(name)) or true)" >/dev/null
+check "upload rule weakened with OR true: old rows 2 and 4 still PASS (the gap) ..." '[ "$(row "$deployed" "$VERIFY" 2)" = PASS ] && [ "$(row "$deployed" "$VERIFY" 4)" = PASS ]'
+check "... but row 13 FAILs and OVERALL FAIL" '[ "$(row "$deployed" "$VERIFY" 13)" = FAIL ] && [[ "$(overall "$deployed" "$VERIFY")" == FAIL* ]]'
+sql "$deployed" "alter policy rre_case_screenshots_insert on storage.objects with check (bucket_id = 'case-screenshots' and private.screenshot_upload_allowed(name))" >/dev/null
+sql "$deployed" "alter policy rre_case_screenshots_select on storage.objects using ((bucket_id = 'case-screenshots' and (select private.is_founder())) or owner_id = auth.uid()::text)" >/dev/null
+check "read rule widened to uploaders: row 13 FAIL" '[ "$(row "$deployed" "$VERIFY" 13)" = FAIL ]'
+sql "$deployed" "alter policy rre_case_screenshots_select on storage.objects using (bucket_id = 'case-screenshots' and (select private.is_founder()))" >/dev/null
+check "policies restored: row 13 PASS and OVERALL PASS" '[ "$(row "$deployed" "$VERIFY" 13)" = PASS ] && all_pass "$deployed"'
+# (c) helper owner without SELECT on storage.objects (local postgres is a superuser,
+#     so a separate non-superuser owner stands in for a Supabase-like setup).
+sql "$deployed" "do \$r\$ begin create role helper_owner_t nologin bypassrls; exception when duplicate_object then null; end \$r\$;
+  grant usage on schema private, storage, public, auth to helper_owner_t; grant execute on function auth.uid() to helper_owner_t; grant select on public.cases, public.business_members to helper_owner_t; grant execute on function private.my_business_id() to helper_owner_t;
+  alter function private.screenshot_upload_allowed(text) owner to helper_owner_t; alter function private.screenshot_objects(uuid, uuid) owner to helper_owner_t" >/dev/null
+check "helper owner lacks SELECT on storage.objects: row 14 FAIL" '[ "$(row "$deployed" "$VERIFY" 14)" = FAIL ]'
+cat > "$WORK/up_try.sql" <<UPSQL
+set role authenticated;
+select set_config('request.jwt.claims', json_build_object('sub', '$A_USER', 'role', 'authenticated')::text, false);
+insert into storage.objects (bucket_id, name, owner_id) values ('case-screenshots', '$A_BIZ/$A_CASE/2-$(printf 'b%.0s' {1..64}).png', '$A_USER');
+UPSQL
+up_try=$("${PSQL[@]}" -d "$deployed" -f "$WORK/up_try.sql" 2>&1 || true)
+check "... and uploads then fail closed (permission denied), never open" 'grep -q "permission denied for table objects" <<<"$up_try" && [ "$(sql "$deployed" "select count(*) from storage.objects where name like '"'"'%/2-%'"'"'")" = 0 ]'
+sql "$deployed" "grant select on storage.objects to helper_owner_t" >/dev/null
+check "granting SELECT turns row 14 back to PASS" '[ "$(row "$deployed" "$VERIFY" 14)" = PASS ]'
+sql "$deployed" "alter function private.screenshot_upload_allowed(text) owner to postgres; alter function private.screenshot_objects(uuid, uuid) owner to postgres" >/dev/null
+check "owners restored: all verifications PASS" 'all_pass "$deployed"'
+# (d) preflight refuses a deploying role without the Storage privileges the helpers need.
+db=$(new_db)
+sed -n '/^do \$preflight\$/,/^\$preflight\$;/p' "$DEPLOY" > "$WORK/preflight.sql"
+sql "$db" "do \$r\$ begin create role deployer_t nologin bypassrls; exception when duplicate_object then null; end \$r\$; grant usage on schema storage, private, public to deployer_t" >/dev/null
+pf=$("${PSQL[@]}" -d "$db" -c "set role deployer_t" -f "$WORK/preflight.sql" 2>&1 || true)
+check "preflight refuses: deploying role lacks SELECT on storage.objects" 'grep -q "lacks SELECT on storage.objects" <<<"$pf"'
+check "preflight refuses: deploying role lacks SELECT/INSERT/UPDATE on storage.buckets" 'grep -q "lacks SELECT/INSERT/UPDATE on storage.buckets" <<<"$pf"'
+sql "$db" "grant select on storage.objects to deployer_t; grant select, insert, update on storage.buckets to deployer_t" >/dev/null
+pf=$("${PSQL[@]}" -d "$db" -c "set role deployer_t" -f "$WORK/preflight.sql" 2>&1 || true)
+check "with those privileges the preflight no longer reports them" '! grep -q "lacks SELECT" <<<"$pf"'
 
 echo "== Staging isolation check (deploy/stage2a4c_isolation_check.sql)"
 iso() { sed -e "s/REPLACE_CLIENT_B_USER_ID/$B_USER/g" -e "s/REPLACE_BUSINESS_A_ID/$A_BIZ/g" -e "s/REPLACE_CASE_A_ID/$A_CASE/g" "$D/stage2a4c_isolation_check.sql" > "$WORK/iso.sql"

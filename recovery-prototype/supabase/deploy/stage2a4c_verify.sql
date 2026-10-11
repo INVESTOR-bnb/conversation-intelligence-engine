@@ -58,6 +58,27 @@ checks(ord, check_name, status, detail) as (
     case when (xpath('/row/c/text()', query_to_xml($q$select count(*) as c from public.audit_log where action = 'SCHEMA_DEPLOYED' and details->>'stage' = '2A-4c'$q$, false, true, '')))[1]::text::int >= 1
          then 'PASS' else 'FAIL' end, 'action SCHEMA_DEPLOYED, stage 2A-4c'
   union all
+  select 12, 'Row level security is enabled on storage.objects',
+    case when (select relrowsecurity from pg_class where oid = 'storage.objects'::regclass) then 'PASS' else 'FAIL' end,
+    'without RLS every API user could read and write every stored file'
+  union all
+  select 13, 'Storage policy expressions are exactly the reviewed ones',
+    case when exists (select 1 from pg_policy where polrelid = 'storage.objects'::regclass and polname = 'rre_case_screenshots_insert'
+                      and polcmd = 'a' and polpermissive and polroles = array['authenticated'::regrole]::oid[] and polqual is null
+                      and regexp_replace(pg_get_expr(polwithcheck, polrelid), '\s', '', 'g')
+                          = '((bucket_id=''case-screenshots''::text)ANDprivate.screenshot_upload_allowed(name))')
+          and exists (select 1 from pg_policy where polrelid = 'storage.objects'::regclass and polname = 'rre_case_screenshots_select'
+                      and polcmd = 'r' and polpermissive and polroles = array['authenticated'::regrole]::oid[] and polwithcheck is null
+                      and regexp_replace(pg_get_expr(polqual, polrelid), '\s', '', 'g')
+                          = '((bucket_id=''case-screenshots''::text)AND(SELECTprivate.is_founder()ASis_founder))')
+         then 'PASS' else 'FAIL' end,
+    coalesce((select string_agg(polname || ': ' || coalesce(pg_get_expr(polwithcheck, polrelid), pg_get_expr(polqual, polrelid), '-'), ' | ' order by polname)
+              from pg_policy where polrelid = 'storage.objects'::regclass), 'no policies')
+  union all
+  select 14, 'Helper owner has SELECT on storage.objects (needed to see stored files)',
+    case when (select bool_and(has_table_privilege(p.proowner, 'storage.objects', 'SELECT')) from fns f join pg_proc p on p.oid = to_regprocedure(f.sig)) then 'PASS' else 'FAIL' end,
+    (select string_agg(distinct pg_get_userbyid(p.proowner), ', ') from fns f join pg_proc p on p.oid = to_regprocedure(f.sig))
+  union all
   select 10, 'Stored files / recorded screenshots / unrecorded files / files marked deleted', 'INFO',
     (select count(*) from storage.objects where bucket_id = 'case-screenshots')::text || ' / '
     || (xpath('/row/c/text()', query_to_xml('select count(*) as c from public.case_screenshots', false, true, '')))[1]::text || ' / '

@@ -12,7 +12,7 @@
 -- Undo: deploy/stage2a4c_rollback.sql. Check: deploy/stage2a4c_verify.sql.
 --
 -- Source migration (sha256):
---   20261012120000_stage2a4c_screenshots.sql  8e72852bfa92720198a0310eb977aca93b0a6b8c2a060da4adeeb870c2793336
+--   20261012120000_stage2a4c_screenshots.sql  810ee18ca018a445751965711b47b51e410366c2ed46a1d1b5ce65e2ec7195c6
 -- ===================================================================
 
 begin;
@@ -57,14 +57,23 @@ begin
     if v_other is not null then
       v_problems := array_append(v_problems, 'storage.objects already has policies (' || v_other || '); review them before deploying'::text);
     end if;
-    if exists (select 1 from storage.buckets where id = 'case-screenshots' and public) then
-      v_problems := array_append(v_problems, 'bucket case-screenshots exists and is PUBLIC'::text);
+    if has_table_privilege(current_user, 'storage.buckets', 'SELECT') then  -- (no short-circuit in PL/pgSQL AND)
+      if exists (select 1 from storage.buckets where id = 'case-screenshots' and public) then
+        v_problems := array_append(v_problems, 'bucket case-screenshots exists and is PUBLIC'::text);
+      end if;
     end if;
   end if;
   -- The security-definer helpers read storage.objects (owned by Supabase's storage role);
   -- they only see every row if their owner (the deploying role) bypasses RLS.
   if not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user) then
     v_problems := array_append(v_problems, format('role %s cannot bypass RLS, so the helpers could not see stored files', current_user));
+  end if;
+  -- The deploying role will own the helpers; they read storage.objects with its privileges.
+  if to_regclass('storage.objects') is not null and not has_table_privilege(current_user, 'storage.objects', 'SELECT') then
+    v_problems := array_append(v_problems, format('role %s lacks SELECT on storage.objects (the helpers need it)', current_user));
+  end if;
+  if to_regclass('storage.buckets') is not null and not has_table_privilege(current_user, 'storage.buckets', 'SELECT, INSERT, UPDATE') then
+    v_problems := array_append(v_problems, format('role %s lacks SELECT/INSERT/UPDATE on storage.buckets (needed to create the bucket)', current_user));
   end if;
 
   if cardinality(v_problems) > 0 then
@@ -207,16 +216,27 @@ end $$;
 -- Records every uploaded file of the caller's own DRAFT screenshot case as a
 -- case_screenshots row. All or nothing: any problem raises and records nothing.
 -- Safe to call repeatedly (already recorded files are skipped).
+--
+-- Concurrency: uploads do not lock the case, so files can be committed while
+-- this function runs, and under READ COMMITTED every statement sees newly
+-- committed rows. The function therefore reads the stored files ONCE into
+-- v_files; every check AND the INSERT use only that snapshot, and the INSERT
+-- re-applies the per-file checks. A file committed after the snapshot is never
+-- recorded by this call (it is checked by the next call). The row lock taken
+-- by client_case_for_update serialises concurrent finalize and submit calls.
 create function public.client_finalize_screenshots(p_case_id uuid) returns jsonb
 language plpgsql security definer set search_path = '' as $$
 declare
   v_case public.cases := private.client_case_for_update(p_case_id);
+  v_uid text := (select auth.uid())::text;
+  v_files jsonb;
   v_bad text;
   v_dups text;
   v_gaps text;
   v_max int;
   v_n int;
   v_added int;
+  v_recorded int;
 begin
   if v_case.workflow_state <> 'DRAFT' then
     perform private.fail('INVALID_STATE', 'only draft cases can take screenshots');
@@ -224,14 +244,18 @@ begin
   if v_case.conversation_source <> 'SCREENSHOTS' then
     perform private.fail('VALIDATION', 'this case uses pasted text');
   end if;
-  select count(*) into v_n from private.screenshot_objects(v_case.business_id, v_case.id);
+
+  -- The one and only read of the stored files.
+  select coalesce(jsonb_agg(to_jsonb(f)), '[]'::jsonb) into v_files
+  from private.screenshot_objects(v_case.business_id, v_case.id) f;
+  v_n := jsonb_array_length(v_files);
   if v_n = 0 then
     perform private.fail('VALIDATION', 'no screenshots uploaded');
   end if;
 
   select string_agg(coalesce(f.pos::text, '?'), ',' order by f.pos) into v_bad
-  from private.screenshot_objects(v_case.business_id, v_case.id) f
-  where f.pos is null or f.owner_id is distinct from (select auth.uid())::text
+  from jsonb_to_recordset(v_files) as f(name text, pos int, sha256 text, ext text, size bigint, mimetype text, owner_id text)
+  where f.pos is null or f.owner_id is distinct from v_uid
      or f.size is null or f.size < 1 or f.size > 5242880
      or f.mimetype is distinct from case f.ext when 'png' then 'image/png' when 'jpg' then 'image/jpeg' end;
   if v_bad is not null then
@@ -239,30 +263,42 @@ begin
   end if;
 
   select string_agg(d.pos::text, ',' order by d.pos) into v_dups
-  from (select f.pos from private.screenshot_objects(v_case.business_id, v_case.id) f group by f.pos having count(*) > 1) d;
+  from (select f.pos from jsonb_to_recordset(v_files) as f(pos int) group by f.pos having count(*) > 1) d;
   if v_dups is not null then
     perform private.fail('VALIDATION', 'conflicting screenshots at positions ' || v_dups);
   end if;
 
-  select max(f.pos) into v_max from private.screenshot_objects(v_case.business_id, v_case.id) f;
+  select max(f.pos) into v_max from jsonb_to_recordset(v_files) as f(pos int);
   select string_agg(g::text, ',' order by g) into v_gaps
   from generate_series(1, v_max) g
-  where not exists (select 1 from private.screenshot_objects(v_case.business_id, v_case.id) f where f.pos = g);
+  where not exists (select 1 from jsonb_to_recordset(v_files) as f(pos int) where f.pos = g);
   if v_gaps is not null then
     perform private.fail('VALIDATION', 'missing screenshots at positions ' || v_gaps);
   end if;
 
   if exists (select 1 from public.case_screenshots c
-             join private.screenshot_objects(v_case.business_id, v_case.id) f on f.pos = c.position
+             join jsonb_to_recordset(v_files) as f(name text, pos int) on f.pos = c.position
              where c.case_id = v_case.id and c.storage_path <> f.name) then
     perform private.fail('VALIDATION', 'conflicting screenshots at recorded positions');
   end if;
 
+  -- Insert only snapshot rows, re-applying the per-file checks (defence in depth).
   insert into public.case_screenshots (case_id, business_id, position, storage_path, mime_type, size_bytes, sha256, created_by)
-  select v_case.id, v_case.business_id, f.pos, f.name, f.mimetype, f.size, f.sha256, (select auth.uid())
-  from private.screenshot_objects(v_case.business_id, v_case.id) f
-  where not exists (select 1 from public.case_screenshots c where c.case_id = v_case.id and c.position = f.pos);
+  select v_case.id, v_case.business_id, f.pos, f.name, f.mimetype, f.size, f.sha256, v_uid::uuid
+  from jsonb_to_recordset(v_files) as f(name text, pos int, sha256 text, ext text, size bigint, mimetype text, owner_id text)
+  where f.pos is not null and f.owner_id = v_uid and f.size between 1 and 5242880
+    and f.mimetype = case f.ext when 'png' then 'image/png' when 'jpg' then 'image/jpeg' end
+    and not exists (select 1 from public.case_screenshots c where c.case_id = v_case.id and c.position = f.pos);
   get diagnostics v_added = row_count;
+
+  -- The case's records must now be exactly the checked snapshot.
+  select count(*) into v_recorded from public.case_screenshots c
+  where c.case_id = v_case.id
+    and exists (select 1 from jsonb_to_recordset(v_files) as f(name text) where f.name = c.storage_path);
+  if v_recorded <> v_n or (select count(*) from public.case_screenshots c where c.case_id = v_case.id) <> v_n then
+    perform private.fail('VALIDATION', 'recorded screenshots do not match the checked files');
+  end if;
+
   if v_added > 0 then
     perform private.audit('SCREENSHOTS_REGISTERED', v_case.id, v_case.business_id, 'CLIENT', null,
       jsonb_build_object('added', v_added, 'total', v_n));
@@ -298,6 +334,23 @@ begin
                     and cmd = 'SELECT' and roles = '{authenticated}' and qual like '%case-screenshots%' and qual like '%is_founder%') then
     v_problems := array_append(v_problems, 'storage policies are not exactly: INSERT (member upload rule) + SELECT (founder)'::text);
   end if;
+  if not (select relrowsecurity from pg_class where oid = 'storage.objects'::regclass) then
+    v_problems := array_append(v_problems, 'row level security is not enabled on storage.objects'::text);
+  end if;
+  if not exists (select 1 from pg_policy where polrelid = 'storage.objects'::regclass and polname = 'rre_case_screenshots_insert'
+                 and polcmd = 'a' and polpermissive and polroles = array['authenticated'::regrole]::oid[] and polqual is null
+                 and regexp_replace(pg_get_expr(polwithcheck, polrelid), '\s', '', 'g')
+                     = '((bucket_id=''case-screenshots''::text)ANDprivate.screenshot_upload_allowed(name))')
+     or not exists (select 1 from pg_policy where polrelid = 'storage.objects'::regclass and polname = 'rre_case_screenshots_select'
+                 and polcmd = 'r' and polpermissive and polroles = array['authenticated'::regrole]::oid[] and polwithcheck is null
+                 and regexp_replace(pg_get_expr(polqual, polrelid), '\s', '', 'g')
+                     = '((bucket_id=''case-screenshots''::text)AND(SELECTprivate.is_founder()ASis_founder))') then
+    v_problems := array_append(v_problems, 'storage policy expressions differ from the reviewed ones'::text);
+  end if;
+  if exists (select 1 from pg_proc p where p.oid in ('private.screenshot_upload_allowed(text)'::regprocedure, 'private.screenshot_objects(uuid, uuid)'::regprocedure)
+             and not has_table_privilege(p.proowner, 'storage.objects', 'SELECT')) then
+    v_problems := array_append(v_problems, 'the helpers'' owner lacks SELECT on storage.objects'::text);
+  end if;
   if exists (select 1 from pg_proc where oid in ('private.screenshot_upload_allowed(text)'::regprocedure, 'private.screenshot_objects(uuid, uuid)'::regprocedure,
              'public.client_screenshot_status(uuid)'::regprocedure, 'public.client_finalize_screenshots(uuid)'::regprocedure)
              and not (prosecdef and proconfig @> array['search_path=""'])) then
@@ -329,7 +382,7 @@ $postcheck$;
 
 insert into public.audit_log (actor, actor_role, action, details)
 values (null, 'SYSTEM', 'SCHEMA_DEPLOYED', jsonb_build_object('stage', '2A-4c', 'migrations', jsonb_build_array(
-  jsonb_build_object('file', '20261012120000_stage2a4c_screenshots.sql', 'sha256', '8e72852bfa92720198a0310eb977aca93b0a6b8c2a060da4adeeb870c2793336'))));
+  jsonb_build_object('file', '20261012120000_stage2a4c_screenshots.sql', 'sha256', '810ee18ca018a445751965711b47b51e410366c2ed46a1d1b5ce65e2ec7195c6'))));
 
 commit;
 -- END OF DEPLOYMENT FILE — if this line is missing, the copy is incomplete: do not run.

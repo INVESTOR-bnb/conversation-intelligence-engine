@@ -130,16 +130,27 @@ end $$;
 -- Records every uploaded file of the caller's own DRAFT screenshot case as a
 -- case_screenshots row. All or nothing: any problem raises and records nothing.
 -- Safe to call repeatedly (already recorded files are skipped).
+--
+-- Concurrency: uploads do not lock the case, so files can be committed while
+-- this function runs, and under READ COMMITTED every statement sees newly
+-- committed rows. The function therefore reads the stored files ONCE into
+-- v_files; every check AND the INSERT use only that snapshot, and the INSERT
+-- re-applies the per-file checks. A file committed after the snapshot is never
+-- recorded by this call (it is checked by the next call). The row lock taken
+-- by client_case_for_update serialises concurrent finalize and submit calls.
 create function public.client_finalize_screenshots(p_case_id uuid) returns jsonb
 language plpgsql security definer set search_path = '' as $$
 declare
   v_case public.cases := private.client_case_for_update(p_case_id);
+  v_uid text := (select auth.uid())::text;
+  v_files jsonb;
   v_bad text;
   v_dups text;
   v_gaps text;
   v_max int;
   v_n int;
   v_added int;
+  v_recorded int;
 begin
   if v_case.workflow_state <> 'DRAFT' then
     perform private.fail('INVALID_STATE', 'only draft cases can take screenshots');
@@ -147,14 +158,18 @@ begin
   if v_case.conversation_source <> 'SCREENSHOTS' then
     perform private.fail('VALIDATION', 'this case uses pasted text');
   end if;
-  select count(*) into v_n from private.screenshot_objects(v_case.business_id, v_case.id);
+
+  -- The one and only read of the stored files.
+  select coalesce(jsonb_agg(to_jsonb(f)), '[]'::jsonb) into v_files
+  from private.screenshot_objects(v_case.business_id, v_case.id) f;
+  v_n := jsonb_array_length(v_files);
   if v_n = 0 then
     perform private.fail('VALIDATION', 'no screenshots uploaded');
   end if;
 
   select string_agg(coalesce(f.pos::text, '?'), ',' order by f.pos) into v_bad
-  from private.screenshot_objects(v_case.business_id, v_case.id) f
-  where f.pos is null or f.owner_id is distinct from (select auth.uid())::text
+  from jsonb_to_recordset(v_files) as f(name text, pos int, sha256 text, ext text, size bigint, mimetype text, owner_id text)
+  where f.pos is null or f.owner_id is distinct from v_uid
      or f.size is null or f.size < 1 or f.size > 5242880
      or f.mimetype is distinct from case f.ext when 'png' then 'image/png' when 'jpg' then 'image/jpeg' end;
   if v_bad is not null then
@@ -162,30 +177,42 @@ begin
   end if;
 
   select string_agg(d.pos::text, ',' order by d.pos) into v_dups
-  from (select f.pos from private.screenshot_objects(v_case.business_id, v_case.id) f group by f.pos having count(*) > 1) d;
+  from (select f.pos from jsonb_to_recordset(v_files) as f(pos int) group by f.pos having count(*) > 1) d;
   if v_dups is not null then
     perform private.fail('VALIDATION', 'conflicting screenshots at positions ' || v_dups);
   end if;
 
-  select max(f.pos) into v_max from private.screenshot_objects(v_case.business_id, v_case.id) f;
+  select max(f.pos) into v_max from jsonb_to_recordset(v_files) as f(pos int);
   select string_agg(g::text, ',' order by g) into v_gaps
   from generate_series(1, v_max) g
-  where not exists (select 1 from private.screenshot_objects(v_case.business_id, v_case.id) f where f.pos = g);
+  where not exists (select 1 from jsonb_to_recordset(v_files) as f(pos int) where f.pos = g);
   if v_gaps is not null then
     perform private.fail('VALIDATION', 'missing screenshots at positions ' || v_gaps);
   end if;
 
   if exists (select 1 from public.case_screenshots c
-             join private.screenshot_objects(v_case.business_id, v_case.id) f on f.pos = c.position
+             join jsonb_to_recordset(v_files) as f(name text, pos int) on f.pos = c.position
              where c.case_id = v_case.id and c.storage_path <> f.name) then
     perform private.fail('VALIDATION', 'conflicting screenshots at recorded positions');
   end if;
 
+  -- Insert only snapshot rows, re-applying the per-file checks (defence in depth).
   insert into public.case_screenshots (case_id, business_id, position, storage_path, mime_type, size_bytes, sha256, created_by)
-  select v_case.id, v_case.business_id, f.pos, f.name, f.mimetype, f.size, f.sha256, (select auth.uid())
-  from private.screenshot_objects(v_case.business_id, v_case.id) f
-  where not exists (select 1 from public.case_screenshots c where c.case_id = v_case.id and c.position = f.pos);
+  select v_case.id, v_case.business_id, f.pos, f.name, f.mimetype, f.size, f.sha256, v_uid::uuid
+  from jsonb_to_recordset(v_files) as f(name text, pos int, sha256 text, ext text, size bigint, mimetype text, owner_id text)
+  where f.pos is not null and f.owner_id = v_uid and f.size between 1 and 5242880
+    and f.mimetype = case f.ext when 'png' then 'image/png' when 'jpg' then 'image/jpeg' end
+    and not exists (select 1 from public.case_screenshots c where c.case_id = v_case.id and c.position = f.pos);
   get diagnostics v_added = row_count;
+
+  -- The case's records must now be exactly the checked snapshot.
+  select count(*) into v_recorded from public.case_screenshots c
+  where c.case_id = v_case.id
+    and exists (select 1 from jsonb_to_recordset(v_files) as f(name text) where f.name = c.storage_path);
+  if v_recorded <> v_n or (select count(*) from public.case_screenshots c where c.case_id = v_case.id) <> v_n then
+    perform private.fail('VALIDATION', 'recorded screenshots do not match the checked files');
+  end if;
+
   if v_added > 0 then
     perform private.audit('SCREENSHOTS_REGISTERED', v_case.id, v_case.business_id, 'CLIENT', null,
       jsonb_build_object('added', v_added, 'total', v_n));

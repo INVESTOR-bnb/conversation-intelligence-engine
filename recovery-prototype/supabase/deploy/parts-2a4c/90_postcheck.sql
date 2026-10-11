@@ -17,6 +17,23 @@ begin
                     and cmd = 'SELECT' and roles = '{authenticated}' and qual like '%case-screenshots%' and qual like '%is_founder%') then
     v_problems := array_append(v_problems, 'storage policies are not exactly: INSERT (member upload rule) + SELECT (founder)'::text);
   end if;
+  if not (select relrowsecurity from pg_class where oid = 'storage.objects'::regclass) then
+    v_problems := array_append(v_problems, 'row level security is not enabled on storage.objects'::text);
+  end if;
+  if not exists (select 1 from pg_policy where polrelid = 'storage.objects'::regclass and polname = 'rre_case_screenshots_insert'
+                 and polcmd = 'a' and polpermissive and polroles = array['authenticated'::regrole]::oid[] and polqual is null
+                 and regexp_replace(pg_get_expr(polwithcheck, polrelid), '\s', '', 'g')
+                     = '((bucket_id=''case-screenshots''::text)ANDprivate.screenshot_upload_allowed(name))')
+     or not exists (select 1 from pg_policy where polrelid = 'storage.objects'::regclass and polname = 'rre_case_screenshots_select'
+                 and polcmd = 'r' and polpermissive and polroles = array['authenticated'::regrole]::oid[] and polwithcheck is null
+                 and regexp_replace(pg_get_expr(polqual, polrelid), '\s', '', 'g')
+                     = '((bucket_id=''case-screenshots''::text)AND(SELECTprivate.is_founder()ASis_founder))') then
+    v_problems := array_append(v_problems, 'storage policy expressions differ from the reviewed ones'::text);
+  end if;
+  if exists (select 1 from pg_proc p where p.oid in ('private.screenshot_upload_allowed(text)'::regprocedure, 'private.screenshot_objects(uuid, uuid)'::regprocedure)
+             and not has_table_privilege(p.proowner, 'storage.objects', 'SELECT')) then
+    v_problems := array_append(v_problems, 'the helpers'' owner lacks SELECT on storage.objects'::text);
+  end if;
   if exists (select 1 from pg_proc where oid in ('private.screenshot_upload_allowed(text)'::regprocedure, 'private.screenshot_objects(uuid, uuid)'::regprocedure,
              'public.client_screenshot_status(uuid)'::regprocedure, 'public.client_finalize_screenshots(uuid)'::regprocedure)
              and not (prosecdef and proconfig @> array['search_path=""'])) then
