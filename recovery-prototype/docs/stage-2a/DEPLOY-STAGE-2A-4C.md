@@ -74,31 +74,72 @@ tests first.
 
 `supabase/scripts/storage-live-check.mjs` calls the real Storage API with the
 same library the app uses, signed in as three **synthetic** accounts. It runs
-no SQL in the editor, accepts only the `sb_publishable_…` key (it refuses secret keys and legacy `eyJ…` keys, which could be the service_role key), and changes
-nothing except creating two synthetic cases and a few test files.
+no SQL and changes nothing except creating two synthetic cases and a few test
+files. Before connecting to anything, it refuses to start unless:
+- the URL is exactly `https://aqwdwswpmbnzmkvyuqil.supabase.co` (staging), and
+- the key starts with `sb_publishable_`. Secret keys and legacy `eyJ…` keys are
+  refused, because a legacy key could be the service_role key.
+
+It never prints an email, password, key or token. When it finishes, it signs
+out the three sessions it opened, including after a failure or Ctrl-C. It uses
+"this session only" sign-out, so your phone and other devices stay signed in.
 
 **You need:**
-- the staging URL;
 - the publishable key (`sb_publishable_…`, the same one the site uses);
 - synthetic client A and synthetic client B, in **different** synthetic
   businesses;
 - the founder account.
 
-**Where to run it from Android** (pick one; never paste a password into chat,
-an issue or a commit):
-- **GitHub Codespaces** (browser): on the repository page choose Code →
-  Codespaces → create on branch `claude/revenue-recovery-engine-stage-1-8xg8vf`.
-  In its terminal run `cd recovery-prototype && npm ci`.
-- **Termux:**
-  1. `pkg install nodejs-lts git`.
-  2. Clone the repository and check out the branch.
-  3. `cd recovery-prototype && npm ci`.
+Use **GitHub Codespaces** in Chrome on Android. Termux is not recommended: it
+needs a separate GitHub login to clone the private repository. Never paste a
+password into chat, an issue, a commit or a file.
 
-Node 20 or newer. Then type each value at a hidden prompt, so it is not saved
-in shell history:
+### Before you start: protect what you type on the phone
+
+- **Keyboard:** a terminal is not a password box, so your keyboard may learn
+  and later suggest what you type. Open the Codespace in a **Chrome Incognito
+  tab**: Gboard stops learning in Incognito tabs. Otherwise, turn off your
+  keyboard's personalised suggestions or "learn from typing" setting for the
+  test.
+- **Clipboard:** type passwords rather than pasting them. If you do paste one
+  from a password manager, delete it from the keyboard's clipboard history
+  afterwards (in Gboard: clipboard icon → long-press the item → Delete).
+- Keep the screen on during the run. If the phone sleeps and the tab
+  disconnects, the script cannot sign out.
+
+### 1. Open a Codespace
+
+On the repository page: **Code → Codespaces → ⋯ → New with options**. Choose
+branch `claude/revenue-recovery-engine-stage-1-8xg8vf` and the smallest
+machine, then open its **Terminal**.
+
+### 2. Prepare: bash, no history, install (no credentials yet)
+
+Type these one line at a time:
 
 ```sh
-read -r  -p 'Staging URL: '        RRE_SUPABASE_URL
+bash
+echo "$0"
+set +o history
+unset HISTFILE
+cd "$(git rev-parse --show-toplevel)/recovery-prototype"
+git log --oneline -1
+npm ci
+```
+
+- `echo "$0"` **must print `bash`**. The hidden prompts below only work in
+  bash; in another shell a password could end up visible on the command line.
+- `set +o history` and `unset HISTFILE` stop anything you type from now on
+  being saved to shell history.
+- `git log` must show the commit you were told to test.
+- `npm ci` installs packages **before** any credential exists in this
+  terminal. Package install scripts can read whatever settings are set at the
+  time.
+
+### 3. Enter the values at prompts (passwords are hidden)
+
+```sh
+RRE_SUPABASE_URL=https://aqwdwswpmbnzmkvyuqil.supabase.co
 read -r  -p 'Publishable key: '    RRE_PUBLISHABLE_KEY
 read -r  -p 'Client A email: '     CLIENT_A_EMAIL
 read -rs -p 'Client A password: '  CLIENT_A_PASSWORD; echo
@@ -107,18 +148,55 @@ read -rs -p 'Client B password: '  CLIENT_B_PASSWORD; echo
 read -r  -p 'Founder email: '      FOUNDER_EMAIL
 read -rs -p 'Founder password: '   FOUNDER_PASSWORD; echo
 export RRE_SUPABASE_URL RRE_PUBLISHABLE_KEY CLIENT_A_EMAIL CLIENT_A_PASSWORD CLIENT_B_EMAIL CLIENT_B_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD
-node supabase/scripts/storage-live-check.mjs
 ```
 
-Close the terminal afterwards. Send back the printed lines; they contain no
-passwords or keys.
+Nothing appears while you type a password; that is expected. If you make a
+mistake, re-run that one `read` line.
 
-**Expected:** every line PASS, except the lines below. The last line says
-`… 0 fail …`, and the exit code is 0.
+### 4. Run, then clear everything
+
+```sh
+node supabase/scripts/storage-live-check.mjs; echo "exit code: $?"
+unset RRE_SUPABASE_URL RRE_PUBLISHABLE_KEY CLIENT_A_EMAIL CLIENT_A_PASSWORD CLIENT_B_EMAIL CLIENT_B_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD
+env | grep -E 'RRE_|_EMAIL|_PASSWORD' || echo "cleared"
+exit
+```
+
+The last check must print `cleared`.
+
+1. Copy the printed test lines. Glance over them first: they should contain no
+   password. If one ever appears, do not send it; change that password.
+2. Stop and delete the Codespace: **github.com/codespaces → ⋯ next to it →
+   Delete**. Closing the tab is not enough.
+3. Close the Incognito tab.
+
+### Expected output
+
+Every check line is PASS, except:
 - `INFO plain text declared as image/png — ACCEPTED`: expected. It confirms A8
   (contents are not validated).
-- The signed-upload-URL line: PASS or WARN (see below). Either result is safe,
-  but tell me which.
+- The signed-upload-URL line: PASS or WARN (see below). Either is safe; tell me
+  which.
+
+Then come these lines, in this order:
+- `== N pass, 0 fail, …`;
+- `Synthetic cases created: LIVE-CHECK-<time>, LIVE-CHECK-<time>-X (for cleanup).`;
+- three lines `CLIENT_A / CLIENT_B / FOUNDER: signed out (this session only)`;
+- `exit code: 0`.
+
+The run is only valid if these two lines PASS, because the script counts any
+error, including a network failure, as "refused":
+- `client A uploads a valid PNG…`;
+- `founder downloads the screenshot…`.
+
+| Message | Meaning | What to do |
+|---|---|---|
+| `refused: this is not the staging project` | The URL is not exactly the staging URL | Re-run step 3 |
+| `refused: … Use the publishable key` | A secret, legacy or malformed key was typed | Re-enter the `sb_publishable_…` key |
+| `missing environment variable …` | A value is empty | Re-run that `read` line |
+| `stopped: …` (exit code 2) | The run stopped early; its sessions were still signed out | Send me the lines |
+| `WARN … sign-out failed` | One session could not be signed out | Tell me; that session's token expires on its own |
+| any `FAIL` (exit code 1) | A security check failed | Send me the lines |
 
 | Group | What it does through the real API | Proves |
 |---|---|---|
@@ -132,8 +210,9 @@ passwords or keys.
 | Signed upload URL | created while the case is a draft, used after it is submitted | see below |
 | Founder | download (bytes match the hash in the name); exactly one recorded row; founder upload attempt | founder read works; founder cannot upload |
 
-It leaves two synthetic cases named `LIVE-CHECK-<time>` (submitted) and
-`LIVE-CHECK-<time>-X` (abandoned draft holding the text file). The retention
+It leaves the two synthetic cases named on the `Synthetic cases created` line:
+`LIVE-CHECK-<time>` (submitted) and `LIVE-CHECK-<time>-X` (abandoned draft
+holding the text file). The retention
 runbook below removes the draft's file after 7 days.
 
 ### Signed upload URLs (`createSignedUploadUrl`)
