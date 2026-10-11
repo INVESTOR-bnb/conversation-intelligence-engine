@@ -26,6 +26,9 @@ begin
      or (select count(*) from pg_policies where schemaname = 'storage' and tablename = 'objects' and policyname like 'rre_case_screenshots_%') <> 2 then
     raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-4c is not applied.';
   end if;
+  if to_regprocedure('private.screenshot_object_guard()') is not null then
+    raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-4c-1 (upload guard) is applied; run stage2a4c1_rollback.sql first.';
+  end if;
   perform set_config('rre.rows_before', (select count(*) from public.case_screenshots)::text, true);
   perform set_config('rre.audit_before', (select count(*) from public.audit_log)::text, true);
   raise notice 'Rollback preflight passed: removing Stage 2A-4c policies and functions; records are kept.';

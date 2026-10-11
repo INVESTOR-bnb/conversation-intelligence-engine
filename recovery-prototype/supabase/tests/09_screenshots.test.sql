@@ -119,10 +119,14 @@ values ('case-screenshots', pg_temp.nm(tests.biz_a(), :'s2', 1), tests.client_a2
 select tests.login(tests.client_a());
 select tests.throws(format('select public.client_finalize_screenshots(%L)', :'s2'), '^VALIDATION: screenshot failed checks at positions 1', 'a file uploaded by another account is not recorded');
 
--- Concurrency: two different files at one position (as two simultaneous uploads could produce)
+-- Concurrency: two different files at one position (as two simultaneous uploads could produce).
+-- Neither the upload policy nor the 2A-4c-1 guard can prevent a true race, so the
+-- fixture writes the second file with triggers off; finalize must reject it.
 select tests.as_owner();
+set local session_replication_role = replica;
 insert into storage.objects (bucket_id, name, owner_id, metadata)
 values ('case-screenshots', pg_temp.nm(tests.biz_a(), :'s1', 2, 'd', 'png'), tests.client_a()::text, '{"size": 1000, "mimetype": "image/png"}');
+set local session_replication_role = origin;
 select tests.login(tests.client_a());
 select tests.is((select count(*) from jsonb_array_elements(public.client_screenshot_status(:'s1') -> 'files') e where (e ->> 'position')::int = 2), 2::bigint,
   'status shows both conflicting files at position 2');

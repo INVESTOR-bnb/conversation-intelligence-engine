@@ -147,16 +147,29 @@ async function run() {
   expectOk('finalize and submit succeed with one screenshot', !fin.error && !sub.error, fin.error?.message ?? sub.error?.message);
   if (!signed.error) {
     r = await A.c.storage.from(BUCKET).uploadToSignedUrl(p2, signed.data.token, PNG, { contentType: 'image/png' });
-    record(r.error ? 'PASS' : 'WARN', 'upload with that URL after submission', r.error ? 'refused (rule re-checked at upload)' : 'ACCEPTED — the file sits unrecorded in the submitted case; it is never shown or analysed');
+    expectOk('upload with that URL after submission is refused (Stage 2A-4c-1 guard)', Boolean(r.error), r.error ? 'refused' : 'ACCEPTED — the upload guard is missing or ineffective');
   }
   expectOk('no upload after submission (normal API)', refused(await A.c.storage.from(BUCKET).upload(path(A.who.business_id, caseId, 3, PNG), PNG, { contentType: 'image/png' })));
+
+  console.log('== Signed upload URLs in a draft (Stage 2A-4c-1 guard)');
+  const q1 = path(A.who.business_id, caseId2, 2, PNG);
+  const q2 = path(A.who.business_id, caseId2, 2, gif);
+  const s1 = await A.c.storage.from(BUCKET).createSignedUploadUrl(q1);
+  const s2 = await A.c.storage.from(BUCKET).createSignedUploadUrl(q2);
+  expectOk('two signed upload URLs can be created for a free position of a draft', !s1.error && !s2.error, s1.error?.message ?? s2.error?.message);
+  if (!s1.error && !s2.error) {
+    r = await A.c.storage.from(BUCKET).uploadToSignedUrl(q1, s1.data.token, PNG, { contentType: 'image/png' });
+    expectOk('the first is accepted while the case is a draft (legitimate use still works)', !r.error, r.error?.message);
+    r = await A.c.storage.from(BUCKET).uploadToSignedUrl(q2, s2.data.token, PNG, { contentType: 'image/png' });
+    expectOk('the second is refused: the position is now taken (no unlimited files)', Boolean(r.error), r.error ? 'refused' : 'ACCEPTED — the upload guard is missing or ineffective');
+  }
 
   console.log('== Founder');
   const dl = await F.c.storage.from(BUCKET).download(p1);
   expectOk('founder downloads the screenshot; bytes match the hash in its name', !dl.error && sha(Buffer.from(await dl.data.arrayBuffer())) === sha(PNG));
   const rows = await F.c.from('case_screenshots').select('position, storage_path, size_bytes, mime_type').eq('case_id', caseId);
   expectOk('exactly one screenshot recorded for the submitted case', rows.data?.length === 1 && rows.data[0].storage_path === p1);
-  expectOk('founder cannot upload (not a business member)', refused(await F.c.storage.from(BUCKET).upload(path(A.who.business_id, caseId2, 2, PNG), PNG, { contentType: 'image/png' })));
+  expectOk('founder cannot upload (not a business member)', refused(await F.c.storage.from(BUCKET).upload(path(A.who.business_id, caseId2, 3, PNG), PNG, { contentType: 'image/png' })));
 }
 
 let code;

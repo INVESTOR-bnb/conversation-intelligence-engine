@@ -29,6 +29,7 @@ these files.** Synthetic screenshots only.
 1. Database migration and verification (Step 1).
 2. Frontend through the manual GitHub Actions workflow (Step 2).
 3. Real Storage API script, then Android tests, with synthetic accounts and images (Steps 3a and 3b).
+4. Stage 2A-4c-1 upload guard (Step 4), then Step 3a again.
 
 ## Step 1 — Database (Supabase SQL Editor)
 
@@ -175,8 +176,10 @@ The last check must print `cleared`.
 Every check line is PASS, except:
 - `INFO plain text declared as image/png — ACCEPTED`: expected. It confirms A8
   (contents are not validated).
-- The signed-upload-URL line: PASS or WARN (see below). Either is safe; tell me
-  which.
+
+Since Stage 2A-4c-1 (Step 4), both signed-upload-URL checks must PASS. Before
+it, the "after submission" line is a FAIL; that is the known issue Step 4
+fixes.
 
 Then come these lines, in this order:
 - `== N pass, 0 fail, …`;
@@ -220,25 +223,53 @@ runbook below removes the draft's file after 7 days.
 The app does not use signed upload URLs, but any signed-in client can request
 one for a path the upload rule allows at that moment.
 
-- **Unconfirmed:** whether Storage re-applies the INSERT policy when the URL
-  is *used*, rather than only when it is *created*. I have not confirmed this
-  against Storage's source. That is why the script tests it.
-- **PASS** — the use after submission was refused, so the rule is re-checked
-  at upload.
-- **WARN** — the use was accepted. The file then sits in the submitted case's
-  folder but is never recorded:
-  - finalize refuses any case that is not a draft;
-  - the founder viewer shows recorded screenshots only;
-  - the retention report lists it as an unrecorded file.
+**What staging showed (before Stage 2A-4c-1):** a URL created while the case
+was a draft still worked after the case was submitted. The file landed in the
+submitted case's folder, unrecorded.
 
-  It also means one URL per position could exceed 10 files, or place two files
-  at one position, in a draft. Finalize refuses such a draft ("conflicting
-  screenshots"), so nothing unchecked is recorded. The worst outcome is a
-  client spoiling their own draft or leaving stray files in their own
-  business's folder.
-- **Also unconfirmed:** whether a file uploaded through a signed URL gets
-  `owner_id`. If it does not, finalize refuses it as "failed checks", which is
-  safe.
+**Why (confirmed in Supabase Storage's source):**
+- Creating a signed upload URL checks the INSERT policy as the client.
+- *Using* the URL only checks the URL's signature. Storage then writes the file
+  as `service_role`, which bypasses row level security, so the policy is never
+  re-checked.
+- Every ordinary upload is also finally written as `service_role`, after the
+  policy was tested as the client. The URL stays usable for its whole lifetime
+  (Supabase documents two hours).
+
+**What a client could do with this** (only a signed-in member of the business,
+only in that business's own folder):
+- **Observed:** add unrecorded files to a submitted case.
+- **From the source, not observed:** with URLs created for many file names at
+  a free position, add an unlimited number of files of up to 5 MB each.
+- **From the source, not observed:** with a URL created with `upsert`, replace
+  the *contents* of a screenshot that is already recorded. The founder would
+  then see a different image than the one submitted, while the record keeps
+  the original hash and size.
+
+What it could **not** do: reach another business, read any file, or get a file
+recorded. Finalize only works on drafts, and the founder viewer shows only
+recorded screenshots.
+
+**Fix: Stage 2A-4c-1 (Step 4).** A trigger on `storage.objects` re-applies the
+upload rule to every insert into this bucket made without row level security
+— Storage's own writes. It checks that:
+- the recorded uploader is a member of the business;
+- the case is an open screenshot draft;
+- the position is free;
+- the case holds fewer than 10 files.
+
+Storage's replace (upsert) is an insert too, so it is covered. Client uploads
+checked by the policy are unchanged.
+
+### Stage 2A-4c-1 — what the guard does not cover
+
+- Two truly simultaneous uploads to the same position can still both land;
+  finalize then refuses the draft as "conflicting screenshots" (unchanged).
+- If Storage's upload fails at the database step, Storage removes the bytes it
+  wrote. I have read this in Storage's source but not observed it.
+- Storage's *move* is an update, not an insert. Clients have no update policy,
+  so Storage refuses a client's move before writing. Only `service_role` or the
+  dashboard could move files.
 
 ### How Storage metadata is used
 
@@ -273,6 +304,76 @@ and a few made-up screenshots (draw or type a fake chat; no real people).
 The browser IDs for check 4 are on the founder case page (address bar) and the
 founder business list. The user ID is on the client's "Account not yet
 authorised" screen, or in Supabase → Authentication → Users.
+
+## Step 4 — Stage 2A-4c-1: upload guard (Supabase SQL Editor)
+
+Run after Stage 2A-4c, in the **staging** project only. Files are in
+`recovery-prototype/supabase/deploy/`.
+
+1. `stage2a4c1_deploy.sql` — expected: "Success. No rows returned". All or
+   nothing. It refuses, changing nothing, if:
+   - Stage 2A-4c is missing;
+   - 2A-4c-1 is already applied;
+   - your role lacks the TRIGGER privilege on `storage.objects` (see below);
+   - your role cannot bypass RLS.
+
+   Its self-check aborts and undoes everything if the trigger, the function or
+   its privileges are not exactly as reviewed.
+2. `stage2a4c1_verify.sql` — expected **PASS (7 pass, 0 fail, 1 info)**.
+   - Row 8 (INFO) counts unrecorded files, such as the one from the earlier
+     live test.
+   - If row 3 alone FAILs, send its detail column. As with 2A-4c row 13, the
+     cause can be PostgreSQL printing the same definition differently.
+3. `stage2a4c_verify.sql`, `stage2a4b_verify.sql`, `stage2a1_verify.sql` — all
+   **OVERALL PASS**.
+4. Run the live check (Step 3a) again. Every line must PASS, including:
+   - `upload with that URL after submission is refused`;
+   - `the first is accepted while the case is a draft`;
+   - `the second is refused: the position is now taken`.
+
+   The legitimate upload lines must still PASS, which shows the guard doesn't
+   block real uploads.
+
+**If the deploy says "lacks the TRIGGER privilege on storage.objects":** stop.
+Your project does not let the SQL Editor role add triggers to Storage's table,
+so the database cannot enforce this. Do not try to work around it. The secure
+alternative is server-mediated: uploads go through a small server function that
+re-checks the case and writes with the service key. Clients then get no
+INSERT policy and no way to request signed URLs. That is a larger change and
+needs its own approval. Until then, the risk stays as described above, and the
+cleanup report below finds any stray files.
+
+**Rollback:** `stage2a4c1_rollback.sql`.
+- It removes only the trigger and its function, keeps every file, record and
+  audit entry, and is audited.
+- `stage2a4c_rollback.sql` refuses to run while the guard is installed: roll
+  back 2A-4c-1 first.
+
+## Cleaning up synthetic live-check cases and files
+
+The live check creates two cases per run, named `LIVE-CHECK-<time>` and
+`LIVE-CHECK-<time>-X`, plus a few small files.
+
+1. **List** (read-only): run `admin/live_check_cleanup_report.sql` in the SQL
+   Editor. It shows:
+   - each LIVE-CHECK case with its `folder_to_delete` and file counts;
+   - every unrecorded file in any other case, such as the file from the
+     signed-URL test.
+2. **Delete the files** in **Supabase → Storage → case-screenshots**: open each
+   listed folder (business ID, then case ID), select all files → Delete. Delete
+   each listed unrecorded file the same way.
+   - Do not delete in SQL: Supabase blocks direct deletes from
+     `storage.objects`, and they would leave the stored bytes behind.
+   - The guard does not affect deleting.
+3. **Mark the records:** run `admin/screenshot_mark_deleted.sql`. It sets
+   `file_deleted_at` on recorded rows whose file is gone and audits it. It
+   never deletes rows.
+4. **Re-run the report:** `stored_files` must be 0 for every LIVE-CHECK case,
+   with no unrecorded files listed.
+
+The case rows and audit entries stay as the record of the test. They are
+synthetic and clearly named. Deleting case rows is not part of this procedure
+and would need separate approval.
 
 ## Uploads that happen while finalizing or submitting
 
@@ -336,7 +437,8 @@ Records and hashes stay as evidence.
 | A4 | Bucket size and type limits are enforced by Storage | Step 3a (6 MB, GIF); Step 3b #6 |
 | A5 | The SQL Editor role may create the bucket, storage policies and cross-schema helper; Storage's `authenticated` role can run the upload rule | Step 1 succeeds; Step 3a upload line |
 | A6 | Deleting in the dashboard removes the stored file | retention runbook |
-| A7 | List, copy and move map to SELECT, INSERT and UPDATE; signed upload URLs | Step 3a (copy, move, list, signed-URL lines) |
+| A7 | List, copy and move map to SELECT, INSERT and UPDATE | Step 3a (copy, move, list lines) |
+| A11 | Storage writes signed and ordinary uploads through an INSERT that fires the 2A-4c-1 guard; the SQL Editor role may create triggers on `storage.objects` | Step 4 deploy succeeds; Step 3a signed-URL and upload lines |
 | A8 | **File contents and hashes are not verified server-side** | known; must be fixed before AI analysis |
 | A9 | The deploying role (`postgres`) bypasses RLS and may read `storage.objects`, so the helpers see every stored file | deploy preflight; verify rows 7 and 14 |
 | A10 | Staging PostgreSQL prints the policy expressions the same way as local PostgreSQL 16 | verify row 13 (see Step 1) |
