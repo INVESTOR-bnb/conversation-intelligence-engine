@@ -10,10 +10,12 @@
 //   CLIENT_A_EMAIL=... CLIENT_A_PASSWORD=... CLIENT_B_EMAIL=... CLIENT_B_PASSWORD=... \
 //   FOUNDER_EMAIL=... FOUNDER_PASSWORD=... node supabase/scripts/storage-live-check.mjs
 // Clients A and B must be linked to DIFFERENT synthetic businesses.
+// Only an sb_publishable_ key is accepted; legacy eyJ… JWT keys and secret keys are refused.
 // Passwords are read from the environment only; never paste them into chat.
 
 import { createHash, randomBytes } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
+import { publishableKeyProblem } from './live-key.mjs';
 
 const env = (k) => {
   const v = process.env[k];
@@ -22,7 +24,8 @@ const env = (k) => {
 };
 const URL_ = env('RRE_SUPABASE_URL');
 const KEY = env('RRE_PUBLISHABLE_KEY');
-if (!/^sb_publishable_|^eyJ/.test(KEY) || KEY.startsWith('sb_secret_')) { console.error('use the PUBLISHABLE key only'); process.exit(2); }
+const keyProblem = publishableKeyProblem(KEY);
+if (keyProblem) { console.error(`refused: ${keyProblem}. Use the publishable key (sb_publishable_…) only.`); process.exit(2); }
 const BUCKET = 'case-screenshots';
 const results = [];
 const record = (status, name, detail = '') => { results.push({ status, name }); console.log(`${status.padEnd(5)} ${name}${detail ? ` — ${detail}` : ''}`); };

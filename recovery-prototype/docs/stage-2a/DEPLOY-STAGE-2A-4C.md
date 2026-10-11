@@ -74,7 +74,7 @@ tests first.
 
 `supabase/scripts/storage-live-check.mjs` calls the real Storage API with the
 same library the app uses, signed in as three **synthetic** accounts. It runs
-no SQL in the editor, needs no secret key (it refuses one), and changes
+no SQL in the editor, accepts only the `sb_publishable_…` key (it refuses secret keys and legacy `eyJ…` keys, which could be the service_role key), and changes
 nothing except creating two synthetic cases and a few test files.
 
 **You need:**
