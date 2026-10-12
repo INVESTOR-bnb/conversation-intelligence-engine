@@ -13,7 +13,9 @@ read only by the founder. Business users see nothing of it.
   `INSUFFICIENT_EVIDENCE` only if `private.analysis_output_problems` finds no
   problem.
 - Anything else is stored as `ERROR` ("REJECTED by analysis contract …")
-  - without its output, classification, message or restrictions;
+  - without its output, classification or message. Since Stage 2A-5b, any
+    contact restrictions it detected **are still recorded** (active, audited),
+    so a known opt-out is never lost;
   - the case returns to its previous state;
   - the rejection is audited (never shown to the client).
 - Any future producer (the AI function in phase C, a script, anything) is held
@@ -100,3 +102,18 @@ message IDs, are rejected.
   have fixed maximum lengths.
 - Malformed input never crashes the check: it is reported, or rejected as a
   whole ("could not be validated").
+
+## Evidence the contract is checked against (Stage 2A-5b)
+
+- An analysis starts from evidence manifest **v2**:
+  - it lists only screenshots whose file is still stored;
+  - files deleted under retention appear under `excluded_screenshots` and can
+    never be cited;
+  - each message carries a `body_sha256` of its text.
+- `founder_start_analysis` refuses with `INSUFFICIENT_EVIDENCE` when no message
+  and no stored screenshot remain.
+- Any change to, or deletion of, a submitted case's messages or screenshots
+  (including a retention deletion) raises the case's evidence version:
+  - an analysis in progress then fails as **STALE**;
+  - an analysis waiting for review can no longer be approved
+    (`STALE_ANALYSIS`) until it is re-run on the current evidence.

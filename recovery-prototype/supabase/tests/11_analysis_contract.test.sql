@@ -197,14 +197,16 @@ select tests.ok((select status = 'ERROR' and error like 'REJECTED by analysis co
   'a fabricated quote: analysis stored as ERROR with no findings');
 select tests.is((select workflow_state::text from public.cases where id = :'c'), 'SUBMITTED', 'the case returns to its prior state');
 select tests.ok(exists (select 1 from public.audit_log where action = 'ANALYSIS_REJECTED' and case_id = :'c' and client_label is null), 'rejection is audited, never shown to the client');
--- Restrictions from a rejected analysis are not recorded.
+-- An inconsistent opt-out output is rejected, but (since Stage 2A-5b) the opt-out itself is kept.
 select tests.login(tests.founder());
 select public.founder_start_analysis(:'c') as a2 \gset
 select tests.as_service();
 select public.internal_complete_analysis(:'a2', 'COMPLETE', 'synthetic-model', 'v1', :'b', 'GREEN', pg_temp.msg(), '[{"kind":"EXPLICIT_OPT_OUT"}]');
 select tests.as_owner();
-select tests.ok((select status = 'ERROR' from public.analyses where id = :'a2') and not exists (select 1 from public.contact_restrictions where case_id = :'c'),
-  'an inconsistent opt-out output records nothing');
+select tests.ok((select status = 'ERROR' and output is null and ai_proposed_message is null from public.analyses where id = :'a2'),
+  'an inconsistent opt-out output is rejected (no findings, no message)');
+select tests.ok(exists (select 1 from public.contact_restrictions where case_id = :'c' and kind = 'EXPLICIT_OPT_OUT' and source = 'AI_DETECTED' and status = 'ACTIVE'),
+  '... but the detected opt-out is still recorded (2A-5b)');
 -- Accepted.
 select tests.login(tests.founder());
 select public.founder_start_analysis(:'c') as a3 \gset

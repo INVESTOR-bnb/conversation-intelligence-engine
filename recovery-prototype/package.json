@@ -12,7 +12,7 @@
     "test": "npm run test:unit && npm run test:db && npm run test:e2e && npm run test:live",
     "test:unit": "playwright test --config playwright.unit.config.ts",
     "test:e2e": "npm run build && playwright test --config playwright.config.ts",
-    "test:db": "bash supabase/scripts/test-local.sh && INSTALL=deploy bash supabase/scripts/test-local.sh && SUPABASE_HELPER=1 INSTALL=deploy bash supabase/scripts/test-local.sh && bash supabase/scripts/test-deploy.sh && bash supabase/scripts/test-deploy-2a4b.sh && bash supabase/scripts/test-deploy-2a4c.sh && bash supabase/scripts/test-deploy-2a4c1.sh && bash supabase/scripts/test-deploy-2a5a.sh && bash supabase/scripts/test-concurrency-2a4c.sh",
+    "test:db": "bash supabase/scripts/test-local.sh && INSTALL=deploy bash supabase/scripts/test-local.sh && SUPABASE_HELPER=1 INSTALL=deploy bash supabase/scripts/test-local.sh && bash supabase/scripts/test-deploy.sh && bash supabase/scripts/test-deploy-2a4b.sh && bash supabase/scripts/test-deploy-2a4c.sh && bash supabase/scripts/test-deploy-2a4c1.sh && bash supabase/scripts/test-deploy-2a5a.sh && bash supabase/scripts/test-deploy-2a5b.sh && bash supabase/scripts/test-concurrency-2a4c.sh",
     "test:live": "playwright test --config playwright.live.config.ts"
   },
   "dependencies": {

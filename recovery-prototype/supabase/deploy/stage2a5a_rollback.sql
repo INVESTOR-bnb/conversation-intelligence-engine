@@ -15,6 +15,9 @@ begin
   if to_regprocedure('private.analysis_output_problems(public.analyses, public.analysis_status, jsonb, public.classification, text, jsonb)') is null then
     raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-5a is not applied.';
   end if;
+  if to_regprocedure('private.evidence_manifest(uuid, integer)') is not null then
+    raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-5b (evidence integrity) is applied; run stage2a5b_rollback.sql first.';
+  end if;
   perform set_config('rre.analyses_before', (select count(*) from public.analyses)::text, true);
   perform set_config('rre.audit_before', (select count(*) from public.audit_log)::text, true);
   perform set_config('rre.restrictions_before', (select count(*) from public.contact_restrictions)::text, true);
