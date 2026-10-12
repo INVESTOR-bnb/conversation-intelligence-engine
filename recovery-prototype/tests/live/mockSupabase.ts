@@ -53,6 +53,10 @@ export class MockSupabase {
     mockCase('a0000000-0000-4000-8000-000000000102', B1, 'P-102', 'Synthetic Hilux', 'AWAITING_ADMIN_REVIEW', 'Prospect: Price of the Hilux?\nBusiness: Synthetic price.', 'CONTACT_RESTRICTION'),
     mockCase('a0000000-0000-4000-8000-000000000201', B2, 'C-201', 'Synthetic Course', 'SUBMITTED', 'Prospect: When does the course start?'),
   ];
+  /** analyses rows (founder-only, like public.analyses RLS). */
+  analyses: (Record<string, unknown> & { case_id: string; version: number })[] = [];
+  /** contact_restrictions rows (founder-only). */
+  restrictions: { id: string; case_id: string; kind: string; source: string; status: string; note: string | null; created_at: string }[] = [];
   /** Stored files: name -> record (what Supabase Storage keeps). */
   objects = new Map<string, { owner: string; size: number; mime: string; bytes: Buffer }>();
   /** case_screenshots rows. */
@@ -179,7 +183,17 @@ export class MockSupabase {
     }
     if (p === '/rest/v1/case_messages') {
       if (!isFounder) return json(200, []);
-      const rows = this.cases.filter((c) => filterMatches(url, 'case_id', c.id)).map((c) => ({ case_id: c.id, kind: 'PASTED_CONVERSATION', body: c.conversation }));
+      const rows = this.cases.filter((c) => filterMatches(url, 'case_id', c.id)).map((c) => ({ id: messageId(c.id), case_id: c.id, kind: 'PASTED_CONVERSATION', body: c.conversation }));
+      return json(200, rows);
+    }
+    // Founder-only intelligence (RLS): clients and members get no rows; nobody can write through the API.
+    if (p === '/rest/v1/analyses' || p === '/rest/v1/contact_restrictions') {
+      if (req.method() !== 'GET') return json(403, { code: '42501', message: `permission denied for table ${p.split('/').pop()}` });
+      if (!isFounder) return json(200, []);
+      const source = p === '/rest/v1/analyses' ? this.analyses : this.restrictions;
+      const rows = source.filter((r) => filterMatches(url, 'case_id', r.case_id))
+        .sort((a, b) => ('version' in a ? Number(b.version) - Number(a.version) : String(a.created_at).localeCompare(String(b.created_at))))
+        .map(({ case_id: _c, ...r }) => r);
       return json(200, rows);
     }
     if (p === '/rest/v1/rpc/client_list_cases') {
@@ -334,6 +348,9 @@ function mockCase(id: string, business_id: string, reference: string, product_se
     workflow_state, review_reason, evidence_version: workflow_state === 'DRAFT' ? 0 : 1, created_at: new Date(clock).toISOString(),
     queued_at: workflow_state === 'DRAFT' ? null : new Date(clock).toISOString(), idempotency_key: id, conversation, conversation_source: 'TEXT' };
 }
+
+/** The id of a mock case's pasted-conversation message (deterministic). */
+export const messageId = (caseId: string) => `b${caseId.slice(1)}`;
 
 /** Same mapping as public.client_list_cases(). */
 function clientStatus(state: string) {

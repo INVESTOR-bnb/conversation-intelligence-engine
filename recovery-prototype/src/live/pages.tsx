@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button, Card, EmptyState, ErrorBanner, Field, formatDate, Notice, ScreenHeader } from '../components/ui';
+import { FounderAnalysis } from './analysisUi';
 import { useAuth } from './auth';
 import { parseAuthCallback } from './authCallback';
 import { caseErrorMessage, clientStatusLabel, founderStateLabel, isAlreadySubmitted, LEAD_SOURCES, LIMITS, newRequestId, validateCase, type CaseErrors } from './cases';
@@ -475,7 +476,7 @@ export function FounderCasePage({ caseId }: { caseId: string }) {
               {conversation === null ? <EmptyState title="No pasted conversation." /> : <pre className="message-card prospect" data-testid="case-conversation">{conversation}</pre>}
             </Card>
           )}
-          <Notice>Read-only. Analysis and recommendations arrive in a later Stage 2A step.</Notice>
+          <FounderAnalysis caseId={row.id} evidenceVersion={row.evidence_version} />
         </>
       )}
     </Shell>
