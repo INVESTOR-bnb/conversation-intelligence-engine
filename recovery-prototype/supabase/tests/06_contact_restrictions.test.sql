@@ -3,8 +3,9 @@ begin;
 select tests.as_owner();
 select tests.seed();
 
--- AI-detected opt-out: proposal message is removed, GREEN is impossible
-select tests.case_in_review(tests.client_a(), 'GREEN', 'Sales pitch that must never be stored',
+-- AI-detected opt-out: the analysis must be RED with no message (contract rre-analysis/1
+-- rejects anything else; see 11_analysis_contract), and GREEN/YELLOW stay impossible
+select tests.case_in_review(tests.client_a(), 'RED', null,
   '[{"kind":"EXPLICIT_OPT_OUT","note":"Screenshot 2: please do not contact me again","evidence":{"screenshot":2}}]') as c \gset
 select id as a1 from public.analyses where case_id = :'c' \gset
 select tests.ok((select ai_proposed_message is null from public.analyses where id = :'a1'), 'detected opt-out removes the AI proposed message');
@@ -20,7 +21,7 @@ select tests.ok((select classification = 'RED' and approved_message is null from
 select tests.throws(format('select public.client_record_sent(%L)', :'c'), '^INVALID_STATE', 'RED cannot be marked as sent');
 
 -- Misread AI detection can be dismissed only with an audited reason
-select tests.case_in_review(tests.client_a(), 'GREEN', 'ignored', '[{"kind":"EXPLICIT_OPT_OUT","note":"misread sarcasm"}]') as c2 \gset
+select tests.case_in_review(tests.client_a(), 'RED', null, '[{"kind":"EXPLICIT_OPT_OUT","note":"misread sarcasm"}]') as c2 \gset
 select id as r2 from public.contact_restrictions where case_id = :'c2' \gset
 select id as a2 from public.analyses where case_id = :'c2' \gset
 select tests.login(tests.founder());

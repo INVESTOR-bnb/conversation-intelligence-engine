@@ -46,7 +46,7 @@ select tests.login(tests.founder());
 select public.founder_start_analysis(:'case1') as an2 \gset
 select tests.as_service();
 select tests.throws(format('select public.internal_complete_analysis(%L, %L)', :'an2', 'PENDING'), '^VALIDATION', 'cannot complete as PENDING');
-select public.internal_complete_analysis(:'an2', 'COMPLETE', 'synthetic-model', 'test', '{"synthetic":true}', 'GREEN', 'AI proposed text', '[]', 1000, 200, 0.004);
+select public.internal_complete_analysis(:'an2', 'COMPLETE', 'synthetic-model', 'test', tests.contract_output(:'an2', 'GREEN', 'AI proposed text'), 'GREEN', 'AI proposed text', '[]', 1000, 200, 0.004);
 select tests.throws(format('select public.internal_complete_analysis(%L, %L)', :'an2', 'COMPLETE'), '^INVALID_STATE', 'analysis cannot be completed twice');
 select tests.as_owner();
 select tests.is((select workflow_state::text from public.cases where id = :'case1'), 'AWAITING_ADMIN_REVIEW', 'completed analysis moves case to review');
@@ -90,7 +90,7 @@ select tests.throws(format('select public.client_add_response(%L, %L)', :'case1'
 select tests.login(tests.founder());
 select public.founder_start_analysis(:'case1') as an3 \gset
 select tests.as_service();
-select public.internal_complete_analysis(:'an3', 'COMPLETE', 'synthetic-model', 'test', '{}', 'GREEN', 'Next AI text', '[]');
+select public.internal_complete_analysis(:'an3', 'COMPLETE', 'synthetic-model', 'test', tests.contract_output(:'an3', 'GREEN', 'Next AI text'), 'GREEN', 'Next AI text', '[]');
 select tests.login(tests.founder());
 select public.founder_approve(:'case1', :'an3', 3, 'GREEN', 'Momentum restored.', 'Confirm the viewing.', 'Next AI text', 'UNCHANGED');
 select tests.login(tests.client_a());

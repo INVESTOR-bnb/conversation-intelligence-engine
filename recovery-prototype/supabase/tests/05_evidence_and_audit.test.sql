@@ -14,7 +14,7 @@ select tests.throws(format('select public.founder_approve(%L, %L, 99, %L, %L, %L
 select public.founder_request_reanalysis(:'c');
 select public.founder_start_analysis(:'c') as a2 \gset
 select tests.as_service();
-select public.internal_complete_analysis(:'a2', 'COMPLETE', 'synthetic-model', 'test', '{}', 'YELLOW', 'Second proposal', '[]');
+select public.internal_complete_analysis(:'a2', 'COMPLETE', 'synthetic-model', 'test', tests.contract_output(:'a2', 'YELLOW', 'Second proposal'), 'YELLOW', 'Second proposal', '[]');
 select tests.login(tests.founder());
 select tests.throws(format('select public.founder_approve(%L, %L, 1, %L, %L, %L, %L, %L)', :'c', :'a1', 'GREEN', 's', 'n', 'First proposal', 'UNCHANGED'), '^STALE_ANALYSIS', 'an older analysis cannot be approved once superseded');
 select public.founder_approve(:'c', :'a2', 1, 'YELLOW', 'Unclear.', 'Clarify.', 'Second proposal', 'UNCHANGED');
@@ -38,7 +38,7 @@ select public.founder_start_analysis(:'c') as a3 \gset
 select tests.as_owner();
 update public.cases set evidence_version = evidence_version + 1 where id = :'c';
 select tests.as_service();
-select public.internal_complete_analysis(:'a3', 'COMPLETE', 'synthetic-model', 'test', '{}', 'GREEN', 'Late proposal', '[]');
+select public.internal_complete_analysis(:'a3', 'COMPLETE', 'synthetic-model', 'test', tests.contract_output(:'a3', 'GREEN', 'Late proposal'), 'GREEN', 'Late proposal', '[]');
 select tests.as_owner();
 select tests.ok((select status = 'ERROR' and error like 'STALE%' from public.analyses where id = :'a3'), 'analysis finished on changed evidence is stored as ERROR');
 select tests.is((select workflow_state::text from public.cases where id = :'c'), 'PROSPECT_REPLIED', 'case returns to its prior state');
