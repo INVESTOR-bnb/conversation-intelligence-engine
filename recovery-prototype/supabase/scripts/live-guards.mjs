@@ -1,4 +1,5 @@
-// Guards for storage-live-check.mjs, checked before any connection is made.
+// Guards for the staging live checks (storage-live-check.mjs, analyze-case-live-check.mjs),
+// checked before any connection is made.
 // Messages never repeat the value given: a password or key typed at the wrong
 // prompt must not end up on screen.
 

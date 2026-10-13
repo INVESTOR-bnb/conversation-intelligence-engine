@@ -143,6 +143,10 @@ read this case".
 
 ## Android-compatible deployment (when approved; not done)
 
+> **Superseded by `DEPLOY-STAGE-2A-5D-4C.md`.** Use its guarded deploy script and live check
+> (`supabase/scripts/deploy-analyze-case-staging.sh`, `analyze-case-live-check.sh`). The
+> steps below are kept for reference only.
+
 **Option A — recommended for the first, one-off staging deploy: a GitHub Codespace.**
 No long-lived token is stored anywhere.
 1. Open the repository on GitHub (Chrome on Android) → **Code** → **Codespaces**
