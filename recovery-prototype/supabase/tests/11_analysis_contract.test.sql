@@ -207,8 +207,20 @@ select tests.ok((select status = 'ERROR' and output is null and ai_proposed_mess
   'an inconsistent opt-out output is rejected (no findings, no message)');
 select tests.ok(exists (select 1 from public.contact_restrictions where case_id = :'c' and kind = 'EXPLICIT_OPT_OUT' and source = 'AI_DETECTED' and status = 'ACTIVE'),
   '... but the detected opt-out is still recorded (2A-5b)');
--- Accepted.
+-- Since Stage 2A-5d-1 the kept opt-out (now in the next analysis's evidence snapshot) also
+-- stops that analysis from recommending contact.
 select tests.login(tests.founder());
+select public.founder_start_analysis(:'c') as a3r \gset
+select tests.as_service();
+select public.internal_complete_analysis(:'a3r', 'COMPLETE', 'synthetic-model', 'v1', :'b', 'GREEN', pg_temp.msg(), '[]');
+select tests.as_owner();
+select tests.ok((select status = 'ERROR' and error like '%an active contact restriction in the evidence snapshot requires DO_NOT_PURSUE%'
+                        and output is null and ai_proposed_message is null from public.analyses where id = :'a3r'),
+  'with the kept opt-out in the snapshot, the GREEN analysis is rejected (2A-5d-1)');
+-- Accepted, once the founder has dismissed the AI-detected opt-out as a misreading.
+select tests.login(tests.founder());
+select public.founder_dismiss_ai_restriction(id, 'Synthetic: the prospect was quoting someone else, not opting out.')
+from public.contact_restrictions where case_id = :'c' and status = 'ACTIVE';
 select public.founder_start_analysis(:'c') as a3 \gset
 select tests.as_service();
 select public.internal_complete_analysis(:'a3', 'COMPLETE', 'synthetic-model', 'v1', :'b', 'GREEN', pg_temp.msg(), '[]');

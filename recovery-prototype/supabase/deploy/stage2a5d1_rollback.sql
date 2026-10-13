@@ -1,0 +1,393 @@
+-- ===================================================================
+-- REVENUE RECOVERY ENGINE — STAGE 2A-5d-1 ROLLBACK (single transaction)
+-- Restores private.analysis_output_problems exactly as Stage 2A-5a defined
+-- it (CREATE OR REPLACE keeps its owner and privileges: no API role).
+-- Changes no data: every analysis, restriction and audit entry is kept.
+-- WARNING: afterwards an analysis that recommends contact is accepted again
+-- when the restriction is only in its evidence snapshot (founder_approve
+-- still refuses to approve GREEN/YELLOW while a restriction is active).
+-- Safe to re-run: if 2A-5d-1 is not applied it refuses and changes nothing.
+-- Afterwards run stage2a5b_verify.sql, stage2a5a_verify.sql and the
+-- earlier verification files.
+-- ===================================================================
+
+begin;
+
+do $preflight$
+begin
+  if coalesce((select prosrc from pg_proc
+               where oid = to_regprocedure('private.analysis_output_problems(public.analyses, public.analysis_status, jsonb, public.classification, text, jsonb)')), '')
+     not like '%Stage 2A-5d-1%' then
+    raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-5d-1 is not applied.';
+  end if;
+  perform set_config('rre.counts_before', (select concat_ws('/', (select count(*) from public.analyses), (select count(*) from public.contact_restrictions),
+    (select count(*) from public.audit_log), (select coalesce(sum(evidence_version), 0) from public.cases))), true);
+end
+$preflight$;
+
+-- private.analysis_output_problems exactly as in migration 20261014120000_stage2a5a_analysis_contract.sql
+create or replace function private.analysis_output_problems(
+  p_analysis public.analyses,
+  p_status public.analysis_status,
+  p_output jsonb,
+  p_ai_classification public.classification,
+  p_ai_proposed_message text,
+  p_detected_restrictions jsonb
+) returns text[]
+language plpgsql stable security definer set search_path = '' as $$
+declare
+  v_p text[] := '{}';
+  v_x text;
+  v_ea jsonb;
+  v_obs jsonb;
+  v_hyp jsonb;
+  v_unk jsonb;
+  v_rec jsonb;
+  v_na jsonb;
+  v_res jsonb;
+  v_rnp jsonb;
+  v_r record;
+  v_s record;
+  v_w text;
+  v_obs_ids text[];
+  v_hyp_ids text[];
+  v_suff text;
+  v_pursue text;
+  v_na_type text;
+  v_usable integer;
+begin
+  if p_status not in ('COMPLETE', 'INSUFFICIENT_EVIDENCE') then
+    return v_p;
+  end if;
+  if jsonb_typeof(p_output) is distinct from 'object' then
+    return array['output must be a JSON object'];
+  end if;
+  if octet_length(p_output::text) > 200000 then
+    return array['output is larger than 200 kB'];
+  end if;
+  if p_output ->> 'contract_version' is distinct from 'rre-analysis/1' then
+    v_p := array_append(v_p, 'contract_version must be rre-analysis/1');
+  end if;
+  v_x := private.ac_extra_keys(p_output, array['contract_version', 'evidence_assessment', 'observations', 'hypotheses',
+                                              'unknowns', 'recommendation', 'contact_restrictions', 'reasons_not_to_pursue']);
+  if v_x is not null then v_p := array_append(v_p, 'unexpected keys ' || v_x); end if;
+  foreach v_x in array array['evidence_assessment', 'observations', 'hypotheses', 'unknowns', 'recommendation',
+                             'contact_restrictions', 'reasons_not_to_pursue'] loop
+    if not p_output ? v_x then v_p := array_append(v_p, 'missing ' || v_x); end if;
+  end loop;
+  if cardinality(v_p) > 0 then
+    return v_p;
+  end if;
+
+  v_ea := p_output -> 'evidence_assessment';
+  v_obs := p_output -> 'observations';
+  v_hyp := p_output -> 'hypotheses';
+  v_unk := p_output -> 'unknowns';
+  v_rec := p_output -> 'recommendation';
+  v_res := p_output -> 'contact_restrictions';
+  v_rnp := p_output -> 'reasons_not_to_pursue';
+  foreach v_x in array array['observations', 'hypotheses', 'unknowns', 'contact_restrictions', 'reasons_not_to_pursue'] loop
+    if jsonb_typeof(p_output -> v_x) is distinct from 'array' or jsonb_array_length(p_output -> v_x) > 60 then
+      v_p := array_append(v_p, v_x || ' must be a list (at most 60)');
+    end if;
+  end loop;
+  if jsonb_typeof(v_ea) is distinct from 'object' or jsonb_typeof(v_rec) is distinct from 'object' then
+    v_p := array_append(v_p, 'evidence_assessment and recommendation must be objects');
+  end if;
+  if cardinality(v_p) > 0 then
+    return v_p;
+  end if;
+
+  -- evidence assessment
+  v_suff := v_ea ->> 'sufficiency';
+  if v_suff is null or v_suff not in ('SUFFICIENT', 'PARTIAL', 'INSUFFICIENT') then
+    v_p := array_append(v_p, 'evidence_assessment.sufficiency must be SUFFICIENT, PARTIAL or INSUFFICIENT');
+  end if;
+  if not private.ac_text(v_ea -> 'summary', 1000) then
+    v_p := array_append(v_p, 'evidence_assessment.summary is required (1-1000 characters)');
+  end if;
+  if jsonb_typeof(v_ea -> 'missing_evidence') is distinct from 'array' or jsonb_array_length(v_ea -> 'missing_evidence') > 20
+     or exists (select 1 from jsonb_array_elements(private.ac_arr(v_ea -> 'missing_evidence')) e where not private.ac_text(e, 500)) then
+    v_p := array_append(v_p, 'evidence_assessment.missing_evidence must be a list of texts (1-500 characters)');
+  end if;
+  v_x := private.ac_extra_keys(v_ea, array['sufficiency', 'summary', 'missing_evidence']);
+  if v_x is not null then v_p := array_append(v_p, 'evidence_assessment: unexpected keys ' || v_x); end if;
+
+  -- observations
+  select array_agg(o ->> 'id') into v_obs_ids from jsonb_array_elements(v_obs) o;
+  v_obs_ids := coalesce(v_obs_ids, '{}');
+  if exists (select 1 from unnest(v_obs_ids) i where i is null or i !~ '^O[0-9]{1,3}$')
+     or cardinality(v_obs_ids) <> (select count(distinct i) from unnest(v_obs_ids) i) then
+    v_p := array_append(v_p, 'observation ids must be unique and look like O1, O2, ...');
+  end if;
+  for v_r in select o, i from jsonb_array_elements(v_obs) with ordinality as t(o, i) loop
+    v_w := format('observations[%s]', v_r.i - 1);
+    if jsonb_typeof(v_r.o) is distinct from 'object' then
+      v_p := array_append(v_p, v_w || ' must be an object');
+      continue;
+    end if;
+    if v_r.o ->> 'actor' is null or v_r.o ->> 'actor' not in ('PROSPECT', 'SELLER', 'UNCLEAR') then
+      v_p := array_append(v_p, v_w || '.actor must be PROSPECT, SELLER or UNCLEAR');
+    end if;
+    if not private.ac_text(v_r.o -> 'behavior', 1000) then
+      v_p := array_append(v_p, v_w || '.behavior is required (1-1000 characters)');
+    end if;
+    v_p := v_p || private.ac_refs_problems(p_analysis, v_r.o -> 'evidence', v_w || '.evidence', 1);
+    -- An actor cannot be evidenced only by the other side's own messages.
+    if exists (select 1 from jsonb_array_elements(private.ac_arr(v_r.o -> 'evidence')) e
+               join public.case_messages m on m.id::text = e ->> 'message_id' and m.case_id = p_analysis.case_id
+               where e ->> 'type' = 'MESSAGE'
+                 and ((v_r.o ->> 'actor' = 'PROSPECT' and m.kind = 'RECOVERY_SENT')
+                   or (v_r.o ->> 'actor' = 'SELLER' and m.kind = 'PROSPECT_RESPONSE'))) then
+      v_p := array_append(v_p, v_w || ': cites a message written by the other party');
+    end if;
+    v_x := private.ac_extra_keys(v_r.o, array['id', 'actor', 'behavior', 'evidence']);
+    if v_x is not null then v_p := array_append(v_p, v_w || ': unexpected keys ' || v_x); end if;
+  end loop;
+
+  -- hypotheses
+  select array_agg(h ->> 'id') into v_hyp_ids from jsonb_array_elements(v_hyp) h;
+  v_hyp_ids := coalesce(v_hyp_ids, '{}');
+  if exists (select 1 from unnest(v_hyp_ids) i where i is null or i !~ '^H[0-9]{1,3}$')
+     or cardinality(v_hyp_ids) <> (select count(distinct i) from unnest(v_hyp_ids) i) then
+    v_p := array_append(v_p, 'hypothesis ids must be unique and look like H1, H2, ...');
+  end if;
+  for v_r in select h, i from jsonb_array_elements(v_hyp) with ordinality as t(h, i) loop
+    v_w := format('hypotheses[%s]', v_r.i - 1);
+    if jsonb_typeof(v_r.h) is distinct from 'object' then
+      v_p := array_append(v_p, v_w || ' must be an object');
+      continue;
+    end if;
+    if v_r.h ->> 'category' is null or v_r.h ->> 'category' not in
+       ('EMOTIONAL_BARRIER', 'TRUST_AND_RISK', 'BUYING_MOTIVATION', 'DECISION_FRICTION', 'SELLER_CREATED_RESISTANCE') then
+      v_p := array_append(v_p, v_w || '.category is not a known category');
+    end if;
+    if not private.ac_text(v_r.h -> 'statement', 1000) then
+      v_p := array_append(v_p, v_w || '.statement is required (1-1000 characters)');
+    end if;
+    if not private.ac_text(v_r.h -> 'uncertainty', 1000) then
+      v_p := array_append(v_p, v_w || '.uncertainty is required: say what would change this view');
+    end if;
+    if v_r.h ->> 'confidence' is null or v_r.h ->> 'confidence' not in ('HIGH', 'MEDIUM', 'LOW', 'UNKNOWN') then
+      v_p := array_append(v_p, v_w || '.confidence must be HIGH, MEDIUM, LOW or UNKNOWN');
+    end if;
+    foreach v_x in array array['supporting_observations', 'contradicting_observations', 'competing_hypotheses'] loop
+      if jsonb_typeof(v_r.h -> v_x) is distinct from 'array' or exists (select 1 from jsonb_array_elements(private.ac_arr(v_r.h -> v_x)) e where jsonb_typeof(e) is distinct from 'string') then
+        v_p := array_append(v_p, format('%s.%s must be a list of ids', v_w, v_x));
+      end if;
+    end loop;
+    if jsonb_array_length(private.ac_arr(v_r.h -> 'supporting_observations')) = 0 then
+      v_p := array_append(v_p, v_w || ' rests on no observation; record it as an unknown instead');
+    end if;
+    if exists (select 1 from jsonb_array_elements_text(private.ac_arr(v_r.h -> 'supporting_observations')) e where e <> all (v_obs_ids))
+       or exists (select 1 from jsonb_array_elements_text(private.ac_arr(v_r.h -> 'contradicting_observations')) e where e <> all (v_obs_ids)) then
+      v_p := array_append(v_p, v_w || ' refers to an observation that does not exist');
+    end if;
+    if exists (select 1 from jsonb_array_elements_text(private.ac_arr(v_r.h -> 'supporting_observations')) e
+               where e in (select jsonb_array_elements_text(private.ac_arr(v_r.h -> 'contradicting_observations')))) then
+      v_p := array_append(v_p, v_w || ': an observation cannot both support and contradict it');
+    end if;
+    if exists (select 1 from jsonb_array_elements_text(private.ac_arr(v_r.h -> 'competing_hypotheses')) e
+               where e <> all (v_hyp_ids) or e = v_r.h ->> 'id') then
+      v_p := array_append(v_p, v_w || '.competing_hypotheses must name other hypotheses');
+    end if;
+    if v_r.h ->> 'basis' = 'STATED_BY_PROSPECT' then
+      -- Only what the prospect actually said, quoted, may be presented as stated.
+      if not exists (select 1 from jsonb_array_elements_text(private.ac_arr(v_r.h -> 'supporting_observations')) s
+                     join jsonb_array_elements(v_obs) o on o ->> 'id' = s
+                     where o ->> 'actor' = 'PROSPECT'
+                       and exists (select 1 from jsonb_array_elements(private.ac_arr(o -> 'evidence')) e where private.ac_text(e -> 'quote', 500))) then
+        v_p := array_append(v_p, v_w || ' is not directly supported by a quoted prospect statement; label it HYPOTHESIS');
+      end if;
+    elsif v_r.h ->> 'basis' = 'HYPOTHESIS' then
+      if jsonb_array_length(private.ac_arr(v_r.h -> 'competing_hypotheses')) = 0 then
+        v_p := array_append(v_p, v_w || ' is a hypothesis and must name at least one competing hypothesis');
+      end if;
+      if v_r.h ->> 'confidence' = 'HIGH' then
+        v_p := array_append(v_p, v_w || ': an unstated psychological hypothesis cannot be HIGH confidence');
+      end if;
+    else
+      v_p := array_append(v_p, v_w || '.basis must be STATED_BY_PROSPECT or HYPOTHESIS');
+    end if;
+    if v_r.h ->> 'confidence' = 'HIGH' and jsonb_array_length(private.ac_arr(v_r.h -> 'contradicting_observations')) > 0 then
+      v_p := array_append(v_p, v_w || ': HIGH confidence is impossible while observations contradict it');
+    end if;
+    v_x := private.ac_extra_keys(v_r.h, array['id', 'category', 'statement', 'basis', 'supporting_observations',
+                                             'contradicting_observations', 'competing_hypotheses', 'confidence', 'uncertainty']);
+    if v_x is not null then v_p := array_append(v_p, v_w || ': unexpected keys ' || v_x); end if;
+  end loop;
+
+  -- unknowns
+  for v_r in select u, i from jsonb_array_elements(v_unk) with ordinality as t(u, i) loop
+    if not (private.ac_text(v_r.u -> 'question', 500) and private.ac_text(v_r.u -> 'why_it_matters', 500))
+       or private.ac_extra_keys(v_r.u, array['question', 'why_it_matters']) is not null then
+      v_p := array_append(v_p, format('unknowns[%s] needs exactly question and why_it_matters (1-500 characters)', v_r.i - 1));
+    end if;
+  end loop;
+
+  -- contact restrictions and reasons not to pursue
+  for v_r in select c, i from jsonb_array_elements(v_res) with ordinality as t(c, i) loop
+    v_w := format('contact_restrictions[%s]', v_r.i - 1);
+    if v_r.c ->> 'kind' is null or v_r.c ->> 'kind' not in ('EXPLICIT_OPT_OUT', 'PROHIBITED_CONTACT', 'OTHER') then
+      v_p := array_append(v_p, v_w || '.kind must be EXPLICIT_OPT_OUT, PROHIBITED_CONTACT or OTHER');
+    end if;
+    if not private.ac_text(v_r.c -> 'reason', 1000) then
+      v_p := array_append(v_p, v_w || '.reason is required');
+    end if;
+    v_p := v_p || private.ac_refs_problems(p_analysis, v_r.c -> 'evidence', v_w || '.evidence', 1);
+    v_x := private.ac_extra_keys(v_r.c, array['kind', 'reason', 'evidence']);
+    if v_x is not null then v_p := array_append(v_p, v_w || ': unexpected keys ' || v_x); end if;
+  end loop;
+  for v_r in select c, i from jsonb_array_elements(v_rnp) with ordinality as t(c, i) loop
+    v_w := format('reasons_not_to_pursue[%s]', v_r.i - 1);
+    if not private.ac_text(v_r.c -> 'reason', 1000) then
+      v_p := array_append(v_p, v_w || '.reason is required');
+    end if;
+    v_p := v_p || private.ac_refs_problems(p_analysis, coalesce(v_r.c -> 'evidence', '[]'::jsonb), v_w || '.evidence', 0);
+    v_x := private.ac_extra_keys(v_r.c, array['reason', 'evidence']);
+    if v_x is not null then v_p := array_append(v_p, v_w || ': unexpected keys ' || v_x); end if;
+  end loop;
+  -- The restrictions in the output must be exactly the ones being recorded.
+  if jsonb_typeof(coalesce(p_detected_restrictions, '[]'::jsonb)) <> 'array'
+     or jsonb_array_length(v_res) <> jsonb_array_length(coalesce(p_detected_restrictions, '[]'::jsonb))
+     or exists (select 1 from jsonb_array_elements(v_res) with ordinality a(c, i)
+                join jsonb_array_elements(coalesce(p_detected_restrictions, '[]'::jsonb)) with ordinality b(d, j) on a.i = b.j
+                where a.c ->> 'kind' is distinct from b.d ->> 'kind') then
+    v_p := array_append(v_p, 'contact_restrictions do not match the restrictions being recorded');
+  end if;
+
+  -- recommendation
+  v_pursue := v_rec ->> 'pursue';
+  v_na := v_rec -> 'next_action';
+  v_na_type := v_na ->> 'type';
+  if v_pursue is null or v_pursue not in ('PURSUE', 'DO_NOT_PURSUE', 'UNKNOWN') then
+    v_p := array_append(v_p, 'recommendation.pursue must be PURSUE, DO_NOT_PURSUE or UNKNOWN');
+  end if;
+  if not private.ac_text(v_rec -> 'strategy', 1500) then
+    v_p := array_append(v_p, 'recommendation.strategy is required (text or UNKNOWN)');
+  end if;
+  if not private.ac_text(v_rec -> 'psychological_rationale', 1500) then
+    v_p := array_append(v_p, 'recommendation.psychological_rationale is required (text or UNKNOWN)');
+  end if;
+  if jsonb_typeof(v_rec -> 'based_on_hypotheses') is distinct from 'array'
+     or exists (select 1 from jsonb_array_elements(private.ac_arr(v_rec -> 'based_on_hypotheses')) e
+                where jsonb_typeof(e) is distinct from 'string' or (e #>> '{}') <> all (v_hyp_ids)) then
+    v_p := array_append(v_p, 'recommendation.based_on_hypotheses must list existing hypotheses');
+  end if;
+  if jsonb_typeof(v_na) is distinct from 'object' or v_na_type is null
+     or v_na_type not in ('SEND_MESSAGE', 'ASK_DIAGNOSTIC_QUESTION', 'WAIT', 'STOP_CONTACT')
+     or not private.ac_text(v_na -> 'text', 2000)
+     or private.ac_extra_keys(v_na, array['type', 'text']) is not null then
+    v_p := array_append(v_p, 'recommendation.next_action needs a type (SEND_MESSAGE, ASK_DIAGNOSTIC_QUESTION, WAIT, STOP_CONTACT) and a text');
+  end if;
+  v_x := private.ac_extra_keys(v_rec, array['pursue', 'strategy', 'psychological_rationale', 'based_on_hypotheses', 'next_action']);
+  if v_x is not null then v_p := array_append(v_p, 'recommendation: unexpected keys ' || v_x); end if;
+
+  if v_pursue = 'PURSUE' then
+    if v_rec ->> 'strategy' = 'UNKNOWN' or v_rec ->> 'psychological_rationale' = 'UNKNOWN'
+       or jsonb_array_length(private.ac_arr(v_rec -> 'based_on_hypotheses')) = 0 then
+      v_p := array_append(v_p, 'PURSUE needs a strategy, a psychological rationale and the hypotheses it rests on');
+    end if;
+    if v_na_type not in ('SEND_MESSAGE', 'ASK_DIAGNOSTIC_QUESTION') then
+      v_p := array_append(v_p, 'PURSUE needs a message or a diagnostic question as the next action');
+    end if;
+  elsif v_pursue = 'DO_NOT_PURSUE' then
+    if v_na_type is distinct from 'STOP_CONTACT' then
+      v_p := array_append(v_p, 'DO_NOT_PURSUE needs STOP_CONTACT as the next action');
+    end if;
+    if jsonb_array_length(v_res) = 0 and jsonb_array_length(v_rnp) = 0 then
+      v_p := array_append(v_p, 'DO_NOT_PURSUE needs a contact restriction or a reason not to pursue');
+    end if;
+  elsif v_pursue = 'UNKNOWN' then
+    if v_na_type not in ('ASK_DIAGNOSTIC_QUESTION', 'WAIT') then
+      v_p := array_append(v_p, 'UNKNOWN pursuit needs a diagnostic question or WAIT as the next action');
+    end if;
+  end if;
+  if jsonb_array_length(v_res) > 0 and v_pursue is distinct from 'DO_NOT_PURSUE' then
+    v_p := array_append(v_p, 'a contact restriction requires DO_NOT_PURSUE');
+  end if;
+  -- classification and proposed message agree with the recommendation
+  if (v_pursue = 'DO_NOT_PURSUE' and p_ai_classification is distinct from 'RED')
+     or (v_pursue = 'PURSUE' and p_ai_classification is distinct from 'GREEN' and p_ai_classification is distinct from 'YELLOW')
+     or (v_pursue = 'UNKNOWN' and p_ai_classification is not null) then
+    v_p := array_append(v_p, 'classification does not match the recommendation (RED = DO_NOT_PURSUE, GREEN/YELLOW = PURSUE, none = UNKNOWN)');
+  end if;
+  if nullif(btrim(coalesce(p_ai_proposed_message, '')), '') is not null then
+    if v_na_type is distinct from 'SEND_MESSAGE' or private.ac_norm(p_ai_proposed_message) <> private.ac_norm(v_na ->> 'text') then
+      v_p := array_append(v_p, 'a proposed message is allowed only for SEND_MESSAGE and must equal its text');
+    end if;
+  elsif v_na_type = 'SEND_MESSAGE' then
+    v_p := array_append(v_p, 'SEND_MESSAGE needs the proposed message');
+  end if;
+
+  -- sufficiency and status
+  select count(*) into v_usable from (
+    select 1 from jsonb_array_elements(private.ac_arr(p_analysis.evidence_manifest -> 'messages'))
+    union all
+    select 1 from jsonb_array_elements(private.ac_arr(p_analysis.evidence_manifest -> 'screenshots')) m
+    where exists (select 1 from public.case_screenshots s where s.case_id = p_analysis.case_id
+                  and s.position = (m ->> 'position')::integer and s.sha256 = m ->> 'sha256' and s.file_deleted_at is null)) u;
+  if p_status = 'INSUFFICIENT_EVIDENCE' then
+    if v_suff is distinct from 'INSUFFICIENT' then
+      v_p := array_append(v_p, 'INSUFFICIENT_EVIDENCE requires sufficiency INSUFFICIENT');
+    end if;
+    if jsonb_array_length(v_hyp) > 0 or p_ai_classification is not null or nullif(btrim(coalesce(p_ai_proposed_message, '')), '') is not null
+       or v_rec ->> 'strategy' is distinct from 'UNKNOWN' then
+      v_p := array_append(v_p, 'INSUFFICIENT_EVIDENCE carries no hypotheses, classification, proposed message or strategy (strategy UNKNOWN)');
+    end if;
+    if v_pursue = 'PURSUE' then
+      v_p := array_append(v_p, 'INSUFFICIENT_EVIDENCE cannot recommend PURSUE');
+    end if;
+    if jsonb_array_length(v_unk) = 0 or jsonb_array_length(private.ac_arr(v_ea -> 'missing_evidence')) = 0 then
+      v_p := array_append(v_p, 'INSUFFICIENT_EVIDENCE must state what is missing (missing_evidence and unknowns)');
+    end if;
+  else
+    if v_usable = 0 then
+      v_p := array_append(v_p, 'no usable evidence remains (none recorded, or all deleted): only INSUFFICIENT_EVIDENCE is allowed');
+    end if;
+    if v_suff = 'INSUFFICIENT' then
+      v_p := array_append(v_p, 'sufficiency INSUFFICIENT requires status INSUFFICIENT_EVIDENCE');
+    end if;
+    if jsonb_array_length(v_obs) = 0 then
+      v_p := array_append(v_p, 'COMPLETE needs at least one observation');
+    end if;
+    if v_suff = 'PARTIAL' and jsonb_array_length(v_unk) = 0 then
+      v_p := array_append(v_p, 'PARTIAL evidence must list at least one unknown');
+    end if;
+  end if;
+  return v_p;
+exception when others then
+  -- Fail closed: anything unexpected in the output rejects it.
+  return array['output could not be validated: ' || sqlerrm];
+end $$;
+
+do $postcheck$
+declare
+  v_f regprocedure := 'private.analysis_output_problems(public.analyses, public.analysis_status, jsonb, public.classification, text, jsonb)'::regprocedure;
+begin
+  if (select prosrc from pg_proc where oid = v_f) like '%Stage 2A-5d-1%'
+     or md5((select prosrc from pg_proc where oid = v_f)) <> 'c72fd76ccb48d0e412442f91ea0619ff' then
+    raise exception 'ROLLBACK ABORTED (rolled back): the contract is not the Stage 2A-5a version';
+  end if;
+  if not coalesce((select prosecdef and proconfig @> array['search_path=""'] from pg_proc where oid = v_f), false)
+     or has_function_privilege('anon', v_f, 'EXECUTE') or has_function_privilege('authenticated', v_f, 'EXECUTE')
+     or has_function_privilege('service_role', v_f, 'EXECUTE') then
+    raise exception 'ROLLBACK ABORTED (rolled back): contract privileges or search_path changed';
+  end if;
+  if (select prosrc from pg_proc where oid = 'public.internal_complete_analysis(uuid, public.analysis_status, text, text, jsonb, public.classification, text, jsonb, integer, integer, numeric, text)'::regprocedure)
+     not like '%private.analysis_output_problems(%' then
+    raise exception 'ROLLBACK ABORTED (rolled back): the 2A-5a contract would no longer be enforced';
+  end if;
+  if concat_ws('/', (select count(*) from public.analyses), (select count(*) from public.contact_restrictions),
+       (select count(*) from public.audit_log), (select coalesce(sum(evidence_version), 0) from public.cases)) <> current_setting('rre.counts_before') then
+    raise exception 'ROLLBACK ABORTED (rolled back): analyses, restrictions, audit history or evidence versions would change';
+  end if;
+  raise notice 'Rollback self-check passed: contract restored to Stage 2A-5a; data unchanged.';
+end
+$postcheck$;
+
+insert into public.audit_log (actor, actor_role, action, details)
+values (null, 'SYSTEM', 'SCHEMA_ROLLED_BACK', jsonb_build_object('stage', '2A-5d-1', 'removed', 'contract rule: active restrictions in the evidence snapshot forbid contact recommendations'));
+
+commit;
+-- END OF ROLLBACK FILE — if this line is missing, the copy is incomplete: do not run.

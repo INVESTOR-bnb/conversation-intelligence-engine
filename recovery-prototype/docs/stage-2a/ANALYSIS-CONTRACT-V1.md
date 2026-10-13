@@ -81,13 +81,26 @@ message IDs, are rejected.
   or a reason not to pursue.
 - **UNKNOWN** needs ASK_DIAGNOSTIC_QUESTION or WAIT, and no classification.
 - **Any contact restriction forces DO_NOT_PURSUE.**
+- **Active restrictions already on the case (Stage 2A-5d-1).** If the analysis's
+  evidence snapshot (`analyses.evidence_manifest.restrictions`, items
+  `{id, kind, source, status}`) lists any restriction not `DISMISSED_AS_MISREAD`,
+  or the case has an ACTIVE restriction now, only this is accepted:
+  - DO_NOT_PURSUE;
+  - classification RED;
+  - STOP_CONTACT;
+  - no proposed message.
+
+  This applies to both COMPLETE and INSUFFICIENT_EVIDENCE, whatever the model
+  says. The snapshot restriction counts as the reason not to pursue. A snapshot
+  without a restriction list is rejected. See `DEPLOY-STAGE-2A-5D-1.md`.
 - A proposed message exists only for SEND_MESSAGE and must equal its text.
   (The existing rule still removes any message for RED or any restriction.)
 
 ## Insufficient or deleted evidence: no invented findings
 
 - `INSUFFICIENT_EVIDENCE` ⇔ sufficiency `INSUFFICIENT`.
-- It carries **no hypotheses, no classification, no proposed message**, and a
+- It carries **no hypotheses, no classification (RED only under an active
+  contact restriction, where RED is required), no proposed message**, and a
   strategy of `UNKNOWN`. It must say what is missing (`missing_evidence` and
   `unknowns`), and cannot recommend PURSUE.
 - If no usable evidence remains (none recorded, or every screenshot deleted),

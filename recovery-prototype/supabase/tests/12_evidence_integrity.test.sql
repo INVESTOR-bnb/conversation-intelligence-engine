@@ -175,11 +175,17 @@ select pg_temp.complete(:'ar3', 'COMPLETE', tests.contract_output(:'ar3', 'RED',
 select tests.ok((select status = 'ERROR' and error like 'STALE%' from public.analyses where id = :'ar3')
             and exists (select 1 from public.contact_restrictions where case_id = :'r' and kind = 'PROHIBITED_CONTACT' and status = 'ACTIVE'),
   'a stale analysis is discarded but its restriction is kept');
--- The kept restriction still blocks contact once an analysis is accepted.
+-- The kept restriction still blocks contact: since Stage 2A-5d-1 an analysis recommending
+-- contact is not even accepted, and after a RED analysis a GREEN approval is still refused.
 select pg_temp.start(:'r') as ar4 \gset
 select pg_temp.complete(:'ar4', 'COMPLETE', tests.contract_output(:'ar4', 'GREEN', 'Synthetic pitch.'), 'GREEN', 'Synthetic pitch.');
+select tests.ok((select status = 'ERROR' and error like '%active contact restriction in the evidence snapshot%' and ai_proposed_message is null
+                 from public.analyses where id = :'ar4'), 'the preserved opt-out rejects a GREEN analysis (2A-5d-1)');
+select pg_temp.start(:'r') as ar5 \gset
+select pg_temp.complete(:'ar5', 'COMPLETE', tests.contract_output(:'ar5', 'RED', null), 'RED', null);
+select tests.is((select status::text from public.analyses where id = :'ar5'), 'COMPLETE', '... while a RED analysis is accepted');
 select tests.login(tests.founder());
-select tests.throws(format('select public.founder_approve(%L, %L, %s, %L, %L, %L, %L, %L)', :'r', :'ar4', pg_temp.ev(:'r'), 'GREEN', 's', 'n', 'Synthetic pitch.', 'UNCHANGED'),
+select tests.throws(format('select public.founder_approve(%L, %L, %s, %L, %L, %L, %L, %L)', :'r', :'ar5', pg_temp.ev(:'r'), 'GREEN', 's', 'n', 'Synthetic pitch.', 'EDITED'),
   '^CONTACT_RESTRICTED', 'the preserved opt-out blocks a GREEN approval');
 -- Accepted analyses behave as before.
 select tests.as_owner();
