@@ -23,6 +23,10 @@ begin
      like '%Stage 2A-5d-1%' then
     raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-5d-1 (restriction contract) is applied; run stage2a5d1_rollback.sql first.';
   end if;
+  if (select prosrc from pg_proc where oid = to_regprocedure('public.internal_complete_analysis(uuid, public.analysis_status, text, text, jsonb, public.classification, text, jsonb, integer, integer, numeric, text)'))
+     like '%private.ai_settle(%' then
+    raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-5d-3a (AI spending controls) is applied; run stage2a5d3a_rollback.sql first.';
+  end if;
   perform set_config('rre.counts_before', (select concat_ws('/', (select count(*) from public.analyses), (select count(*) from public.contact_restrictions),
     (select count(*) from public.audit_log), (select coalesce(sum(evidence_version), 0) from public.cases))), true);
 end

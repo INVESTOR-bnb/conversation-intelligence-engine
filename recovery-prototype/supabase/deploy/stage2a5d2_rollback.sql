@@ -20,6 +20,9 @@ begin
      not like '%Stage 2A-5d-2%' then
     raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-5d-2 is not applied.';
   end if;
+  if to_regprocedure('public.internal_reserve_ai_spend(uuid, text, text)') is not null then
+    raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-5d-3a (AI spending controls) is applied; run stage2a5d3a_rollback.sql first.';
+  end if;
   perform set_config('rre.counts_before', (select concat_ws('/', (select count(*) from public.analyses), (select count(*) from public.contact_restrictions),
     (select count(*) from public.audit_log), (select coalesce(sum(evidence_version), 0) from public.cases))), true);
 end

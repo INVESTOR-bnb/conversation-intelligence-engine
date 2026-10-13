@@ -40,8 +40,8 @@ select tests.is(
   (select string_agg(p.proname, ',' order by p.proname) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public' and has_function_privilege('authenticated', p.oid, 'EXECUTE')
      and not (p.proname = 'rls_auto_enable' and p.prorettype = 'event_trigger'::regtype)),
-  'client_add_response,client_create_case,client_finalize_screenshots,client_get_case,client_list_cases,client_record_outcome,client_record_sent,client_report_opt_out,client_screenshot_status,client_submit_case,founder_abandon_analysis,founder_add_member,founder_add_note,founder_add_restriction,founder_approve,founder_create_business,founder_dismiss_ai_restriction,founder_pause_case,founder_request_reanalysis,founder_start_analysis,founder_stop_contact,whoami',
-  'authenticated can execute exactly the 22 API functions in schema public');
+  'client_add_response,client_create_case,client_finalize_screenshots,client_get_case,client_list_cases,client_record_outcome,client_record_sent,client_report_opt_out,client_screenshot_status,client_submit_case,founder_abandon_analysis,founder_add_member,founder_add_note,founder_add_restriction,founder_ai_spend_summary,founder_approve,founder_create_business,founder_dismiss_ai_restriction,founder_pause_case,founder_request_reanalysis,founder_start_analysis,founder_stop_contact,whoami',
+  'authenticated can execute exactly the 23 API functions in schema public (founder_ai_spend_summary since Stage 2A-5d-3a)');
 
 select tests.ok(
   not has_function_privilege('authenticated', 'public.internal_complete_analysis(uuid, public.analysis_status, text, text, jsonb, public.classification, text, jsonb, integer, integer, numeric, text)', 'EXECUTE'),

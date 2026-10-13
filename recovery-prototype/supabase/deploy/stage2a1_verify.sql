@@ -19,7 +19,7 @@ api_functions(name) as (values
   ('founder_request_reanalysis'), ('founder_approve'), ('founder_stop_contact'), ('founder_add_restriction'),
   ('founder_dismiss_ai_restriction'), ('founder_add_note'), ('founder_pause_case')),
 -- Functions added by later stages (allowed, not required, by this 2A-1 check).
-later_api_functions(name) as (values ('client_screenshot_status'), ('client_finalize_screenshots')),
+later_api_functions(name) as (values ('client_screenshot_status'), ('client_finalize_screenshots'), ('founder_ai_spend_summary')),
 -- Supabase's pre-existing auto-RLS helper (event-trigger function; cannot be
 -- called directly). Excluded from the API-privilege checks, checked in row 20.
 helper as (
