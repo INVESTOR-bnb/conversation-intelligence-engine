@@ -19,6 +19,9 @@ begin
   if to_regprocedure('public.internal_reserve_ai_spend(uuid, text, text)') is null then
     raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-5d-3a is not applied.';
   end if;
+  if to_regprocedure('public.internal_ai_reservation_terms(uuid)') is not null then
+    raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-6a (reservation terms) is applied; run stage2a6a_rollback.sql first.';
+  end if;
   perform set_config('rre.counts_before', (select concat_ws('/', (select count(*) from public.analyses), (select count(*) from public.contact_restrictions),
     (select count(*) from public.audit_log), (select coalesce(sum(evidence_version), 0) from public.cases), (select count(*) from private.ai_spend_ledger))), true);
 end
