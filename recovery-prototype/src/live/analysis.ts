@@ -7,10 +7,12 @@
 // anything to a prospect: there is no send path anywhere in this workspace.
 //
 // The stored output has already passed the database contract rre-analysis/1
-// (Stage 2A-5a). It is parsed defensively again here: unknown fields are
+// (Stage 2A-5a) or rre-analysis/2 (Stage 2A-5d-2: plus an independent
+// adversarial review). It is parsed defensively again here: unknown fields are
 // ignored and malformed values are dropped, never rendered as HTML.
 
-export const CONTRACT_VERSION = 'rre-analysis/1';
+export const CONTRACT_VERSIONS = ['rre-analysis/1', 'rre-analysis/2'] as const;
+export type ContractVersion = (typeof CONTRACT_VERSIONS)[number];
 
 export type HypothesisCategory =
   | 'EMOTIONAL_BARRIER' | 'TRUST_AND_RISK' | 'BUYING_MOTIVATION' | 'DECISION_FRICTION' | 'SELLER_CREATED_RESISTANCE';
@@ -39,7 +41,18 @@ export interface Recommendation {
   strategy: string; rationale: string; basedOn: string[];
   nextAction: { type: 'SEND_MESSAGE' | 'ASK_DIAGNOSTIC_QUESTION' | 'WAIT' | 'STOP_CONTACT'; text: string } | null;
 }
+export type Severity = 'HIGH' | 'MEDIUM' | 'LOW';
+export type Verdict = 'UPHOLD' | 'UPHOLD_WITH_CONCERNS' | 'REJECT_RECOMMENDATION';
+export interface ReviewChallenge {
+  id: string; target: 'OBSERVATION' | 'HYPOTHESIS' | 'RECOMMENDATION'; targetId: string | null;
+  severity: Severity; challenge: string; evidence: EvidenceRef[];
+}
+/** The independent adversarial review of an rre-analysis/2 output (Stage 2A-5d-2). */
+export interface AdversarialReview { verdict: Verdict; rationale: string; challenges: ReviewChallenge[] }
 export interface AnalysisOutput {
+  contractVersion: ContractVersion;
+  /** null for rre-analysis/1, which has no independent review. */
+  review: AdversarialReview | null;
   sufficiency: 'SUFFICIENT' | 'PARTIAL' | 'INSUFFICIENT';
   summary: string; missingEvidence: string[];
   observations: Observation[]; hypotheses: Hypothesis[]; unknowns: Unknown[];
@@ -65,10 +78,35 @@ function parseRef(v: unknown): EvidenceRef | null {
 }
 const refs = (v: unknown) => arr(v).map(parseRef).filter((r): r is EvidenceRef => r !== null);
 
-/** Parses a stored rre-analysis/1 output. Returns null if it is not one (nothing is shown then). */
+const SEVERITY_ORDER: Severity[] = ['HIGH', 'MEDIUM', 'LOW'];
+
+function parseReview(value: unknown): AdversarialReview | null {
+  const r = obj(value);
+  const verdict = oneOf(r?.verdict, ['UPHOLD', 'UPHOLD_WITH_CONCERNS', 'REJECT_RECOMMENDATION'] as const);
+  if (!r || !verdict || !Array.isArray(r.challenges)) return null;
+  const challenges = r.challenges.flatMap((x): ReviewChallenge[] => {
+    const c = obj(x);
+    const target = oneOf(c?.target, ['OBSERVATION', 'HYPOTHESIS', 'RECOMMENDATION'] as const);
+    const severity = oneOf(c?.severity, SEVERITY_ORDER);
+    const text = str(c?.challenge, 1000);
+    if (!c || !str(c.id) || !target || !severity || !text) return [];
+    return [{ id: c.id as string, target, targetId: target === 'RECOMMENDATION' ? null : str(c.target_id, 20), severity, challenge: text, evidence: refs(c.evidence) }];
+  });
+  challenges.sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity));
+  return { verdict, rationale: str(r.verdict_rationale, 1500) ?? '', challenges };
+}
+
+/**
+ * Parses a stored rre-analysis/1 or rre-analysis/2 output. Returns null if it is
+ * not one, or if an rre-analysis/2 output has no readable review (nothing is
+ * shown then: a v2 analysis is never shown without its review).
+ */
 export function parseAnalysisOutput(value: unknown): AnalysisOutput | null {
   const o = obj(value);
-  if (!o || o.contract_version !== CONTRACT_VERSION) return null;
+  const contractVersion = oneOf(o?.contract_version, CONTRACT_VERSIONS);
+  if (!o || !contractVersion) return null;
+  const review = contractVersion === 'rre-analysis/2' ? parseReview(o.adversarial_review) : null;
+  if (contractVersion === 'rre-analysis/2' && !review) return null;
   const ea = obj(o.evidence_assessment);
   const rec = obj(o.recommendation);
   const sufficiency = oneOf(ea?.sufficiency, ['SUFFICIENT', 'PARTIAL', 'INSUFFICIENT'] as const);
@@ -77,6 +115,8 @@ export function parseAnalysisOutput(value: unknown): AnalysisOutput | null {
   const na = obj(rec.next_action);
   const naType = oneOf(na?.type, ['SEND_MESSAGE', 'ASK_DIAGNOSTIC_QUESTION', 'WAIT', 'STOP_CONTACT'] as const);
   return {
+    contractVersion,
+    review,
     sufficiency,
     summary: str(ea.summary, 1000) ?? '',
     missingEvidence: arr(ea.missing_evidence).map((x) => str(x, 500)).filter((x): x is string => !!x),
@@ -170,13 +210,15 @@ export function showsFindings(state: AnalysisState) {
 
 /**
  * The proposed message, only when it may be shown as a draft: a current, accepted
- * analysis recommending SEND_MESSAGE, with no active contact restriction and not
- * RED. Even then it is only text for the founder to review; nothing sends it.
+ * analysis recommending SEND_MESSAGE, with no active contact restriction, not RED,
+ * and not rejected by the independent review. Even then it is only text for the
+ * founder to review; nothing sends it.
  */
 export function proposedMessage(state: AnalysisState, row: AnalysisRow | null, output: AnalysisOutput | null, restrictions: RestrictionRow[]):
   { text: string | null; withheld: string | null } {
   if (!row || !output || !row.ai_proposed_message) return { text: null, withheld: null };
   if (restrictions.some((r) => r.status === 'ACTIVE')) return { text: null, withheld: 'Withheld: this case has an active contact restriction. Do not contact the prospect.' };
+  if (output.review?.verdict === 'REJECT_RECOMMENDATION') return { text: null, withheld: 'Withheld: the independent review rejected this recommendation.' };
   if (state !== 'READY') return { text: null, withheld: 'Withheld: this analysis is not current. Request a re-analysis.' };
   if (row.ai_classification === 'RED' || output.recommendation.nextAction?.type !== 'SEND_MESSAGE') return { text: null, withheld: null };
   return { text: row.ai_proposed_message, withheld: null };
@@ -188,7 +230,8 @@ export interface Challenge { kind: 'CONTRADICTION' | 'COMPETING' | 'LOW_CONFIDEN
 
 /**
  * Challenges to the analysis and its recommendation, drawn only from what the
- * analysis itself recorded (rre-analysis/1 has no separate challenger pass):
+ * analysis itself recorded (the independent review of rre-analysis/2 is shown
+ * separately, from output.review):
  * evidence that contradicts a hypothesis, competing explanations, weak or
  * unknown confidence behind the recommendation, reasons not to pursue, open
  * unknowns and contact restrictions.

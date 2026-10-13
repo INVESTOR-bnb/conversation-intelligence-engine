@@ -5,7 +5,7 @@
 
 import { expect, test, type Page } from '@playwright/test';
 import { messageId, MockSupabase, USERS } from './mockSupabase';
-import { analysisRow, insufficientOutput, MSG, richOutput } from './analysisFixtures';
+import { analysisRow, insufficientOutput, MSG, reviewedOutput, richOutput } from './analysisFixtures';
 
 let mock: MockSupabase;
 const CASE = 'a0000000-0000-4000-8000-000000000101';
@@ -169,4 +169,66 @@ test('a business user never receives analysis data, through the UI or a direct A
     return { analyses: await get('analyses'), restrictions: await get('contact_restrictions') };
   }, { url: 'https://mock-project-ref.supabase.co', key: 'sb_publishable_TEST_ONLY_not_a_real_key' });
   expect(res).toEqual({ analyses: [], restrictions: [] });
+});
+
+// ---------------------------------------------------------------- Stage 2A-5d-2: independent review
+
+test('an rre-analysis/2 analysis shows the independent review: verdict, challenges by severity, verified evidence', async ({ page }) => {
+  mock.analyses = [analysisRow(CASE, { output: reviewedOutput(messageId(CASE), 'UPHOLD_WITH_CONCERNS') })];
+  const a = await openCase(page);
+  const review = a.getByTestId('independent-review');
+  await expect(review.getByTestId('review-verdict')).toHaveAttribute('data-verdict', 'UPHOLD_WITH_CONCERNS');
+  await expect(review.getByTestId('review-verdict')).toHaveText('Upheld with concerns');
+  await expect(review.getByTestId('review-rationale')).toHaveText('The recommendation holds, with caveats.');
+  const items = review.getByTestId('review-challenge');
+  await expect(items).toHaveCount(2);
+  await expect(items.nth(0)).toHaveAttribute('data-severity', 'MEDIUM');
+  await expect(items.nth(0)).toContainText('Hypothesis H1');
+  await expect(items.nth(0)).toContainText('Pasted conversation: “Is the Camry available?”');
+  await expect(items.nth(1)).toContainText('Recommendation');
+  await expect(a.getByTestId('proposed-message')).toContainText(MSG);
+  await expect(a.getByTestId('review-none')).toHaveCount(0);
+});
+
+test('a review that rejects the recommendation: no draft message anywhere, shown as rejected', async ({ page }) => {
+  mock.analyses = [analysisRow(CASE, { output: reviewedOutput(messageId(CASE), 'REJECT_RECOMMENDATION'), ai_classification: null, ai_proposed_message: null })];
+  const a = await openCase(page);
+  await expect(a.getByTestId('review-verdict')).toHaveText('Recommendation rejected');
+  await expect(a.getByTestId('review-challenge').first()).toHaveAttribute('data-severity', 'HIGH');
+  await expect(a.getByTestId('recommendation')).toContainText('Unknown — not enough to decide');
+  await expect(a.getByTestId('proposed-message')).toHaveCount(0);
+  await expect(page.locator('body')).not.toContainText(MSG);
+});
+
+test('an rre-analysis/1 analysis says it has no independent review', async ({ page }) => {
+  mock.analyses = [ready()];
+  const a = await openCase(page);
+  await expect(a.getByTestId('review-none')).toContainText('No independent review');
+  await expect(a.getByTestId('independent-review')).toHaveCount(0);
+});
+
+test('review text is rendered as plain text', async ({ page }) => {
+  const out = reviewedOutput(messageId(CASE));
+  out.adversarial_review.challenges[0].challenge = '<img src=x onerror="window.__xss=1">';
+  out.adversarial_review.verdict_rationale = '<script>window.__xss=2</script>';
+  mock.analyses = [analysisRow(CASE, { output: out })];
+  const a = await openCase(page);
+  await expect(a.getByTestId('independent-review')).toContainText('<img src=x onerror="window.__xss=1">');
+  await expect(a.locator('img, script')).toHaveCount(0);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => (window as unknown as { __xss?: number }).__xss)).toBeUndefined();
+});
+
+test('a business user never receives the review, through the UI or a direct API call', async ({ page }) => {
+  mock.analyses = [analysisRow(CASE, { output: reviewedOutput(messageId(CASE), 'REJECT_RECOMMENDATION') })];
+  await login(page, 'client');
+  await page.goto(`/app/founder/case/${CASE}`);
+  await expect(page.getByRole('heading', { name: 'Not authorised' })).toBeVisible();
+  await expect(page.locator('body')).not.toContainText(/Independent review|premature|casual browsing|adversarial/i);
+  expect(mock.requests.filter((r) => r.includes('/rest/v1/analyses'))).toEqual([]);
+  const res = await page.evaluate(async ({ url, key }) => {
+    const session = JSON.parse(localStorage.getItem('rre-auth') ?? '{}');
+    return fetch(`${url}/rest/v1/analyses?select=output`, { headers: { apikey: key, authorization: `Bearer ${session.access_token}` } }).then((r) => r.json());
+  }, { url: 'https://mock-project-ref.supabase.co', key: 'sb_publishable_TEST_ONLY_not_a_real_key' });
+  expect(res).toEqual([]);
 });

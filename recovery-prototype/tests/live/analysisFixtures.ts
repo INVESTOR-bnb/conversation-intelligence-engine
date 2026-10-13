@@ -33,6 +33,29 @@ export function richOutput(messageId: string) {
   };
 }
 
+/** An rre-analysis/2 output: the rich output plus an independent adversarial review. */
+export function reviewedOutput(messageId: string, verdict: 'UPHOLD' | 'UPHOLD_WITH_CONCERNS' | 'REJECT_RECOMMENDATION' = 'UPHOLD_WITH_CONCERNS') {
+  const base = richOutput(messageId);
+  const rejected = verdict === 'REJECT_RECOMMENDATION';
+  return {
+    ...base,
+    contract_version: 'rre-analysis/2',
+    // A rejected recommendation carries no message (the database contract enforces this).
+    recommendation: rejected
+      ? { pursue: 'UNKNOWN', strategy: 'UNKNOWN', psychological_rationale: 'UNKNOWN', based_on_hypotheses: [], next_action: { type: 'WAIT', text: 'Wait for the prospect.' } }
+      : base.recommendation,
+    adversarial_review: {
+      challenges: [
+        { id: 'C1', target: 'HYPOTHESIS', target_id: 'H1', severity: 'MEDIUM', challenge: 'Availability questions are often casual browsing.',
+          evidence: [{ type: 'MESSAGE', message_id: messageId, quote: 'Is the Camry available?' }] },
+        { id: 'C2', target: 'RECOMMENDATION', severity: rejected ? 'HIGH' : 'LOW', challenge: 'A fixed viewing time may feel like pressure.', evidence: [] },
+      ],
+      verdict,
+      verdict_rationale: rejected ? 'Interest is not established; a pitch now is premature.' : 'The recommendation holds, with caveats.',
+    },
+  };
+}
+
 export function insufficientOutput() {
   return {
     contract_version: 'rre-analysis/1',

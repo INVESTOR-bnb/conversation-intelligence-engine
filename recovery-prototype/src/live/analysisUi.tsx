@@ -11,12 +11,18 @@ import { Card, EmptyState, ErrorBanner, formatDate, Notice } from '../components
 import { useAuth } from './auth';
 import {
   analysisState, CATEGORY_LABELS, CATEGORY_ORDER, challenges, describeRef, excludedScreenshots, parseAnalysisOutput, proposedMessage,
-  showsFindings, STATE_TEXT, type AnalysisRow, type EvidenceRef, type Hypothesis, type RestrictionRow,
+  showsFindings, STATE_TEXT, type AdversarialReview, type AnalysisRow, type EvidenceRef, type Hypothesis, type RestrictionRow,
 } from './analysis';
 
 const ACTOR = { PROSPECT: 'Prospect', SELLER: 'Seller', UNCLEAR: 'Unclear who' } as const;
 const PURSUE = { PURSUE: 'Pursue recovery', DO_NOT_PURSUE: 'Do not pursue', UNKNOWN: 'Unknown — not enough to decide' } as const;
 const NEXT = { SEND_MESSAGE: 'Message (draft)', ASK_DIAGNOSTIC_QUESTION: 'Diagnostic question', WAIT: 'Wait', STOP_CONTACT: 'Stop contact' } as const;
+const VERDICT = {
+  UPHOLD: { label: 'Recommendation upheld', cls: 'pill-won' },
+  UPHOLD_WITH_CONCERNS: { label: 'Upheld with concerns', cls: 'pill-info' },
+  REJECT_RECOMMENDATION: { label: 'Recommendation rejected', cls: 'badge-red' },
+} as const;
+const TARGET = { OBSERVATION: 'Observation', HYPOTHESIS: 'Hypothesis', RECOMMENDATION: 'Recommendation' } as const;
 const CHALLENGE = {
   RESTRICTION: 'Contact restriction', CONTRADICTION: 'Contradicting evidence', COMPETING: 'Competing explanation',
   LOW_CONFIDENCE: 'Weak support', REASON_NOT_TO_PURSUE: 'Reason not to pursue', UNKNOWN: 'Open question',
@@ -48,6 +54,41 @@ function HypothesisItem({ h }: { h: Hypothesis }) {
         {h.competing.length > 0 && <> · Competes with {h.competing.join(', ')}</>}
       </p>
     </li>
+  );
+}
+
+/** The independent adversarial review (rre-analysis/2), or a note that there is none. */
+function IndependentReview({ review, kinds }: { review: AdversarialReview | null; kinds: Record<string, string> }) {
+  if (!review) {
+    return (
+      <Card title="Independent review">
+        <p className="muted" data-testid="review-none">No independent review: this analysis uses contract rre-analysis/1, which has none.</p>
+      </Card>
+    );
+  }
+  const v = VERDICT[review.verdict];
+  return (
+    <Card title="Independent review" className={review.verdict === 'REJECT_RECOMMENDATION' ? 'card-stop' : undefined}>
+      <div data-testid="independent-review">
+        <p className="muted small">A separate adversarial pass that tried to break this analysis. Its evidence citations were checked against the case evidence.</p>
+        <p><span className={`pill ${v.cls}`} data-testid="review-verdict" data-verdict={review.verdict}>{v.label}</span></p>
+        {review.rationale && <p data-testid="review-rationale">{review.rationale}</p>}
+        {review.challenges.length === 0 ? <p className="muted">No challenges raised.</p> : (
+          <ul>
+            {review.challenges.map((c) => (
+              <li key={c.id} data-testid="review-challenge" data-severity={c.severity}>
+                <p>
+                  <span className={`pill ${c.severity === 'HIGH' ? 'badge-red' : c.severity === 'MEDIUM' ? 'pill-info' : ''}`}>{c.severity}</span>{' '}
+                  <span className="muted small">{c.id} · {TARGET[c.target]}{c.targetId ? ` ${c.targetId}` : ''}</span>
+                </p>
+                <p>{c.challenge}</p>
+                <Refs refs={c.evidence} kinds={kinds} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Card>
   );
 }
 
@@ -176,7 +217,9 @@ export function FounderAnalysis({ caseId, evidenceVersion }: { caseId: string; e
             )}
           </Card>
 
-          <Card title="Adversarial challenges">
+          <IndependentReview review={output.review} kinds={kinds} />
+
+          <Card title="Weak points recorded by the analysis itself">
             <p className="muted small">Reasons this analysis or its recommendation could be wrong, taken from the analysis itself.</p>
             {(() => {
               const list = challenges(output, restrictions);

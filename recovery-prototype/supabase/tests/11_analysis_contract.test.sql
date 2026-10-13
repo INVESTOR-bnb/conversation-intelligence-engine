@@ -89,7 +89,9 @@ select tests.is(pg_temp.p(:'a', jsonb_set(:'b'::jsonb, '{hypotheses,1,confidence
 
 -- ---------------------------------------------------------------- shape
 select tests.ok(pg_temp.has(pg_temp.p(:'a', '[]'), 'must be a JSON object'), 'output must be an object');
-select tests.ok(pg_temp.has(pg_temp.p(:'a', jsonb_set(:'b'::jsonb, '{contract_version}', '"rre-analysis/2"')), 'contract_version'), 'contract version is checked');
+select tests.ok(pg_temp.has(pg_temp.p(:'a', jsonb_set(:'b'::jsonb, '{contract_version}', '"rre-analysis/3"')), 'contract_version'), 'contract version is checked');
+select tests.ok(pg_temp.has(pg_temp.p(:'a', jsonb_set(:'b'::jsonb, '{contract_version}', '"rre-analysis/2"')), 'missing adversarial_review'),
+  'rre-analysis/2 without its adversarial review is rejected (2A-5d-2)');
 select tests.ok(pg_temp.has(pg_temp.p(:'a', :'b'::jsonb || '{"free_text_verdict": "buyer is lying"}'), 'unexpected keys free_text_verdict'), 'no unvalidated top-level fields');
 select tests.ok(pg_temp.has(pg_temp.p(:'a', :'b'::jsonb - 'unknowns'), 'missing unknowns'), 'every section is required');
 select tests.ok(pg_temp.has(pg_temp.p(:'a', jsonb_set(:'b'::jsonb, '{observations}', '"O1"')), 'observations must be a list'), 'sections have the right types');

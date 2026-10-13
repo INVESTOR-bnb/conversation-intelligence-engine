@@ -130,3 +130,48 @@ message IDs, are rejected.
   - an analysis in progress then fails as **STALE**;
   - an analysis waiting for review can no longer be approved
     (`STALE_ANALYSIS`) until it is re-run on the current evidence.
+
+## Contract `rre-analysis/2`: independent adversarial review (Stage 2A-5d-2)
+
+`rre-analysis/2` is `rre-analysis/1` with one more **required** section,
+`adversarial_review`.
+- **v1 is unchanged.** Outputs with `contract_version` `rre-analysis/1` are
+  still accepted and may not carry a review (it would be unvalidated).
+- **Every v1 rule applies to v2,** including the Stage 2A-5d-1 restriction rule:
+  a review can never override an active restriction.
+
+| Field | Content |
+|---|---|
+| `challenges[]` (≤ 30) | `id` (C1…), `target` (OBSERVATION / HYPOTHESIS / RECOMMENDATION), `target_id` (an existing O… or H…; none for RECOMMENDATION), `severity` (HIGH / MEDIUM / LOW), `challenge` (text), `evidence[]` (0–10 references) |
+| `verdict` | UPHOLD / UPHOLD_WITH_CONCERNS / REJECT_RECOMMENDATION |
+| `verdict_rationale` | text |
+
+**Evidence references in the review** are checked exactly like the analysis's
+own, against this analysis's evidence snapshot:
+- the message must be in the snapshot, so not another business's, another
+  case's, or one added later;
+- the quote must appear in the message;
+- a deleted screenshot cannot be cited.
+
+One fabricated citation rejects the whole analysis.
+
+**Verdict rules:**
+- UPHOLD has no HIGH challenge.
+- UPHOLD_WITH_CONCERNS has at least one challenge.
+- REJECT_RECOMMENDATION has at least one HIGH challenge.
+
+**A rejected recommendation stores no contact message.** With
+REJECT_RECOMMENDATION:
+- `pursue` cannot be PURSUE;
+- `next_action` cannot be SEND_MESSAGE or ASK_DIAGNOSTIC_QUESTION;
+- there is no proposed message.
+
+So no message to the prospect exists in any stored column or in the output.
+An output that breaks this is rejected whole, not stored with the message
+stripped.
+
+**What the database cannot prove.** It cannot prove the review was *independent*,
+i.e. produced by a separate pass that did not just agree with the analyst. That
+is the job of the analysis pipeline (Stage 2A-5d-4). The database guarantees only
+that the review is well-formed, grounded in real evidence and consistent with
+what is stored.

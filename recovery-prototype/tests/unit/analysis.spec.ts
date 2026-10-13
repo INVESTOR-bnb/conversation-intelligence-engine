@@ -5,7 +5,7 @@ import { expect, test } from '@playwright/test';
 import {
   analysisState, challenges, describeRef, excludedScreenshots, parseAnalysisOutput, proposedMessage, showsFindings, type AnalysisRow, type RestrictionRow,
 } from '../../src/live/analysis';
-import { analysisRow, insufficientOutput, MSG, richOutput } from '../live/analysisFixtures';
+import { analysisRow, insufficientOutput, MSG, reviewedOutput, richOutput } from '../live/analysisFixtures';
 
 const MID = 'b0000000-0000-4000-8000-000000000101';
 const row = (over: Record<string, unknown> = {}) => analysisRow('c', { output: richOutput(MID), ...over }) as unknown as AnalysisRow;
@@ -100,4 +100,45 @@ test('excluded (deleted) screenshots are read from the v2 manifest', () => {
   expect(excludedScreenshots({ excluded_screenshots: [{ position: 2 }, { position: 5 }] })).toEqual([2, 5]);
   expect(excludedScreenshots(null)).toEqual([]);
   expect(excludedScreenshots({ manifest_version: 1 })).toEqual([]);
+});
+
+// ---------------------------------------------------------------- Stage 2A-5d-2: rre-analysis/2 independent review
+
+test('rre-analysis/1 is still shown, with no independent review', () => {
+  const o = parseAnalysisOutput(richOutput(MID))!;
+  expect(o.contractVersion).toBe('rre-analysis/1');
+  expect(o.review).toBeNull();
+});
+
+test('rre-analysis/2: the review is parsed, challenges ordered by severity', () => {
+  const o = parseAnalysisOutput(reviewedOutput(MID, 'REJECT_RECOMMENDATION'))!;
+  expect(o.contractVersion).toBe('rre-analysis/2');
+  expect(o.review!.verdict).toBe('REJECT_RECOMMENDATION');
+  expect(o.review!.challenges.map((c) => [c.id, c.severity, c.target, c.targetId])).toEqual([['C2', 'HIGH', 'RECOMMENDATION', null], ['C1', 'MEDIUM', 'HYPOTHESIS', 'H1']]);
+  expect(o.review!.challenges[1].evidence).toEqual([{ type: 'MESSAGE', messageId: MID, quote: 'Is the Camry available?' }]);
+});
+
+test('rre-analysis/2 without a readable review is not shown at all', () => {
+  const v2 = reviewedOutput(MID) as Record<string, unknown>;
+  for (const bad of [{ ...v2, adversarial_review: undefined }, { ...v2, adversarial_review: 'fine' }, { ...v2, adversarial_review: { verdict: 'APPROVE', challenges: [] } },
+    { ...v2, adversarial_review: { verdict: 'UPHOLD' } }]) {
+    expect(parseAnalysisOutput(bad)).toBeNull();
+  }
+});
+
+test('malformed review challenges are dropped and unknown fields ignored', () => {
+  const v2 = reviewedOutput(MID) as { adversarial_review: Record<string, unknown> };
+  const o = parseAnalysisOutput({ ...v2, adversarial_review: { ...v2.adversarial_review, secret: 'x', challenges: [
+    { id: 'C1', target: 'MOOD', severity: 'HIGH', challenge: 'x', evidence: [] }, 7,
+    { id: 'C2', target: 'OBSERVATION', target_id: 'O1', severity: 'LOW', challenge: 'kept', evidence: [{ type: 'URL', url: 'http://x' }] }] } })!;
+  expect(o.review!.challenges).toEqual([{ id: 'C2', target: 'OBSERVATION', targetId: 'O1', severity: 'LOW', challenge: 'kept', evidence: [] }]);
+  expect(JSON.stringify(o)).not.toContain('secret');
+});
+
+test('a review rejecting the recommendation withholds any message, even one present by mistake', () => {
+  const out = parseAnalysisOutput({ ...reviewedOutput(MID, 'REJECT_RECOMMENDATION'), recommendation: richOutput(MID).recommendation })!;
+  const r = row({ output: reviewedOutput(MID, 'REJECT_RECOMMENDATION') });
+  expect(proposedMessage('READY', r, out, [])).toEqual({ text: null, withheld: 'Withheld: the independent review rejected this recommendation.' });
+  const upheld = parseAnalysisOutput(reviewedOutput(MID, 'UPHOLD_WITH_CONCERNS'))!;
+  expect(proposedMessage('READY', row({ output: reviewedOutput(MID) }), upheld, [])).toEqual({ text: MSG, withheld: null });
 });
