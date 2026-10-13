@@ -7,17 +7,18 @@ import {
   REJECTED_RECOMMENDATION, runAnalysisPipeline, sha256Hex, type AnalysisProvider, type FounderDb, type PipelineResult,
 } from '../../supabase/functions/_shared/analysis-pipeline/index.ts';
 import { analystAnswer, BODY1, BODY2, CONFIG, DRAFT, FakeProvider, MemoryLogger, ok, reviewAnswer } from './fakes';
-import { BIZ_A, CLIENT_A, CLIENT_B, one, PsqlFounderDb, PsqlServiceDb, sql } from './psqlDb';
+import { BIZ_A, CLIENT_A, CLIENT_B, makeRoomForCase, one, PsqlFounderDb, PsqlServiceDb, sql } from './psqlDb';
 
 const storage = new Map<string, Uint8Array>();
 const service = new PsqlServiceDb();
 let n = 0;
 
-test.beforeAll(() => { sql('select tests.seed()'); });
+test.beforeAll(() => { sql('select tests.seed() where not exists (select 1 from public.founders)'); });
 
 /** A submitted TEXT case of business A (pasted conversation + one prospect reply); returns ids. */
 function textCase() {
   n += 1;
+  makeRoomForCase();
   const c = one(`select public.client_create_case(gen_random_uuid(), :'ref', 'Synthetic car', 'Referral', 'TEXT', :'body')`,
     { ref: `PL-${n}`, body: BODY1 }, { role: 'authenticated', sub: CLIENT_A })!;
   sql(`select public.client_submit_case(:'c')`, { c }, { role: 'authenticated', sub: CLIENT_A });
@@ -30,6 +31,7 @@ function textCase() {
 /** A submitted SCREENSHOTS case with stored files (Storage simulated); returns ids and paths. */
 async function shotCase(files: Uint8Array[]) {
   n += 1;
+  makeRoomForCase();
   const c = one(`select public.client_create_case(gen_random_uuid(), :'ref', 'Synthetic car', 'Referral', 'SCREENSHOTS')`,
     { ref: `PS-${n}` }, { role: 'authenticated', sub: CLIENT_A })!;
   const paths: string[] = [];

@@ -10,7 +10,7 @@ import { useEffect, useState } from 'react';
 import { Card, EmptyState, ErrorBanner, formatDate, Notice } from '../components/ui';
 import { useAuth } from './auth';
 import {
-  analysisState, CATEGORY_LABELS, CATEGORY_ORDER, challenges, describeRef, excludedScreenshots, parseAnalysisOutput, proposedMessage,
+  analysisState, CATEGORY_LABELS, CATEGORY_ORDER, challenges, describeRef, excludedScreenshots, isFakeProviderAnalysis, parseAnalysisOutput, proposedMessage,
   showsFindings, STATE_TEXT, type AdversarialReview, type AnalysisRow, type EvidenceRef, type Hypothesis, type RestrictionRow,
 } from './analysis';
 
@@ -151,6 +151,9 @@ export function FounderAnalysis({ caseId, evidenceVersion }: { caseId: string; e
       <Card title={info.title}>
         <div data-testid="analysis-state" data-state={state}>
           <Notice tone={info.tone}>{info.body}</Notice>
+          {isFakeProviderAnalysis(latest) && (
+            <Notice tone="warn"><span data-testid="fake-provider">Pipeline test output from the fake provider — no AI read this case. Not an analysis; do not act on it.</span></Notice>
+          )}
           {latest && (
             <p className="muted small">
               Analysis v{latest.version} · {latest.status} · evidence version {latest.evidence_version} (case is at {evidenceVersion})

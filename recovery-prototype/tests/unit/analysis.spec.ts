@@ -3,7 +3,7 @@
 
 import { expect, test } from '@playwright/test';
 import {
-  analysisState, challenges, describeRef, excludedScreenshots, parseAnalysisOutput, proposedMessage, showsFindings, type AnalysisRow, type RestrictionRow,
+  analysisState, challenges, describeRef, excludedScreenshots, isFakeProviderAnalysis, parseAnalysisOutput, proposedMessage, showsFindings, type AnalysisRow, type RestrictionRow,
 } from '../../src/live/analysis';
 import { analysisRow, insufficientOutput, MSG, reviewedOutput, richOutput } from '../live/analysisFixtures';
 
@@ -141,4 +141,11 @@ test('a review rejecting the recommendation withholds any message, even one pres
   expect(proposedMessage('READY', r, out, [])).toEqual({ text: null, withheld: 'Withheld: the independent review rejected this recommendation.' });
   const upheld = parseAnalysisOutput(reviewedOutput(MID, 'UPHOLD_WITH_CONCERNS'))!;
   expect(proposedMessage('READY', row({ output: reviewedOutput(MID) }), upheld, [])).toEqual({ text: MSG, withheld: null });
+});
+
+test('fake-provider analyses are recognised by their model (Stage 2A-5d-4b)', () => {
+  expect(isFakeProviderAnalysis(row({ model: 'analyst:FAKE-PROVIDER-NOT-AI|reviewer:FAKE-PROVIDER-NOT-AI' }))).toBe(true);
+  expect(isFakeProviderAnalysis(row({ model: 'synthetic-model' }))).toBe(false);
+  expect(isFakeProviderAnalysis(row({ model: null }))).toBe(false);
+  expect(isFakeProviderAnalysis(null)).toBe(false);
 });

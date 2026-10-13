@@ -232,3 +232,14 @@ test('a business user never receives the review, through the UI or a direct API 
   }, { url: 'https://mock-project-ref.supabase.co', key: 'sb_publishable_TEST_ONLY_not_a_real_key' });
   expect(res).toEqual([]);
 });
+
+test('a fake-provider pipeline test is labelled as not an analysis (Stage 2A-5d-4b)', async ({ page }) => {
+  mock.analyses = [analysisRow(CASE, { status: 'INSUFFICIENT_EVIDENCE', output: insufficientOutput(), ai_classification: null, ai_proposed_message: null,
+    model: 'analyst:FAKE-PROVIDER-NOT-AI|reviewer:FAKE-PROVIDER-NOT-AI' })];
+  const a = await openCase(page);
+  await expect(a.getByTestId('fake-provider')).toContainText('no AI read this case');
+  mock.analyses = [ready()];
+  await page.reload();
+  await expect(page.getByTestId('founder-analysis').getByTestId('analysis-state')).toBeVisible();
+  await expect(page.getByTestId('fake-provider')).toHaveCount(0);
+});

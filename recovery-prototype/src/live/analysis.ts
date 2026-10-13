@@ -203,6 +203,14 @@ export const STATE_TEXT: Record<AnalysisState, { title: string; body: string; to
   FAILED: { title: 'Analysis failed', body: 'The analysis did not complete. No findings are kept.', tone: 'warn' },
 };
 
+/**
+ * Stage 2A-5d-4b: analyses written by the pipeline's FAKE provider (no AI; a pipeline test on
+ * staging). The model column says so; the workspace labels them so they are never mistaken for analyses.
+ */
+export function isFakeProviderAnalysis(row: AnalysisRow | null): boolean {
+  return !!row?.model && row.model.includes('FAKE-PROVIDER');
+}
+
 /** Findings are shown only for an analysis that passed the contract and is not in progress. */
 export function showsFindings(state: AnalysisState) {
   return state === 'READY' || state === 'INSUFFICIENT' || state === 'STALE';

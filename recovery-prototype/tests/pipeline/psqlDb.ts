@@ -19,7 +19,7 @@ export const CLIENT_A = '00000000-0000-4000-8000-00000000000a';
 export const CLIENT_B = '00000000-0000-4000-8000-00000000000b';
 export const BIZ_A = '10000000-0000-4000-8000-00000000000a';
 
-export type As = { role: 'authenticated'; sub: string } | { role: 'service_role' } | { role: 'anon' } | null;
+export type As = { role: 'authenticated'; sub: string } | { role: 'service_role'; claims?: Record<string, unknown> } | { role: 'anon' } | null;
 
 /** Runs SQL (as the given caller) and returns the output rows (-At). Throws DbError with the raised code. */
 export function sql(text: string, vars: Record<string, string> = {}, as: As = null): string[] {
@@ -28,7 +28,7 @@ export function sql(text: string, vars: Record<string, string> = {}, as: As = nu
     ? `select set_config('request.jwt.claims', '{"role":"anon"}', false) \\g /dev/null\nset role anon;\n`
     : `select set_config('request.jwt.claims', :'__claims', false) \\g /dev/null\nset role ${as.role};\n`;
   const allVars: Record<string, string> = { ...vars };
-  if (as && as.role !== 'anon') allVars.__claims = JSON.stringify(as.role === 'service_role' ? { role: 'service_role' } : { sub: as.sub, role: 'authenticated' });
+  if (as && as.role !== 'anon') allVars.__claims = JSON.stringify(as.role === 'service_role' ? (as.claims ?? { role: 'service_role' }) : { sub: as.sub, role: 'authenticated' });
   const args = ['-h', HOST, '-p', PORT, '-U', 'postgres', '-d', 'postgres', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1'];
   for (const [k, v] of Object.entries(allVars)) args.push('-v', `${k}=${v}`);
   try {
@@ -37,7 +37,8 @@ export function sql(text: string, vars: Record<string, string> = {}, as: As = nu
   } catch (e) {
     const stderr = String((e as { stderr?: unknown }).stderr ?? '');
     const m = /ERROR:\s+([A-Z_]+):/.exec(stderr);
-    throw new DbError(m ? m[1] : 'SQL_ERROR', stderr.trim().split('\n')[0] ?? 'error');
+    const first = stderr.split('\n').find((l) => l.includes('ERROR:')) ?? stderr.trim().split('\n')[0] ?? 'error';
+    throw new DbError(m ? m[1] : 'SQL_ERROR', first.replace(/^.*?ERROR:\s+/, ''));
   }
 }
 export const one = (text: string, vars: Record<string, string> = {}, as: As = null) => sql(text, vars, as)[0] ?? null;
@@ -86,4 +87,10 @@ export class PsqlServiceDb implements ServiceDb {
       cost: p.estimatedCostUsd === null ? '' : String(p.estimatedCostUsd), err: p.error ?? '',
     }, { role: 'service_role' });
   }
+}
+
+/** Fixture only: earlier synthetic cases are moved out of the 20-per-day client limit window. */
+export function makeRoomForCase(business = BIZ_A) {
+  sql(`begin; set local session_replication_role = replica;
+       update public.cases set created_at = created_at - interval '2 days' where business_id = :'b' and created_at > now() - interval '1 day'; commit;`, { b: business });
 }

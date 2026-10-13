@@ -29,4 +29,6 @@ fi
 load "$HERE/tests/local/01_test_helpers.sql"
 
 cd "$APP"
-PIPELINE_PGHOST="$WORK" PIPELINE_PGPORT="$PORT" PIPELINE_PSQL="$PGBIN/psql" npx playwright test --config playwright.pipeline.config.ts
+echo "== deno check of the Edge Function entry point (Deno 2.1.4 via npx)"
+npx --yes deno@2.1.4 check supabase/functions/analyze-case/index.ts
+PIPELINE_PGHOST="$WORK" PIPELINE_PGPORT="$PORT" PIPELINE_PSQL="$PGBIN/psql" npx playwright test --config playwright.pipeline.config.ts "$@"
