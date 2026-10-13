@@ -1,6 +1,6 @@
 // Stage 2A-5d-4b — a local stand-in for the parts of Supabase's HTTP API the
 // analyze-case function uses: Auth (/auth/v1/user), PostgREST (the exact table
-// reads and four RPCs) and Storage (authenticated object download). Every
+// reads and the RPCs it calls) and Storage (authenticated object download). Every
 // database operation runs in the REAL local database as the caller's role with
 // the caller's claims (tests/pipeline/psqlDb.ts), so RLS, grants and the
 // analysis contract decide, as on Supabase. Synthetic data only; 127.0.0.1 only.
@@ -22,6 +22,7 @@ const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
 const TABLES = ['contact_restrictions', 'analyses', 'case_messages', 'case_screenshots'];
 const RPCS: Record<string, 'uuid' | 'jsonb' | 'void'> = {
   founder_start_analysis: 'uuid', founder_abandon_analysis: 'void', internal_complete_analysis: 'void', whoami: 'jsonb',
+  internal_reserve_ai_spend: 'jsonb', internal_ai_dispatch: 'jsonb', internal_ai_report_usage: 'void',
 };
 
 export interface RequestRecord { method: string; path: string; cred: string }

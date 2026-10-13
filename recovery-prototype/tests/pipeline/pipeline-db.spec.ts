@@ -7,13 +7,14 @@ import {
   REJECTED_RECOMMENDATION, runAnalysisPipeline, sha256Hex, type AnalysisProvider, type FounderDb, type PipelineResult,
 } from '../../supabase/functions/_shared/analysis-pipeline/index.ts';
 import { analystAnswer, BODY1, BODY2, CONFIG, DRAFT, FakeProvider, MemoryLogger, ok, reviewAnswer } from './fakes';
-import { BIZ_A, CLIENT_A, CLIENT_B, makeRoomForCase, one, PsqlFounderDb, PsqlServiceDb, sql } from './psqlDb';
+import { BIZ_A, CLIENT_A, CLIENT_B, enableTestSpending, makeRoomForCase, one, PsqlFounderDb, PsqlServiceDb, spend, sql } from './psqlDb';
 
 const storage = new Map<string, Uint8Array>();
 const service = new PsqlServiceDb();
 let n = 0;
 
 test.beforeAll(() => { sql('select tests.seed() where not exists (select 1 from public.founders)'); });
+test.beforeEach(() => { enableTestSpending(); });
 
 /** A submitted TEXT case of business A (pasted conversation + one prospect reply); returns ids. */
 function textCase() {
@@ -224,15 +225,17 @@ test('LOCK_HELD when nothing can be written; founder_abandon_analysis then relea
   const { c, m1, m2 } = textCase();
   const founderDb = new PsqlFounderDb(storage);
   founderDb.abandonAnalysis = async () => { throw new Error('network down'); };
-  const broken = { completeAnalysis: async () => { throw new Error('network down'); } };
+  const broken = Object.assign(new PsqlServiceDb(), { completeAnalysis: async () => { throw new Error('network down'); } });
   const r = await runAnalysisPipeline(c, { founderDb, serviceDb: broken, provider: new FakeProvider({ ANALYST: new Error('x') }),
     logger: new MemoryLogger(), config: CONFIG });
   expect(r).toMatchObject({ outcome: 'LOCK_HELD', code: 'PROVIDER_ERROR_ANALYST' });
   expect(row(r.analysisId!).status).toBe('PENDING');
   expect(caseState(c)).toBe('ANALYZING');
+  expect(spend(r.analysisId!)).toBe('RESERVED:-:-');
   // The documented manual recovery.
   sql(`select public.founder_abandon_analysis(:'a')`, { a: r.analysisId! }, { role: 'authenticated', sub: '00000000-0000-4000-8000-00000000000f' });
   expect(row(r.analysisId!)).toMatchObject({ status: 'ERROR', error: 'Abandoned by founder' });
+  expect(spend(r.analysisId!)).toBe('HELD:UNKNOWN_USAGE:0.0000'); // the analyst call was dispatched: not released
   expect(caseState(c)).toBe('SUBMITTED');
   expect(await run(c, new FakeProvider({ ANALYST: ok(analystAnswer(m1, m2)), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }))).toMatchObject({ outcome: 'COMPLETED' });
 });
@@ -266,4 +269,64 @@ test('business users never receive analyses or reviews produced by the pipeline'
   expect(detail).not.toMatch(/SYNTHETIC-REVIEW|SYNTHETIC-DRAFT|adversarial|verdict|hypothes|price feels high for the value/);
   expect(one(`select status from public.client_list_cases() where id = :'c'`, { c }, { role: 'authenticated', sub: CLIENT_A })).toBe('UNDER_REVIEW');
   expect(() => sql('select count(*) from public.analyses', {}, { role: 'anon' })).toThrow(/permission denied/);
+});
+
+// ---------------------------------------------------------------- Stage 2A-5d-3b: the real spending ledger
+
+test('spending: the real ledger settles at reported usage x each role\'s own database price; requests use the database caps', async () => {
+  const { c, m1, m2 } = textCase();
+  const provider = new FakeProvider({ ANALYST: ok(analystAnswer(m1, m2)), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) });
+  const r = await run(c, provider);
+  expect(r).toMatchObject({ outcome: 'COMPLETED' });
+  // analyst 1000 in x 2 + 500 out x 10; reviewer 1000 x 4 + 500 x 20 (per million) = 0.0210
+  expect(spend(r.analysisId!)).toBe('SETTLED:REPORTED_USAGE:0.0210');
+  expect(provider.requests.map((x) => [x.role, x.maxOutputTokens])).toEqual([['ANALYST', 8000], ['REVIEWER', 4000]]);
+  const l = JSON.parse(one(`select row_to_json(l) from private.ai_spend_ledger l where analysis_id = :'a'`, { a: r.analysisId! })!);
+  expect([l.analyst_input_tokens, l.analyst_output_tokens, l.reviewer_input_tokens, l.reviewer_output_tokens]).toEqual([1000, 500, 1000, 500]);
+  expect(Number(l.reserved_usd)).toBeGreaterThan(0.021);
+});
+
+test('spending: a provider failure after dispatch leaves the real reservation HELD (fully committed) and releases the lock', async () => {
+  for (const [name, replies, held] of [
+    ['analyst fails', { ANALYST: new Error('500') }, 'HELD:UNKNOWN_USAGE:0.0000'],
+    ['reviewer fails', { ANALYST: 'OK', REVIEWER: new Error('overloaded') }, 'HELD:UNKNOWN_USAGE:0.0070'],
+  ] as const) {
+    const { c, m1, m2 } = textCase();
+    const before = Number(one('select private.ai_committed_usd()'));
+    const r = await run(c, new FakeProvider({ ...replies, ...(replies.ANALYST === 'OK' ? { ANALYST: ok(analystAnswer(m1, m2)) } : {}) } as never));
+    expect(r.outcome, name).toBe('FAILED');
+    expect(spend(r.analysisId!), name).toBe(held);
+    const reserved = Number(one(`select reserved_usd from private.ai_spend_ledger where analysis_id = :'a'`, { a: r.analysisId! }));
+    expect(Number(one('select private.ai_committed_usd()')), name).toBeCloseTo(before + reserved, 4);
+    expect(caseState(c), name).toBe('SUBMITTED');
+  }
+});
+
+test('spending: disabled in the database -> the real pipeline makes no provider request and reserves nothing', async () => {
+  enableTestSpending(false);
+  const { c } = textCase();
+  const provider = new FakeProvider({});
+  const r = await run(c, provider);
+  enableTestSpending();
+  expect(r).toMatchObject({ outcome: 'FAILED', code: 'SPENDING_DISABLED' });
+  expect(provider.requests).toHaveLength(0);
+  expect(spend(r.analysisId!)).toBe('NONE');
+  expect(row(r.analysisId!)).toMatchObject({ status: 'ERROR', error: 'PIPELINE_ERROR: SPENDING_DISABLED' });
+  expect(caseState(c)).toBe('SUBMITTED');
+});
+
+test('spending: a second dispatch of the same call is refused by the database (no retry is possible even by mistake)', async () => {
+  const { c, m1, m2 } = textCase();
+  const service = new PsqlServiceDb();
+  let retried: unknown = null;
+  const provider = new FakeProvider({
+    ANALYST: async () => {
+      const a = one(`select id from public.analyses where case_id = :'c' and status = 'PENDING'`, { c })!;
+      try { await service.recordDispatch(a, 'ANALYST'); } catch (e) { retried = (e as { code?: string }).code; }
+      return ok(analystAnswer(m1, m2));
+    },
+    REVIEWER: ok(reviewAnswer('UPHOLD', m1)),
+  });
+  expect(await run(c, provider)).toMatchObject({ outcome: 'COMPLETED' });
+  expect(retried).toBe('ALREADY_DISPATCHED');
 });

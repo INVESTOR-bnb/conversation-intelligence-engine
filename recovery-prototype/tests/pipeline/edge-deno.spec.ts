@@ -7,7 +7,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { BODY1 } from './fakes';
 import { FakeSupabase, PUBLISHABLE, SECRET } from './fakeSupabase';
-import { CLIENT_A, FOUNDER, makeRoomForCase, one, sql } from './psqlDb';
+import { CLIENT_A, enableTestSpending, FOUNDER, makeRoomForCase, one, spend, sql } from './psqlDb';
 
 export const DENO = ['--yes', 'deno@2.1.4'];
 const fake = new FakeSupabase();
@@ -42,6 +42,7 @@ const post = (body: string, headers: Record<string, string> = {}) =>
 
 test('under Deno: a founder run completes; unauthenticated, non-founder and malformed requests are refused; logs carry no secrets', async () => {
   makeRoomForCase();
+  enableTestSpending();
   const c = one(`select public.client_create_case(gen_random_uuid(), 'DENO-1', 'Synthetic car', 'Referral', 'TEXT', :'body')`, { body: BODY1 }, { role: 'authenticated', sub: CLIENT_A })!;
   sql(`select public.client_submit_case(:'c')`, { c }, { role: 'authenticated', sub: CLIENT_A });
   const founderToken = fake.tokenFor(FOUNDER);
@@ -53,7 +54,8 @@ test('under Deno: a founder run completes; unauthenticated, non-founder and malf
   const ok = await post(JSON.stringify({ case_id: c }), { authorization: `Bearer ${founderToken}` });
   expect(ok).toMatchObject({ status: 200, body: { outcome: 'COMPLETED', code: 'OK' } });
   expect(one(`select model from public.analyses where id = :'a'`, { a: ok.body.analysis_id })).toBe('analyst:FAKE-PROVIDER-NOT-AI|reviewer:FAKE-PROVIDER-NOT-AI');
-  expect(fake.requests.filter((x) => x.cred.startsWith('service')).map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_complete_analysis']);
+  expect(fake.requests.filter((x) => x.cred.startsWith('service')).map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_reserve_ai_spend', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_complete_analysis']);
+  expect(spend(ok.body.analysis_id)).toBe('SETTLED:REPORTED_USAGE:0.0000');
   for (const s of [founderToken, SECRET, PUBLISHABLE, BODY1]) expect(output).not.toContain(s);
   expect(output).toContain('"event":"request.done"');
 });

@@ -8,6 +8,16 @@
 //  3. The snapshot's own restriction list is checked again (a restriction added
 //     between 1 and 2 is in the snapshot): still no provider call.
 //  4. Evidence is loaded strictly from the snapshot and re-hashed.
+//  4a. Stage 2A-5d-3b — spending: internal_reserve_ai_spend reserves the database's
+//     own estimate (refused when spending is disabled, a model is unpriced, a rate
+//     limit or the budget is reached). No reservation, no provider call.
+//  Each call then: internal_ai_dispatch is recorded (committed) BEFORE the request —
+//  if that fails or its outcome is unknown, nothing is sent; the request uses the
+//  database-approved model and output cap; the provider's usage is reported with
+//  internal_ai_report_usage only when the provider returned valid counts. A call
+//  that fails, times out or returns no usable counts is never reported as zero:
+//  completion then settles the reservation as HELD (potentially billable) until an
+//  administrator reconciles it. Providers never retry (maxRetries: 0).
 //  5. Call A, the forensic analyst. 6. Call B, the adversarial reviewer: a
 //     separate request with its own instructions, given the evidence and the
 //     analyst's output as data (never the analyst's instructions or reasoning).
@@ -19,6 +29,8 @@
 // From step 2 on, every path ends by recording the analysis (as ERROR on any
 // failure, which releases the lock and restores the case). If even that fails,
 // founder_abandon_analysis is tried; if that fails too the result is LOCK_HELD.
+// Both release paths settle spending in the database from the dispatch record: a
+// lock is released without ever releasing money for a call that may have been sent.
 //
 // LIMIT (documented, not solved here): if the host kills the run (a hard
 // wall-clock limit, a crash, an out-of-memory kill), no code runs at all and the
@@ -35,7 +47,8 @@ import { loadEvidence, PipelineFailure, snapshotRestricted } from './evidence.ts
 import { analystContent, ANALYST_SYSTEM, PROMPT_VERSION, reviewerContent, REVIEWER_SYSTEM } from './prompts.ts';
 import { ANALYST_SCHEMA, REVIEWER_SCHEMA } from './schemas.ts';
 import {
-  DbError, type CompletionParams, type ModelConfig, type PipelineDeps, type PipelineResult, type ProviderResponse, type Role,
+  DbError, type ApprovedCall, type CompletionParams, type ModelConfig, type PipelineDeps, type PipelineResult, type ProviderResponse,
+  type Role, type SpendReservation,
 } from './types.ts';
 
 export { PROMPT_VERSION };
@@ -48,6 +61,10 @@ const KNOWN_STOPS = ['max_tokens', 'refusal', 'pause_turn', 'tool_use', 'stop_se
  * START_FAILED. An analysis already running on the case shows as INVALID_STATE (case is ANALYZING).
  */
 const START_CODES = ['INSUFFICIENT_EVIDENCE', 'INVALID_STATE', 'FORBIDDEN', 'NOT_FOUND'];
+/** Reservation refusals passed through as codes; anything else is SPEND_RESERVATION_FAILED. */
+const SPEND_CODES = ['SPENDING_DISABLED', 'BUDGET_EXCEEDED', 'RATE_LIMITED', 'MODEL_NOT_PRICED', 'RESERVATION_TOO_LARGE'];
+/** The database accepts 0..10,000,000 tokens per count. */
+const MAX_TOKENS = 10_000_000;
 
 /** What replaces a recommendation the independent review rejected. States the reason; contains no contact. */
 export const REJECTED_RECOMMENDATION = {
@@ -73,6 +90,10 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
   const usage: Usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
   const model = `analyst:${config.analyst.model}|reviewer:${config.reviewer.model}`.slice(0, 100);
   let detected: CompletionParams['detectedRestrictions'] = [];
+  let reservation: SpendReservation | null = null;
+
+  // ---- 0. a provider that may retry could send unrecorded, unreserved requests
+  if ((provider as { maxRetries?: unknown }).maxRetries !== 0) return refused('PROVIDER_RETRIES_NOT_DISABLED');
 
   // ---- 1. restriction pre-check (no analysis row, no provider call)
   try {
@@ -99,6 +120,10 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
     }
     if (snapshotRestricted(record.evidenceManifest)) throw new PipelineFailure('CONTACT_RESTRICTED');
     const evidence = await loadEvidence(founderDb, record, config.maxScreenshotBytes);
+
+    // 4a: reserve before any provider request (the database computes the amount)
+    deadline('ANALYST', 1);
+    reservation = await reserve();
 
     // A: forensic analyst
     const analyst = parseAnalyst(await call('ANALYST', config.analyst, ANALYST_SYSTEM, analystContent(evidence), ANALYST_SCHEMA));
@@ -142,6 +167,24 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
 
   // ------------------------------------------------------------------ helpers
 
+  /** Reserves spending; only a valid reservation for exactly the configured models is used. */
+  async function reserve(): Promise<SpendReservation> {
+    let r: SpendReservation;
+    try {
+      r = await serviceDb.reserveSpend(analysisId, config.analyst.model, config.reviewer.model);
+    } catch (e) {
+      const dbCode = e instanceof DbError ? e.code : null;
+      logger.event('spend.refused', { analysisId, dbCode });
+      throw new PipelineFailure(dbCode !== null && SPEND_CODES.includes(dbCode) ? dbCode : 'SPEND_RESERVATION_FAILED');
+    }
+    if (!r || !Number.isFinite(r.reservedUsd) || r.reservedUsd < 0 || !approvedFor(r.analyst, config.analyst)
+        || !approvedFor(r.reviewer, config.reviewer)) {
+      throw new PipelineFailure('SPEND_RESERVATION_INVALID');
+    }
+    logger.event('spend.reserved', { analysisId, reservedUsd: r.reservedUsd });
+    return r;
+  }
+
   function refused(code: string): PipelineResult {
     logger.event('pipeline.refused', { code });
     return { outcome: 'NOT_STARTED', code, analysisId: null };
@@ -161,31 +204,58 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
   async function call(role: Role, m: ModelConfig, system: string, content: ReturnType<typeof analystContent>,
     schema: Record<string, unknown>): Promise<unknown> {
     const timeout = Math.min(config.callTimeoutMs, deadline(role, 1));
+    const approved = role === 'ANALYST' ? reservation!.analyst : reservation!.reviewer;
+    // The dispatch record is committed before anything can leave. If it fails or its outcome is
+    // unknown, nothing is sent (should it have committed, the database holds the reservation).
+    let dispatched: ApprovedCall;
+    try {
+      dispatched = await serviceDb.recordDispatch(analysisId, role);
+    } catch (e) {
+      logger.event('spend.dispatch_failed', { analysisId, role, dbCode: e instanceof DbError ? e.code : null });
+      throw new PipelineFailure(`DISPATCH_FAILED_${role}`);
+    }
+    if (dispatched?.model !== approved.model || dispatched?.maxOutputTokens !== approved.maxOutputTokens || approved.model !== m.model) {
+      throw new PipelineFailure(`DISPATCH_MISMATCH_${role}`);
+    }
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const t0 = now();
     let response: ProviderResponse;
     try {
       response = await Promise.race([
-        provider.call({ role, model: m.model, system, content, schema, maxOutputTokens: m.maxOutputTokens, signal: controller.signal }),
+        provider.call({ role, model: approved.model, system, content, schema, maxOutputTokens: approved.maxOutputTokens, signal: controller.signal }),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => { controller.abort(); reject(new PipelineFailure(`PROVIDER_TIMEOUT_${role}`)); }, timeout);
         }),
       ]);
     } catch (e) {
+      // Usage unknown: the request may have reached the provider. Nothing is reported, so the
+      // reservation is held (potentially billable) until reconciliation.
       logger.event('provider.call', { analysisId, role, ok: false, ms: now() - t0 });
       throw e instanceof PipelineFailure ? e : new PipelineFailure(`PROVIDER_ERROR_${role}`);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
-    const inTok = Number.isFinite(response?.inputTokens) ? Math.max(0, Math.trunc(response.inputTokens)) : 0;
-    const outTok = Number.isFinite(response?.outputTokens) ? Math.max(0, Math.trunc(response.outputTokens)) : 0;
-    usage.inputTokens += inTok;
-    usage.outputTokens += outTok;
-    usage.costUsd += (inTok * m.inputPerMTok + outTok * m.outputPerMTok) / 1_000_000;
+    const inTok = tokenCount(response?.inputTokens);
+    const outTok = tokenCount(response?.outputTokens);
+    if (inTok === null || outTok === null) {
+      logger.event('provider.call', { analysisId, role, ok: false, ms: now() - t0, usageKnown: false });
+      throw new PipelineFailure(`PROVIDER_USAGE_UNKNOWN_${role}`);
+    }
     const stop = typeof response?.stopReason === 'string' ? response.stopReason : 'missing';
     logger.event('provider.call', { analysisId, role, ok: stop === 'end_turn', ms: now() - t0, inputTokens: inTok, outputTokens: outTok,
       stopReason: stop === 'end_turn' || KNOWN_STOPS.includes(stop) ? stop : 'other' });
+    // Billed whatever the answer turns out to be: report before judging it.
+    try {
+      await serviceDb.reportUsage(analysisId, role, inTok, outTok);
+    } catch (e) {
+      logger.event('spend.usage_report_failed', { analysisId, role, dbCode: e instanceof DbError ? e.code : null });
+      throw new PipelineFailure(`USAGE_REPORT_FAILED_${role}`);
+    }
+    usage.inputTokens += inTok;
+    usage.outputTokens += outTok;
+    usage.costUsd += (inTok * m.inputPerMTok + outTok * m.outputPerMTok) / 1_000_000;
+    if (outTok > approved.maxOutputTokens) throw new PipelineFailure(`PROVIDER_LIMIT_EXCEEDED_${role}`);
     if (stop !== 'end_turn') throw new PipelineFailure(`PROVIDER_INCOMPLETE_${role}`);
     if (typeof response.text !== 'string') throw new PipelineFailure(`INVALID_JSON_${role}`);
     try {
@@ -233,6 +303,15 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
 }
 
 // ------------------------------------------------------------------ pure parts (exported for tests)
+
+/** A provider-reported token count, or null when it is not a plausible count (usage then counts as unknown). */
+export function tokenCount(v: unknown): number | null {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= MAX_TOKENS ? v : null;
+}
+
+function approvedFor(a: ApprovedCall | undefined, m: ModelConfig): boolean {
+  return !!a && a.model === m.model && Number.isSafeInteger(a.maxOutputTokens) && a.maxOutputTokens > 0;
+}
 
 export function startCode(e: unknown): string {
   const raw = e instanceof DbError ? e.code : '';

@@ -441,3 +441,166 @@ test('analyst output passed to the reviewer cannot break out either', async () =
   await run();
   expect(textOf(provider.requests[1]).split('</analysis_under_review>')).toHaveLength(2);
 });
+
+// ---------------------------------------------------------------- Stage 2A-5d-3b: spending controls
+
+const spendCalls = (db: FakeDb) => db.calls.filter((x) => /^(reserve|dispatch|usage|complete|abandon)/.test(x));
+
+test('spending: reserve, then per call dispatch -> request -> usage, then completion settles at reported usage', async () => {
+  const { db, provider, run } = await setup();
+  expect(await run()).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
+  expect(spendCalls(db)).toEqual(['reserve:fake-analyst:fake-reviewer', 'dispatch:ANALYST', 'usage:ANALYST:1000:500',
+    'dispatch:REVIEWER', 'usage:REVIEWER:1000:500', 'complete:COMPLETE']);
+  expect(provider.requests).toHaveLength(2);
+  expect(db.spend()).toBe('SETTLED:REPORTED_USAGE');
+});
+
+test('spending: each request uses the database-approved output cap, not a local value', async () => {
+  const { db, provider, run } = await setup();
+  db.approved = { ANALYST: { model: 'fake-analyst', maxOutputTokens: 1234 }, REVIEWER: { model: 'fake-reviewer', maxOutputTokens: 777 } };
+  await run();
+  expect(provider.requests.map((r) => [r.role, r.model, r.maxOutputTokens])).toEqual([['ANALYST', 'fake-analyst', 1234], ['REVIEWER', 'fake-reviewer', 777]]);
+});
+
+test('spending: a refused reservation means no provider call, the lock is released, the refusal code is reported', async () => {
+  for (const code of ['SPENDING_DISABLED', 'BUDGET_EXCEEDED', 'RATE_LIMITED', 'MODEL_NOT_PRICED', 'RESERVATION_TOO_LARGE', 'FORBIDDEN', 'NETWORK']) {
+    const { db, provider, run } = await setup();
+    db.reserveError = code === 'NETWORK' ? new Error('connection reset') : new DbError(code);
+    const expected = ['FORBIDDEN', 'NETWORK'].includes(code) ? 'SPEND_RESERVATION_FAILED' : code;
+    expect(await run(), code).toMatchObject({ outcome: 'FAILED', code: expected });
+    expect(provider.requests, code).toHaveLength(0);
+    expect(db.calls.filter((x) => x.startsWith('dispatch')), code).toEqual([]);
+    expect(db.analysis!.status, code).toBe('ERROR');
+    expect(db.completions[0].error, code).toBe(`PIPELINE_ERROR: ${expected}`);
+  }
+});
+
+test('spending: a reservation that does not match the configured models or has no valid cap is not used', async () => {
+  const bad: [string, (db: FakeDb) => void][] = [
+    ['other analyst model', (db) => { db.reserveSpend = async () => ({ reservedUsd: 0.1, analyst: { model: 'other', maxOutputTokens: 10 }, reviewer: { ...db.approved.REVIEWER } }); }],
+    ['zero cap', (db) => { db.approved.REVIEWER.maxOutputTokens = 0; }],
+    ['fractional cap', (db) => { db.approved.ANALYST.maxOutputTokens = 10.5; }],
+    ['negative amount', (db) => { db.reservedUsd = -1; }],
+  ];
+  for (const [name, mutate] of bad) {
+    const { db, provider, run } = await setup();
+    mutate(db);
+    expect(await run(), name).toMatchObject({ outcome: 'FAILED', code: 'SPEND_RESERVATION_INVALID' });
+    expect(provider.requests, name).toHaveLength(0);
+    expect(db.calls.filter((x) => x.startsWith('dispatch')), name).toEqual([]);
+  }
+});
+
+test('spending: no dispatch record, no request; an unknown dispatch outcome sends nothing and holds the money', async () => {
+  let s = await setup();
+  s.db.dispatchError = { ANALYST: 'REFUSE' };
+  expect(await s.run()).toMatchObject({ outcome: 'FAILED', code: 'DISPATCH_FAILED_ANALYST' });
+  expect(s.provider.requests).toHaveLength(0);
+  expect(s.db.spend()).toBe('SETTLED:NO_DISPATCH');
+
+  s = await setup();
+  s.db.dispatchError = { ANALYST: 'COMMIT_THEN_LOSE' };
+  expect(await s.run()).toMatchObject({ outcome: 'FAILED', code: 'DISPATCH_FAILED_ANALYST' });
+  expect(s.provider.requests).toHaveLength(0);
+  expect(s.db.spend()).toBe('HELD:UNKNOWN_USAGE');
+
+  s = await setup();
+  s.db.dispatchError = { REVIEWER: 'REFUSE' };
+  expect(await s.run()).toMatchObject({ outcome: 'FAILED', code: 'DISPATCH_FAILED_REVIEWER' });
+  expect(s.provider.requests.map((r) => r.role)).toEqual(['ANALYST']);
+  expect(s.db.spend()).toBe('SETTLED:REPORTED_USAGE');
+});
+
+test('spending: a provider failure after dispatch reports no usage and leaves the reservation HELD; never retried', async () => {
+  const cases: [string, Record<string, unknown>, string, string[]][] = [
+    ['analyst error', { analyst: new Error('500 upstream') }, 'PROVIDER_ERROR_ANALYST', ['ANALYST']],
+    ['analyst timeout', { analyst: 'HANG' }, 'PROVIDER_TIMEOUT_ANALYST', ['ANALYST']],
+    ['reviewer error', { reviewer: new Error('overloaded') }, 'PROVIDER_ERROR_REVIEWER', ['ANALYST', 'REVIEWER']],
+    ['reviewer timeout', { reviewer: 'HANG' }, 'PROVIDER_TIMEOUT_REVIEWER', ['ANALYST', 'REVIEWER']],
+  ];
+  for (const [name, opts, code, roles] of cases) {
+    const { db, provider, run } = await setup(opts);
+    expect(await run(), name).toMatchObject({ outcome: 'FAILED', code });
+    expect(provider.requests.map((r) => r.role), name).toEqual(roles);
+    expect(db.calls.filter((x) => x === `dispatch:${roles.at(-1)}`), name).toHaveLength(1);
+    expect(db.calls.some((x) => x.startsWith(`usage:${roles.at(-1)}`)), name).toBe(false);
+    expect(db.spend(), name).toBe('HELD:UNKNOWN_USAGE');
+    expect(db.analysis!.status, name).toBe('ERROR');
+  }
+});
+
+test('spending: missing or implausible usage is unknown (never reported as 0); a real 0 is reported', async () => {
+  for (const [name, inTok, outTok] of [['missing', undefined, 500], ['NaN', NaN, 500], ['negative', 1000, -1], ['fraction', 10.5, 500],
+    ['string', '1000', 500], ['too large', 10_000_001, 1]] as [string, unknown, unknown][]) {
+    const { db, run } = await setup({ analyst: { ...ok(analystAnswer()), inputTokens: inTok, outputTokens: outTok } });
+    expect(await run(), name).toMatchObject({ outcome: 'FAILED', code: 'PROVIDER_USAGE_UNKNOWN_ANALYST' });
+    expect(db.calls.some((x) => x.startsWith('usage:')), name).toBe(false);
+    expect(db.spend(), name).toBe('HELD:UNKNOWN_USAGE');
+  }
+  const { db, run } = await setup({ analyst: ok(analystAnswer(), 0, 0), reviewer: ok(reviewAnswer('UPHOLD'), 0, 0) });
+  expect(await run()).toMatchObject({ outcome: 'COMPLETED' });
+  expect(db.calls.filter((x) => x.startsWith('usage:'))).toEqual(['usage:ANALYST:0:0', 'usage:REVIEWER:0:0']);
+  expect(db.spend()).toBe('SETTLED:REPORTED_USAGE');
+});
+
+test('spending: an unusable answer is still billed — usage is reported before the answer is judged', async () => {
+  for (const [name, opts, code] of [
+    ['truncated', { analyst: { ...ok(analystAnswer(), 900, 8000), stopReason: 'max_tokens' } }, 'PROVIDER_INCOMPLETE_ANALYST'],
+    ['invalid JSON', { analyst: { text: '{"x": [', stopReason: 'end_turn', inputTokens: 900, outputTokens: 20 } }, 'INVALID_JSON_ANALYST'],
+    ['refusal', { reviewer: { ...ok(reviewAnswer('UPHOLD'), 700, 5), stopReason: 'refusal' } }, 'PROVIDER_INCOMPLETE_REVIEWER'],
+  ] as [string, Record<string, unknown>, string][]) {
+    const { db, run } = await setup(opts);
+    expect(await run(), name).toMatchObject({ outcome: 'FAILED', code });
+    expect(db.spend(), name).toBe('SETTLED:REPORTED_USAGE');
+  }
+});
+
+test('spending: more output than the approved cap is reported in full and fails the run', async () => {
+  const { db, run } = await setup({ analyst: ok(analystAnswer(), 1000, 8001) });
+  expect(await run()).toMatchObject({ outcome: 'FAILED', code: 'PROVIDER_LIMIT_EXCEEDED_ANALYST' });
+  expect(db.calls).toContain('usage:ANALYST:1000:8001');
+  expect(db.calls.some((x) => x.startsWith('dispatch:REVIEWER'))).toBe(false);
+});
+
+test('spending: a failed usage report stops the run; the reviewer is not sent', async () => {
+  let s = await setup();
+  s.db.usageError = { ANALYST: 'REFUSE' };
+  expect(await s.run()).toMatchObject({ outcome: 'FAILED', code: 'USAGE_REPORT_FAILED_ANALYST' });
+  expect(s.provider.requests.map((r) => r.role)).toEqual(['ANALYST']);
+  expect(s.db.spend()).toBe('HELD:UNKNOWN_USAGE');
+  s = await setup();
+  s.db.usageError = { REVIEWER: 'COMMIT_THEN_LOSE' };
+  expect(await s.run()).toMatchObject({ outcome: 'FAILED', code: 'USAGE_REPORT_FAILED_REVIEWER' });
+  expect(s.db.spend()).toBe('SETTLED:REPORTED_USAGE');
+});
+
+test('spending: a provider that may retry is refused before anything starts', async () => {
+  const { db, provider, run } = await setup();
+  (provider as unknown as { maxRetries: number }).maxRetries = 2;
+  expect(await run()).toEqual({ outcome: 'NOT_STARTED', code: 'PROVIDER_RETRIES_NOT_DISABLED', analysisId: null });
+  expect(db.calls).toEqual([]);
+  expect(provider.requests).toHaveLength(0);
+});
+
+test('spending: no time left for the analyst call -> no reservation at all', async () => {
+  const { db, provider, run } = await setup({ config: { now: () => 0, deadlineMs: 400, completionReserveMs: 500 } });
+  expect(await run()).toMatchObject({ outcome: 'FAILED', code: 'DEADLINE_ANALYST' });
+  expect(db.spend()).toBe('NONE');
+  expect(provider.requests).toHaveLength(0);
+});
+
+test('spending: when the failure cannot be recorded, abandoning releases the lock but keeps the money HELD', async () => {
+  const { db, run } = await setup({ analyst: new Error('500') });
+  db.completeThrows = ['ERROR'];
+  expect(await run()).toMatchObject({ outcome: 'FAILED', code: 'PROVIDER_ERROR_ANALYST_ABANDONED' });
+  expect(db.analysis!.status).toBe('ERROR');
+  expect(db.spend()).toBe('HELD:UNKNOWN_USAGE');
+});
+
+test('spending: lock held -> the reservation stays RESERVED (still committed), never released', async () => {
+  const { db, run } = await setup({ analyst: new Error('500') });
+  db.completeThrows = ['ERROR'];
+  db.abandonThrows = true;
+  expect(await run()).toMatchObject({ outcome: 'LOCK_HELD' });
+  expect(db.spend()).toBe('RESERVED:-');
+});

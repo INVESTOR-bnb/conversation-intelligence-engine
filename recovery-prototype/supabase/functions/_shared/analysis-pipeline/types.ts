@@ -5,9 +5,10 @@
 // Everything with side effects is injected:
 //   FounderDb  — reads and the analysis lock, run AS THE FOUNDER (the caller's
 //                JWT). Row level security applies: founder-only data.
-//   ServiceDb  — exactly one call, internal_complete_analysis, which needs the
-//                service role. Nothing else uses the service role.
-//   AnalysisProvider — one model call. No real provider exists in this stage.
+//   ServiceDb  — the service-role calls: the spending controls (reserve,
+//                dispatch, usage; Stage 2A-5d-3b) and internal_complete_analysis.
+//                Nothing else uses the service role.
+//   AnalysisProvider — one model call, never retried. No real provider exists yet.
 //   PipelineLogger   — receives event names and codes only, never content.
 
 export type Role = 'ANALYST' | 'REVIEWER';
@@ -65,8 +66,28 @@ export interface CompletionParams {
   error: string | null;
 }
 
-/** Runs with the service role. Its only job: public.internal_complete_analysis. */
+/** A call the database approved: the model and the output cap the reservation priced. */
+export interface ApprovedCall {
+  model: string;
+  maxOutputTokens: number;
+}
+
+/** public.internal_reserve_ai_spend's answer. */
+export interface SpendReservation {
+  reservedUsd: number;
+  analyst: ApprovedCall;
+  reviewer: ApprovedCall;
+}
+
+/** Runs with the service role. */
 export interface ServiceDb {
+  /** public.internal_reserve_ai_spend: refuses (SPENDING_DISABLED, BUDGET_EXCEEDED, ...) or reserves the database's estimate. */
+  reserveSpend(analysisId: string, analystModel: string, reviewerModel: string): Promise<SpendReservation>;
+  /** public.internal_ai_dispatch: must succeed (committed) before the provider request; once per role. */
+  recordDispatch(analysisId: string, role: Role): Promise<ApprovedCall>;
+  /** public.internal_ai_report_usage: the provider's reported usage for one dispatched call; once per role. */
+  reportUsage(analysisId: string, role: Role, inputTokens: number, outputTokens: number): Promise<void>;
+  /** public.internal_complete_analysis: records the result and settles the reservation from the dispatch record. */
   completeAnalysis(params: CompletionParams): Promise<void>;
 }
 
@@ -95,7 +116,13 @@ export interface ProviderResponse {
   outputTokens: number;
 }
 
+/**
+ * One provider request per call() — no automatic retries anywhere (SDK maxRetries: 0, no
+ * HTTP-level retry). A retry would be a second, unrecorded and unreserved billable request;
+ * the database also refuses a second dispatch of the same role. `maxRetries` must be 0.
+ */
 export interface AnalysisProvider {
+  readonly maxRetries: 0;
   call(request: ProviderRequest): Promise<ProviderResponse>;
 }
 
@@ -105,9 +132,9 @@ export interface PipelineLogger {
 }
 
 export interface ModelConfig {
+  /** Must have an active price row in private.ai_model_prices; the output cap comes from there. */
   model: string;
-  maxOutputTokens: number;
-  /** Price per million tokens, for analyses.estimated_cost_usd (0 for the fake provider). */
+  /** Price per million tokens, for analyses.estimated_cost_usd only (the spending ledger uses the database's prices). */
   inputPerMTok: number;
   outputPerMTok: number;
 }

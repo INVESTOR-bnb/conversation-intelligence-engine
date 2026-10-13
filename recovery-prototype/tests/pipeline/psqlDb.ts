@@ -7,7 +7,8 @@
 
 import { execFileSync } from 'node:child_process';
 import {
-  DbError, type AnalysisRecord, type CompletionParams, type FounderDb, type MessageRow, type ScreenshotFile, type ServiceDb,
+  DbError, type AnalysisRecord, type ApprovedCall, type CompletionParams, type FounderDb, type MessageRow, type Role, type ScreenshotFile,
+  type ServiceDb, type SpendReservation,
 } from '../../supabase/functions/_shared/analysis-pipeline/index.ts';
 
 const HOST = process.env.PIPELINE_PGHOST;
@@ -76,7 +77,19 @@ export class PsqlFounderDb implements FounderDb {
   }
 }
 
+const approved = (o: { model: string; max_output_tokens: number }): ApprovedCall => ({ model: o.model, maxOutputTokens: o.max_output_tokens });
+
 export class PsqlServiceDb implements ServiceDb {
+  async reserveSpend(id: string, analystModel: string, reviewerModel: string): Promise<SpendReservation> {
+    const r = JSON.parse(one(`select public.internal_reserve_ai_spend(:'a', :'am', :'rm')`, { a: id, am: analystModel, rm: reviewerModel }, { role: 'service_role' })!);
+    return { reservedUsd: Number(r.reserved_usd), analyst: approved(r.analyst), reviewer: approved(r.reviewer) };
+  }
+  async recordDispatch(id: string, role: Role): Promise<ApprovedCall> {
+    return approved(JSON.parse(one(`select public.internal_ai_dispatch(:'a', :'r')`, { a: id, r: role }, { role: 'service_role' })!));
+  }
+  async reportUsage(id: string, role: Role, inputTokens: number, outputTokens: number) {
+    sql(`select public.internal_ai_report_usage(:'a', :'r', :'i', :'o')`, { a: id, r: role, i: String(inputTokens), o: String(outputTokens) }, { role: 'service_role' });
+  }
   async completeAnalysis(p: CompletionParams) {
     sql(`select public.internal_complete_analysis(:'a', :'status', nullif(:'model', ''), :'pv', nullif(:'output', '')::jsonb,
            nullif(:'cls', '')::public.classification, nullif(:'msg', ''), :'restr'::jsonb,
@@ -89,8 +102,31 @@ export class PsqlServiceDb implements ServiceDb {
   }
 }
 
-/** Fixture only: earlier synthetic cases are moved out of the 20-per-day client limit window. */
+/**
+ * Fixture only: earlier synthetic cases are moved out of the 20-per-day client limit window, and
+ * earlier spending reservations out of the 24-hour founder/case attempt windows.
+ */
 export function makeRoomForCase(business = BIZ_A) {
   sql(`begin; set local session_replication_role = replica;
-       update public.cases set created_at = created_at - interval '2 days' where business_id = :'b' and created_at > now() - interval '1 day'; commit;`, { b: business });
+       update public.cases set created_at = created_at - interval '2 days' where business_id = :'b' and created_at > now() - interval '1 day';
+       update private.ai_spend_ledger set created_at = created_at - interval '25 hours' where created_at > now() - interval '25 hours'; commit;`, { b: business });
 }
+
+/**
+ * Fixture only, LOCAL TEST DATABASE: spending on (it is off by default and stays off on staging),
+ * synthetic prices for the test models, and old ledger rows reconciled so the budget never fills.
+ */
+export function enableTestSpending(on = true) {
+  sql(`update private.ai_spend_config set enabled = :'on'::boolean, budget_usd = 20, stop_at_usd = 18 where id;
+       insert into private.ai_model_prices (model, input_usd_per_mtok, output_usd_per_mtok, max_output_tokens, active, note)
+       values ('fake-analyst', 2, 10, 8000, true, 'synthetic test price'), ('fake-reviewer', 4, 20, 4000, true, 'synthetic test price')
+       on conflict (model) do nothing;
+       update private.ai_spend_ledger set status = 'RECONCILED', actual_usd = coalesce(actual_usd, 0), settled_by = 'RECONCILIATION',
+         reconciliation_note = 'test fixture: cleared between tests', settled_at = now()
+       where status in ('HELD', 'RESERVED') and not exists (select 1 from public.analyses a where a.id = analysis_id and a.status = 'PENDING');`,
+  { on: String(on) });
+}
+
+/** "STATUS:SETTLED_BY:actual" of an analysis's reservation, or NONE. */
+export const spend = (analysisId: string) =>
+  one(`select status || ':' || coalesce(settled_by, '-') || ':' || coalesce(actual_usd::text, '-') from private.ai_spend_ledger where analysis_id = :'a'`, { a: analysisId }) ?? 'NONE';

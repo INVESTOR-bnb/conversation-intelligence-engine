@@ -4,14 +4,16 @@
 //   founderRest(jwt)  every call carries the FOUNDER's own JWT: PostgREST runs it as
 //                     `authenticated` with that user's claims, so RLS and function
 //                     grants decide. Used for reads, the lock, Storage downloads.
-//   serviceRest(key)  the service credential, used for exactly one call:
-//                     rpc/internal_complete_analysis. Nothing else accepts it.
+//   serviceRest(key)  the service credential, used only for the service-role RPCs:
+//                     internal_reserve_ai_spend, internal_ai_dispatch,
+//                     internal_ai_report_usage and internal_complete_analysis.
 //
 // Ids are validated before they reach a URL; every request has a timeout; a
 // response body is never logged, and errors become DbError codes only.
 
 import {
-  DbError, type AnalysisRecord, type CompletionParams, type FounderDb, type MessageRow, type ScreenshotFile, type ServiceDb,
+  DbError, type AnalysisRecord, type ApprovedCall, type CompletionParams, type FounderDb, type MessageRow, type Role, type ScreenshotFile,
+  type ServiceDb, type SpendReservation,
 } from '../analysis-pipeline/index.ts';
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -161,7 +163,19 @@ export function founderRest(o: RestOptions, jwt: string): FounderDb {
   };
 }
 
-/** The service adapter: one call, internal_complete_analysis. */
+/** {model, max_output_tokens} from the database, or RESPONSE_INVALID. */
+function approvedCall(v: unknown): ApprovedCall {
+  const o = v && typeof v === 'object' ? (v as Record<string, unknown>) : null;
+  if (!o || typeof o.model !== 'string' || !Number.isSafeInteger(o.max_output_tokens)) throw new DbError('RESPONSE_INVALID');
+  return { model: o.model, maxOutputTokens: o.max_output_tokens as number };
+}
+
+function role(r: Role): Role {
+  if (r !== 'ANALYST' && r !== 'REVIEWER') throw new DbError('INVALID_ROLE');
+  return r;
+}
+
+/** The service adapter: the spending calls and internal_complete_analysis. */
 export function serviceRest(o: RestOptions, serviceKey: string): ServiceDb {
   // New secret keys are not JWTs: they go on `apikey` only. A legacy service_role JWT also goes on Authorization.
   const headers: Record<string, string> = serviceKey.startsWith('sb_secret_')
@@ -169,6 +183,19 @@ export function serviceRest(o: RestOptions, serviceKey: string): ServiceDb {
     : { apikey: serviceKey, authorization: `Bearer ${serviceKey}` };
   const c = client(o, headers);
   return {
+    async reserveSpend(analysisId, analystModel, reviewerModel): Promise<SpendReservation> {
+      const r = await c.rpc('internal_reserve_ai_spend', { p_analysis_id: uuid(analysisId), p_analyst_model: analystModel, p_reviewer_model: reviewerModel });
+      const o = r && typeof r === 'object' ? (r as Record<string, unknown>) : null;
+      const usd = Number(o?.reserved_usd);
+      if (!o || !Number.isFinite(usd)) throw new DbError('RESPONSE_INVALID');
+      return { reservedUsd: usd, analyst: approvedCall(o.analyst), reviewer: approvedCall(o.reviewer) };
+    },
+    async recordDispatch(analysisId, r): Promise<ApprovedCall> {
+      return approvedCall(await c.rpc('internal_ai_dispatch', { p_analysis_id: uuid(analysisId), p_role: role(r) }));
+    },
+    async reportUsage(analysisId, r, inputTokens, outputTokens) {
+      await c.rpc('internal_ai_report_usage', { p_analysis_id: uuid(analysisId), p_role: role(r), p_input_tokens: inputTokens, p_output_tokens: outputTokens });
+    },
     async completeAnalysis(p: CompletionParams) {
       await c.rpc('internal_complete_analysis', {
         p_analysis_id: uuid(p.analysisId), p_status: p.status, p_model: p.model, p_prompt_version: p.promptVersion,

@@ -7,7 +7,10 @@
 //           never analysis content, evidence, provider/database text or credentials.
 //
 //   200  the run started; outcome COMPLETED | FAILED | REJECTED (the analysis row
-//        records the details, readable by the founder through RLS)
+//        records the details, readable by the founder through RLS). Spending refusals
+//        (Stage 2A-5d-3b) are FAILED with SPENDING_DISABLED, BUDGET_EXCEEDED, RATE_LIMITED,
+//        MODEL_NOT_PRICED, RESERVATION_TOO_LARGE or SPEND_RESERVATION_FAILED: no provider
+//        call was made and the lock was released.
 //   400 INVALID_JSON / INVALID_REQUEST   401 UNAUTHENTICATED   403 FORBIDDEN / ORIGIN_NOT_ALLOWED
 //   404 NOT_FOUND   405 METHOD_NOT_ALLOWED   409 CONTACT_RESTRICTED / INVALID_STATE / INSUFFICIENT_EVIDENCE
 //   413 BODY_TOO_LARGE   415 UNSUPPORTED_MEDIA_TYPE

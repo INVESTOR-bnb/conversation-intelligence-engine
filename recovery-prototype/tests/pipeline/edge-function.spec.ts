@@ -10,7 +10,7 @@ import { FAKE_MARK } from '../../supabase/functions/_shared/edge/fakeProvider.ts
 import { createAnalyzeCaseHandler, sanitize } from '../../supabase/functions/_shared/edge/handler.ts';
 import { BODY1, BODY2 } from './fakes';
 import { FakeSupabase, LEGACY_SERVICE, PUBLISHABLE, SECRET } from './fakeSupabase';
-import { BIZ_A, CLIENT_A, CLIENT_B, FOUNDER, makeRoomForCase, one, sql } from './psqlDb';
+import { BIZ_A, CLIENT_A, CLIENT_B, enableTestSpending, FOUNDER, makeRoomForCase, one, spend, sql } from './psqlDb';
 
 const UNASSIGNED = '00000000-0000-4000-8000-00000000000e';
 const ORIGIN = 'https://revenue-recovery-v0.pages.dev';
@@ -24,6 +24,7 @@ test.beforeAll(async () => {
 });
 test.afterAll(async () => { await fake.stop(); });
 test.beforeEach(() => {
+  enableTestSpending();
   logs = []; fake.requests = []; fake.secretKeyClaims = { role: 'service_role' }; fake.authDown = false; fake.failRpc.clear(); fake.storageDelayMs = 0; fake.beforeHandle = null;
 });
 
@@ -110,20 +111,22 @@ test('founder: the run completes through the contract; the stored record is unmi
   expect(caseState(c)).toBe('AWAITING_ADMIN_REVIEW');
 });
 
-test('the service credential is used for exactly one request: rpc/internal_complete_analysis', async () => {
+test('the service credential is used only for the spending calls and the completion, in order', async () => {
   const c = textCase();
-  await call({ token: founder(), body: caseBody(c) });
+  const r = await call({ token: founder(), body: caseBody(c) });
   const service = fake.requests.filter((x) => x.cred.startsWith('service'));
-  expect(service).toEqual([{ method: 'POST', path: '/rest/v1/rpc/internal_complete_analysis', cred: 'service:secret' }]);
+  expect(service.map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_reserve_ai_spend', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_complete_analysis']);
+  expect(service.every((x) => x.method === 'POST' && x.cred === 'service:secret')).toBe(true);
+  expect(spend(r.body.analysis_id)).toBe('SETTLED:REPORTED_USAGE:0.0000');
   expect(fake.requests.filter((x) => !x.cred.startsWith('service')).every((x) => x.cred === `user:${FOUNDER}`)).toBe(true);
   expect(fake.requests.map((x) => x.path)).toEqual(expect.arrayContaining(['/auth/v1/user', '/rest/v1/rpc/whoami', '/rest/v1/rpc/founder_start_analysis']));
 });
 
-test('a legacy service_role JWT works too (apikey + Bearer), still only for the completion call', async () => {
+test('a legacy service_role JWT works too (apikey + Bearer), for the same service calls only', async () => {
   const c = textCase();
   const r = await call({ token: founder(), body: caseBody(c), env: { SUPABASE_SECRET_KEYS: undefined, SUPABASE_SERVICE_ROLE_KEY: LEGACY_SERVICE } });
   expect(r.body.outcome).toBe('COMPLETED');
-  expect(fake.requests.filter((x) => x.cred.startsWith('service')).map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_complete_analysis']);
+  expect(fake.requests.filter((x) => x.cred.startsWith('service')).map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_reserve_ai_spend', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_complete_analysis']);
 });
 
 // ---------------------------------------------------------------- authentication and authorisation
@@ -363,11 +366,13 @@ test('storage refuses a business user even for their own case file', async () =>
 // ---------------------------------------------------------------- failure recovery
 
 test('UNVERIFIED-CASE REHEARSAL: if a secret key does not carry the service_role claim, the run fails safe and the lock is released', async () => {
-  fake.secretKeyClaims = null; // the gateway forwards no role claim: internal_complete_analysis raises FORBIDDEN
+  fake.secretKeyClaims = null; // the gateway forwards no role claim: every internal_* function raises FORBIDDEN
   const c = textCase();
   const r = await call({ token: founder(), body: caseBody(c) });
   expect(r.status).toBe(200);
-  expect(r.body).toMatchObject({ outcome: 'FAILED', code: 'INTERNAL_ERROR_ABANDONED' });
+  expect(r.body).toMatchObject({ outcome: 'FAILED', code: 'SPEND_RESERVATION_FAILED_ABANDONED' });
+  expect(spend(r.body.analysis_id)).toBe('NONE');
+  expect(fake.requests.some((x) => x.path.endsWith('/internal_ai_dispatch'))).toBe(false);
   expect(analysis(r.body.analysis_id)).toMatchObject({ status: 'ERROR', error: 'Abandoned by founder', output: null });
   expect(caseState(c)).toBe('SUBMITTED');
   expect(logs.join('\n')).toContain('"event":"pipeline.record_failed"');
@@ -380,6 +385,7 @@ test('completion and abandonment both unreachable: LOCK_HELD (503) with the anal
   const r = await call({ token: founder(), body: caseBody(c) });
   expect([r.status, r.body.outcome]).toEqual([503, 'LOCK_HELD']);
   expect(analysis(r.body.analysis_id).status).toBe('PENDING');
+  expect(spend(r.body.analysis_id)).toBe('RESERVED:-:-'); // still committed while the lock is held
   expect((await call({ token: founder(), body: caseBody(c) })).body.code).toBe('INVALID_STATE');
   fake.failRpc.clear();
   const res = await fetch(`${fake.url}/rest/v1/rpc/founder_abandon_analysis`, { method: 'POST',
@@ -387,6 +393,7 @@ test('completion and abandonment both unreachable: LOCK_HELD (503) with the anal
     body: JSON.stringify({ p_analysis_id: r.body.analysis_id }) });
   expect(res.status).toBe(204);
   expect(caseState(c)).toBe('SUBMITTED');
+  expect(spend(r.body.analysis_id)).toBe('SETTLED:REPORTED_USAGE:0.0000'); // manual abandon settles from the dispatch record
   expect((await call({ token: founder(), body: caseBody(c) })).body.outcome).toBe('COMPLETED');
 });
 
@@ -436,7 +443,89 @@ test('responses and logs never carry tokens, keys, evidence or analysis content'
   }
   for (const b of bodies) expect(Object.keys(JSON.parse(b))).toEqual(['outcome', 'code', 'analysis_id']);
   for (const line of logs) expect(Object.keys(JSON.parse(line)).every((k) => ['fn', 'event', 'code', 'analysisId', 'outcome', 'ms', 'role', 'ok',
-    'inputTokens', 'outputTokens', 'stopReason', 'restrictionsKept', 'restrictionsNotRecorded', 'alreadyRecorded', 'dbCode'].includes(k)), line).toBe(true);
+    'inputTokens', 'outputTokens', 'stopReason', 'restrictionsKept', 'restrictionsNotRecorded', 'alreadyRecorded', 'dbCode', 'reservedUsd', 'usageKnown'].includes(k)), line).toBe(true);
+});
+
+// ---------------------------------------------------------------- Stage 2A-5d-3b: spending controls
+
+const providerCalls = () => logs.filter((l) => l.includes('"event":"provider.call"')).length;
+
+test('spending disabled (the default): no provider call, the lock is released, nothing reserved', async () => {
+  enableTestSpending(false);
+  const c = textCase();
+  const r = await call({ token: founder(), body: caseBody(c) });
+  expect([r.status, r.body]).toEqual([200, { outcome: 'FAILED', code: 'SPENDING_DISABLED', analysis_id: expect.any(String) }]);
+  expect(analysis(r.body.analysis_id)).toMatchObject({ status: 'ERROR', error: 'PIPELINE_ERROR: SPENDING_DISABLED', output: null });
+  expect(caseState(c)).toBe('SUBMITTED');
+  expect(spend(r.body.analysis_id)).toBe('NONE');
+  expect(providerCalls()).toBe(0);
+  expect(fake.requests.some((x) => x.path.endsWith('/internal_ai_dispatch'))).toBe(false);
+});
+
+test('budget exhausted, rate limit reached, or the model unpriced: refused before any provider call', async () => {
+  const blocked: [string, string, string][] = [
+    ['BUDGET_EXCEEDED', `insert into private.ai_spend_ledger (analysis_id, case_id, business_id, founder_id, analyst_model, reviewer_model,
+       analyst_input_bound, analyst_max_output, reviewer_input_bound, reviewer_max_output, analyst_in_price, analyst_out_price, reviewer_in_price,
+       reviewer_out_price, reserved_usd, created_at) values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x', 'x',
+       1, 1, 1, 1, 0, 0, 0, 0, 18.0001, now() - interval '2 days')`, ''],
+    ['RATE_LIMITED', `insert into private.ai_spend_ledger (analysis_id, case_id, business_id, founder_id, analyst_model, reviewer_model,
+       analyst_input_bound, analyst_max_output, reviewer_input_bound, reviewer_max_output, analyst_in_price, analyst_out_price, reviewer_in_price,
+       reviewer_out_price, reserved_usd, status, actual_usd, settled_by) select gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), '${FOUNDER}', 'x', 'x',
+       1, 1, 1, 1, 0, 0, 0, 0, 0, 'SETTLED', 0, 'NO_DISPATCH' from generate_series(1, 10)`, ''],
+    ['MODEL_NOT_PRICED', `update private.ai_model_prices set active = false where model = 'FAKE-PROVIDER-NOT-AI'`,
+      `update private.ai_model_prices set active = true where model = 'FAKE-PROVIDER-NOT-AI'`],
+  ];
+  for (const [code, setup, undo] of blocked) {
+    const c = textCase();
+    sql(setup);
+    logs = []; fake.requests = [];
+    const r = await call({ token: founder(), body: caseBody(c) });
+    if (undo) sql(undo);
+    makeRoomForCase();
+    enableTestSpending();
+    expect(r.body, code).toMatchObject({ outcome: 'FAILED', code });
+    expect(caseState(c), code).toBe('SUBMITTED');
+    expect(spend(r.body.analysis_id), code).toBe('NONE');
+    expect(providerCalls(), code).toBe(0);
+  }
+});
+
+test('the dispatch record cannot be written: nothing is sent; the reservation settles at 0 (no dispatch recorded)', async () => {
+  fake.failRpc.add('internal_ai_dispatch');
+  const c = textCase();
+  const r = await call({ token: founder(), body: caseBody(c) });
+  expect(r.body).toMatchObject({ outcome: 'FAILED', code: 'DISPATCH_FAILED_ANALYST' });
+  expect(providerCalls()).toBe(0);
+  expect(spend(r.body.analysis_id)).toBe('SETTLED:NO_DISPATCH:0.0000');
+  expect(caseState(c)).toBe('SUBMITTED');
+});
+
+test('usage cannot be reported after a dispatched call: the lock is released, the reservation is HELD (not released)', async () => {
+  fake.failRpc.add('internal_ai_report_usage');
+  const c = textCase();
+  const r = await call({ token: founder(), body: caseBody(c) });
+  expect(r.body).toMatchObject({ outcome: 'FAILED', code: 'USAGE_REPORT_FAILED_ANALYST' });
+  expect(providerCalls()).toBe(1);
+  expect(spend(r.body.analysis_id)).toBe('HELD:UNKNOWN_USAGE:0.0000');
+  expect(analysis(r.body.analysis_id).status).toBe('ERROR');
+  expect(caseState(c)).toBe('SUBMITTED');
+});
+
+test('the spending functions are not reachable with a user session (founder, business or anonymous)', async () => {
+  const c = textCase();
+  const a = (await call({ token: founder(), body: caseBody(c) })).body.analysis_id;
+  for (const [who, headers] of [
+    ['founder', { apikey: PUBLISHABLE, authorization: `Bearer ${founder()}` }],
+    ['business', { apikey: PUBLISHABLE, authorization: `Bearer ${fake.tokenFor(CLIENT_A)}` }],
+    ['anonymous', { apikey: PUBLISHABLE }],
+  ] as [string, Record<string, string>][]) {
+    for (const [fn, body] of [['internal_reserve_ai_spend', { p_analysis_id: a, p_analyst_model: 'FAKE-PROVIDER-NOT-AI', p_reviewer_model: 'FAKE-PROVIDER-NOT-AI' }],
+      ['internal_ai_dispatch', { p_analysis_id: a, p_role: 'ANALYST' }], ['internal_ai_report_usage', { p_analysis_id: a, p_role: 'ANALYST', p_input_tokens: 0, p_output_tokens: 0 }]] as const) {
+      const res = await fetch(`${fake.url}/rest/v1/rpc/${fn}`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      expect(res.status, `${who} ${fn}`).toBe(403);
+    }
+  }
+  expect(spend(a)).toBe('SETTLED:REPORTED_USAGE:0.0000');
 });
 
 test('sanitize(): anything outside the allowlist is replaced', () => {

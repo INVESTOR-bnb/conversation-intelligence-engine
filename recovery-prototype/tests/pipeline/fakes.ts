@@ -1,10 +1,13 @@
 // Stage 2A-5d-4a — test doubles for the analysis pipeline core. Synthetic data only.
-// FakeDb mimics the founder-scoped reads, the lock, and internal_complete_analysis's
-// observable effects (it does NOT judge the contract; the database tests do that).
+// FakeDb mimics the founder-scoped reads, the lock, internal_complete_analysis's
+// observable effects (it does NOT judge the contract; the database tests do that) and
+// the Stage 2A-5d-3a spending ledger's rules (reserve, dispatch once, usage once,
+// settlement from the dispatch record). The database tests check the real ledger.
 
 import {
-  DbError, sha256Hex, type AnalysisProvider, type AnalysisRecord, type CompletionParams, type FounderDb, type MessageRow,
-  type PipelineConfig, type PipelineLogger, type ProviderRequest, type ProviderResponse, type ScreenshotFile, type ServiceDb,
+  DbError, sha256Hex, type AnalysisProvider, type AnalysisRecord, type ApprovedCall, type CompletionParams, type FounderDb, type MessageRow,
+  type PipelineConfig, type PipelineLogger, type ProviderRequest, type ProviderResponse, type Role, type ScreenshotFile, type ServiceDb,
+  type SpendReservation,
 } from '../../supabase/functions/_shared/analysis-pipeline/index.ts';
 
 export const CASE = 'c0000000-0000-4000-8000-000000000001';
@@ -52,6 +55,17 @@ export class FakeDb implements FounderDb, ServiceDb {
   getAnalysisThrowsAfterCompletion = false;
   calls: string[] = [];
   completions: CompletionParams[] = [];
+  // ---- spending (mirrors the 2A-5d-3a rules)
+  /** Error raised by the reservation (e.g. new DbError('SPENDING_DISABLED')). */
+  reserveError: Error | null = null;
+  /** The database-approved calls returned by the reservation (the price table's caps). */
+  approved: Record<Role, ApprovedCall> = { ANALYST: { model: 'fake-analyst', maxOutputTokens: 8000 }, REVIEWER: { model: 'fake-reviewer', maxOutputTokens: 4000 } };
+  reservedUsd = 0.25;
+  /** Per role: refuse the dispatch, or commit it and then lose the reply. */
+  dispatchError: Partial<Record<Role, 'REFUSE' | 'COMMIT_THEN_LOSE'>> = {};
+  /** Per role: refuse the usage report, or commit it and then lose the reply. */
+  usageError: Partial<Record<Role, 'REFUSE' | 'COMMIT_THEN_LOSE'>> = {};
+  ledger: { status: 'RESERVED' | 'SETTLED' | 'HELD'; settledBy: string | null; dispatched: Role[]; usage: Partial<Record<Role, [number, number]>> } | null = null;
   messageIdsRequested: string[][] = [];
 
   constructor(manifestValue: unknown) { this.manifestValue = manifestValue; }
@@ -82,7 +96,50 @@ export class FakeDb implements FounderDb, ServiceDb {
     if (this.analysis?.id !== id || this.analysis.status !== 'PENDING') throw new DbError('INVALID_STATE');
     this.analysis.status = 'ERROR';
     this.analysis.error = 'Abandoned by founder';
+    this.settle();
   }
+  async reserveSpend(id: string, analystModel: string, reviewerModel: string): Promise<SpendReservation> {
+    this.calls.push(`reserve:${analystModel}:${reviewerModel}`);
+    if (this.reserveError) throw this.reserveError;
+    if (this.analysis?.id !== id || this.analysis.status !== 'PENDING' || this.ledger) throw new DbError('INVALID_STATE');
+    if (analystModel !== this.approved.ANALYST.model || reviewerModel !== this.approved.REVIEWER.model) throw new DbError('MODEL_NOT_PRICED');
+    this.ledger = { status: 'RESERVED', settledBy: null, dispatched: [], usage: {} };
+    return { reservedUsd: this.reservedUsd, analyst: { ...this.approved.ANALYST }, reviewer: { ...this.approved.REVIEWER } };
+  }
+  async recordDispatch(id: string, role: Role): Promise<ApprovedCall> {
+    this.calls.push(`dispatch:${role}`);
+    if (this.dispatchError[role] === 'REFUSE') throw new DbError('INVALID_STATE');
+    const l = this.ledger;
+    if (!l || this.analysis?.id !== id) throw new DbError('NOT_RESERVED');
+    if (l.status !== 'RESERVED' || this.analysis.status !== 'PENDING') throw new DbError('INVALID_STATE');
+    if (l.dispatched.includes(role)) throw new DbError('ALREADY_DISPATCHED');
+    if (role === 'REVIEWER' && !l.usage.ANALYST) throw new DbError('INVALID_STATE');
+    l.dispatched.push(role);
+    if (this.dispatchError[role] === 'COMMIT_THEN_LOSE') throw new Error('connection reset after commit');
+    return { ...this.approved[role] };
+  }
+  async reportUsage(id: string, role: Role, inputTokens: number, outputTokens: number) {
+    this.calls.push(`usage:${role}:${inputTokens}:${outputTokens}`);
+    if (this.usageError[role] === 'REFUSE') throw new DbError('VALIDATION');
+    const l = this.ledger;
+    if (!l || this.analysis?.id !== id) throw new DbError('NOT_RESERVED');
+    if (!Number.isSafeInteger(inputTokens) || !Number.isSafeInteger(outputTokens) || inputTokens < 0 || outputTokens < 0) throw new DbError('VALIDATION');
+    if (!l.dispatched.includes(role)) throw new DbError('NOT_DISPATCHED');
+    if (l.usage[role]) throw new DbError('ALREADY_REPORTED');
+    l.usage[role] = [inputTokens, outputTokens];
+    if (this.usageError[role] === 'COMMIT_THEN_LOSE') throw new Error('connection reset after commit');
+  }
+  /** private.ai_settle: never from caller-reported numbers, only from the dispatch record. */
+  private settle() {
+    const l = this.ledger;
+    if (!l || l.status !== 'RESERVED') return;
+    if (l.dispatched.length === 0) { l.status = 'SETTLED'; l.settledBy = 'NO_DISPATCH'; return; }
+    const complete = l.dispatched.every((r) => l.usage[r]);
+    l.status = complete ? 'SETTLED' : 'HELD';
+    l.settledBy = complete ? 'REPORTED_USAGE' : 'UNKNOWN_USAGE';
+  }
+  /** "STATUS:SETTLED_BY", or NONE without a reservation. */
+  spend(): string { return this.ledger ? `${this.ledger.status}:${this.ledger.settledBy ?? '-'}` : 'NONE'; }
   async completeAnalysis(p: CompletionParams) {
     this.calls.push(`complete:${p.status}`);
     const kind = p.status === 'ERROR' ? 'ERROR' : 'SUCCESS';
@@ -94,12 +151,14 @@ export class FakeDb implements FounderDb, ServiceDb {
     else if (this.onComplete === 'REJECT') { this.analysis.status = 'ERROR'; this.analysis.error = 'REJECTED by analysis contract rre-analysis/1: synthetic'; }
     else if (this.onComplete === 'STALE') { this.analysis.status = 'ERROR'; this.analysis.error = 'STALE: evidence changed during analysis'; }
     else { this.analysis.status = p.status; }
+    this.settle();
     if (this.commitThenThrow) { this.commitThenThrow = false; throw new Error('connection reset after commit'); }
   }
 }
 
 type Reply = ProviderResponse | Error | 'HANG' | ((r: ProviderRequest) => ProviderResponse | Promise<ProviderResponse>);
 export class FakeProvider implements AnalysisProvider {
+  readonly maxRetries = 0 as const;
   requests: ProviderRequest[] = [];
   constructor(public replies: Partial<Record<'ANALYST' | 'REVIEWER', Reply>>) {}
   async call(r: ProviderRequest): Promise<ProviderResponse> {
@@ -121,8 +180,8 @@ export class MemoryLogger implements PipelineLogger {
 }
 
 export const CONFIG: PipelineConfig = {
-  analyst: { model: 'fake-analyst', maxOutputTokens: 8000, inputPerMTok: 2, outputPerMTok: 10 },
-  reviewer: { model: 'fake-reviewer', maxOutputTokens: 4000, inputPerMTok: 4, outputPerMTok: 20 },
+  analyst: { model: 'fake-analyst', inputPerMTok: 2, outputPerMTok: 10 },
+  reviewer: { model: 'fake-reviewer', inputPerMTok: 4, outputPerMTok: 20 },
   callTimeoutMs: 200, deadlineMs: 5000, completionReserveMs: 500, maxScreenshotBytes: 1024,
 };
 
