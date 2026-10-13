@@ -120,7 +120,7 @@ export function enableTestSpending(on = true) {
   sql(`update private.ai_spend_config set enabled = :'on'::boolean, budget_usd = 20, stop_at_usd = 18 where id;
        insert into private.ai_model_prices (model, input_usd_per_mtok, output_usd_per_mtok, max_output_tokens, active, note)
        values ('fake-analyst', 2, 10, 8000, true, 'synthetic test price'), ('fake-reviewer', 4, 20, 4000, true, 'synthetic test price')
-       on conflict (model) do nothing;
+       on conflict (model) do update set active = true;
        update private.ai_spend_ledger set status = 'RECONCILED', actual_usd = coalesce(actual_usd, 0), settled_by = 'RECONCILIATION',
          reconciliation_note = 'test fixture: cleared between tests', settled_at = now()
        where status in ('HELD', 'RESERVED') and not exists (select 1 from public.analyses a where a.id = analysis_id and a.status = 'PENDING');`,

@@ -19,13 +19,14 @@ export const SECRET = 'sb_secret_TESTONLY_local_fake_key_5678';
 export const LEGACY_SERVICE = 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.TESTONLYsignature000';
 
 const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
-const TABLES = ['contact_restrictions', 'analyses', 'case_messages', 'case_screenshots'];
+const TABLES = ['contact_restrictions', 'analyses', 'case_messages', 'case_screenshots', 'cases', 'audit_log'];
 const RPCS: Record<string, 'uuid' | 'jsonb' | 'void'> = {
   founder_start_analysis: 'uuid', founder_abandon_analysis: 'void', internal_complete_analysis: 'void', whoami: 'jsonb',
   internal_reserve_ai_spend: 'jsonb', internal_ai_dispatch: 'jsonb', internal_ai_report_usage: 'void',
+  client_create_case: 'uuid', client_submit_case: 'void', client_get_case: 'jsonb', founder_ai_spend_summary: 'jsonb',
 };
 
-export interface RequestRecord { method: string; path: string; cred: string }
+export interface RequestRecord { method: string; path: string; cred: string; query?: string }
 
 export class FakeSupabase {
   server!: Server;
@@ -41,6 +42,10 @@ export class FakeSupabase {
   beforeHandle: ((path: string) => void) | null = null;
   /** Delay (ms) before serving storage downloads (to hold an analysis PENDING). */
   storageDelayMs = 0;
+  /** Password sign-in (Stage 2A-5d-4d live-check tests): email -> synthetic password. */
+  passwords = new Map<string, string>();
+  /** A shared, ordered log of requests across the local test servers (optional). */
+  sequence: string[] | null = null;
 
   async start() {
     this.server = createServer((req, res) => { this.handle(req, res).catch(() => this.send(res, 500, { message: 'fake server error' })); });
@@ -71,7 +76,7 @@ export class FakeSupabase {
     const auth = req.headers.authorization;
     const bearer = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : null;
     if (apikey === PUBLISHABLE) {
-      if (bearer === null) return { as: { role: 'anon' }, cred: 'anon' };
+      if (bearer === null || bearer === PUBLISHABLE) return { as: { role: 'anon' }, cred: 'anon' };
       const sub = this.tokens.get(bearer);
       return sub ? { as: { role: 'authenticated', sub }, cred: `user:${sub}` } : null;
     }
@@ -85,13 +90,26 @@ export class FakeSupabase {
   private async handle(req: IncomingMessage, res: ServerResponse) {
     const u = new URL(req.url ?? '/', 'http://x');
     const who = this.caller(req);
-    this.requests.push({ method: req.method ?? '', path: u.pathname, cred: who?.cred ?? 'invalid' });
+    this.requests.push({ method: req.method ?? '', path: u.pathname, cred: who?.cred ?? 'invalid', query: u.search });
+    this.sequence?.push(`supabase ${req.method} ${u.pathname}${u.search}`);
     this.beforeHandle?.(u.pathname);
     if (!who) return this.send(res, 401, { message: 'Invalid API key or JWT' });
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
     const body = Buffer.concat(chunks).toString('utf8');
 
+    if (req.method === 'POST' && u.pathname === '/auth/v1/token' && u.searchParams.get('grant_type') === 'password') {
+      const { email, password } = JSON.parse(body || '{}') as { email?: string; password?: string };
+      const id = typeof email === 'string' ? sql(`select id from auth.users where email = :'e'`, { e: email })[0] : undefined;
+      if (!id || !email || this.passwords.get(email) !== password) return this.send(res, 400, { error: 'invalid_grant', error_description: 'Invalid login credentials' });
+      const now = Math.floor(Date.now() / 1000);
+      return this.send(res, 200, { access_token: this.tokenFor(id), token_type: 'bearer', expires_in: 3600, expires_at: now + 3600,
+        refresh_token: randomBytes(16).toString('hex'), user: { id, aud: 'authenticated', role: 'authenticated', email, app_metadata: {}, user_metadata: {}, created_at: new Date().toISOString() } });
+    }
+    if (req.method === 'POST' && u.pathname === '/auth/v1/logout') return this.send(res, 204, null);
+    if (req.headers['accept-profile'] && req.headers['accept-profile'] !== 'public') {
+      return this.send(res, 406, { code: 'PGRST106', message: 'The schema must be one of the following: public, graphql_public' });
+    }
     if (req.method === 'GET' && u.pathname === '/auth/v1/user') {
       if (this.authDown) return this.send(res, 500, { message: 'auth down' });
       if (who.as?.role !== 'authenticated') return this.send(res, 401, { message: 'invalid JWT' });
@@ -129,10 +147,12 @@ export class FakeSupabase {
       const where: string[] = [];
       const vars: Record<string, string> = {};
       let limit = '';
+      let order = '';
       let i = 0;
       for (const [k, v] of u.searchParams) {
         if (k === 'select') continue;
         if (k === 'limit') { limit = ` limit ${Number(v) | 0}`; continue; }
+        if (k === 'order') { if (v !== 'id.asc') return this.send(res, 400, { message: 'bad order' }); order = ' order by id'; continue; }
         if (!/^[a-z_]+$/.test(k)) return this.send(res, 400, { message: 'bad column' });
         if (v === 'is.null') { where.push(`${k} is null`); continue; }
         const eq = /^eq\.(.*)$/.exec(v);
@@ -142,7 +162,7 @@ export class FakeSupabase {
         return this.send(res, 400, { message: 'bad filter' });
       }
       try {
-        const out = sql(`select coalesce(jsonb_agg(to_jsonb(t)), '[]') from (select ${cols} from public.${table[1]}${where.length ? ` where ${where.join(' and ')}` : ''}${limit}) t`, vars, who.as);
+        const out = sql(`select coalesce(jsonb_agg(to_jsonb(t)), '[]') from (select ${cols} from public.${table[1]}${where.length ? ` where ${where.join(' and ')}` : ''}${order}${limit}) t`, vars, who.as);
         return this.send(res, 200, JSON.parse(out.join('\n') || '[]'));
       } catch (e) {
         return this.send(res, /permission denied/i.test((e as Error).message) ? 401 : 400, { message: (e as Error).message });
