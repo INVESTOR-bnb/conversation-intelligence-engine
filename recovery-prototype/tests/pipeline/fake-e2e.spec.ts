@@ -245,6 +245,17 @@ test('approved run: one case, one analysis, spending enabled only around the sin
   expect(r.out).toContain('PASS  client B: the analysis is invisible');
 });
 
+test('Stage 2A-6d: the fake regression run passes against the reviewed Anthropic-capable code (fake settings, no key)', async () => {
+  knobs.body = ezbr(functionSources());
+  knobs.fn = { ...knobs.fn, ezbr_sha256: sha(knobs.body) };
+  const r = await run();
+  expect(r.code, r.out).toBe(0);
+  expect(r.out).toContain('PASS  deployed source: the reviewed Anthropic-capable version (fake provider configured), spending controls present');
+  expect(r.out).toMatch(/== \d+ pass, 0 fail/);
+  expect(enabled()).toBe('f');
+  noSecrets(r.out);
+});
+
 // ---------------------------------------------------------------- approval
 
 for (const answer of ['', 'yes', 'enable-fake-spending', ' ENABLE-FAKE-SPENDING', 'ENABLE-FAKE-SPENDING ', 'ENABLE FAKE SPENDING']) {
@@ -268,7 +279,10 @@ const preflightRefusals: [string, () => void, string][] = [
   ['verify_jwt off on the deployed function', () => { knobs.fn.verify_jwt = false; }, 'is not ACTIVE with verify_jwt ON'],
   ['the function not ACTIVE', () => { knobs.fn.status = 'THROTTLED'; }, 'is not ACTIVE with verify_jwt ON'],
   ['provider SDK in the deployed source', () => { knobs.body = ezbr(`${deployedSources()}\nimport Anthropic from '@anthropic-ai/sdk';`); }, 'DEPLOYED function source contains an AI-provider SDK'],
-  ['the Stage 2A-6b sources (Anthropic adapter) deployed', () => { knobs.body = ezbr(functionSources()); }, 'DEPLOYED function source contains an AI-provider SDK'],
+  ['the Anthropic-capable code with a key-shaped string in it', () => { knobs.body = ezbr(`${functionSources()}\nconst k = 'sk-ant-api03-${'E'.repeat(40)}';`); }, 'DEPLOYED function source contains an AI-provider SDK'],
+  ['the Anthropic-capable code missing a reviewed safeguard', () => { knobs.body = ezbr(functionSources().replaceAll('CAP_NOT_APPROVED', 'X')); }, 'DEPLOYED function source contains an AI-provider SDK'],
+  ['ALLOW_PAID_PROVIDER among the function secrets', () => { knobs.secrets.push({ name: 'ALLOW_PAID_PROVIDER', value: sha('staging-only') }); }, 'include an AI-provider key name'],
+  ['a paid model choice among the function secrets', () => { knobs.secrets.push({ name: 'ANALYST_MODEL', value: sha('claude-opus-5-5') }); }, 'include an AI-provider key name'],
   ['an unreadable deployed source', () => { knobs.body = Buffer.from('EZBR not brotli at all'); }, 'could not be read to verify it'],
   ['a deployed version without spending controls', () => { knobs.body = ezbr("const FAKE = 'FAKE-PROVIDER-NOT-AI'; // old version"); }, 'not the reviewed version'],
   ['a provider key among the function secrets', () => { knobs.secrets.push({ name: 'ANTHROPIC_API_KEY', value: sha('x') }); }, 'include an AI-provider key name'],

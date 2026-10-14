@@ -41,6 +41,7 @@ import { createHash } from 'node:crypto';
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 import { createInterface } from 'node:readline';
 import { createClient } from '@supabase/supabase-js';
+import { deployedProblems } from './function-source-guard.mjs';
 import { publishableKeyProblem, stagingUrlProblem } from './live-guards.mjs';
 
 const REF = 'aqwdwswpmbnzmkvyuqil';
@@ -50,7 +51,7 @@ const FAKE_MODEL = 'FAKE-PROVIDER-NOT-AI';
 const FAKE_MARK = '[FAKE PROVIDER — pipeline test, NOT an AI analysis]';
 const PHRASE = 'ENABLE-FAKE-SPENDING';
 const PROVIDER_MARKERS = /@anthropic-ai|api\.anthropic\.com|sk-ant-|ANTHROPIC_API_KEY|openai|x-api-key/i;
-const PROVIDER_SECRET_NAME = /ANTHROPIC|OPENAI|CLAUDE|GEMINI|MISTRAL|COHERE|GROQ|LLM|(^|_)API_KEY$|PROVIDER_KEY/i;
+const PROVIDER_SECRET_NAME = /ANTHROPIC|OPENAI|CLAUDE|GEMINI|MISTRAL|COHERE|GROQ|LLM|(^|_)API_KEY$|PROVIDER_KEY|^ALLOW_PAID_PROVIDER$|^(ANALYST|REVIEWER)_MODEL$/i;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const RESTORE_SQL = 'update private.ai_spend_config set enabled = false, updated_at = now() where id;';
 const recoveryOnly = process.argv.includes('--disable-spending-only');
@@ -256,9 +257,13 @@ async function run() {
   const hashMatches = typeof fn.ezbr_sha256 === 'string' && fn.ezbr_sha256 === createHash('sha256').update(body).digest('hex');
   const src = decodeBody(body);
   if (src === null) throw new Stop('the deployed function source could not be read to verify it (live preflight blocker: see the runbook)');
-  if (PROVIDER_MARKERS.test(src)) throw new Stop('the DEPLOYED function source contains an AI-provider SDK, endpoint or key');
+  // Stage 2A-6d: the Anthropic-CAPABLE code is accepted only if it is the reviewed version (the
+  // source guard); with no provider key or paid setting among the secrets (checked below) it can
+  // only run the fake. Any other provider code is refused.
+  if (PROVIDER_MARKERS.test(src) && deployedProblems(src).length > 0) throw new Stop('the DEPLOYED function source contains an AI-provider SDK, endpoint or key');
   if (!src.includes('internal_reserve_ai_spend') || !src.includes('ALLOW_FAKE_PROVIDER')) throw new Stop('the deployed function is not the reviewed version (no spending controls or fake guard)');
-  record('PASS', 'deployed source: the fake provider and the spending controls, no AI-provider SDK, endpoint or key',
+  record('PASS', PROVIDER_MARKERS.test(src) ? 'deployed source: the reviewed Anthropic-capable version (fake provider configured), spending controls present'
+    : 'deployed source: the fake provider and the spending controls, no AI-provider SDK, endpoint or key',
     hashMatches ? 'download matches the recorded deployment hash' : 'download encoding differs from the recorded upload hash; content checked');
 
   const list = await mgmt('/secrets');
