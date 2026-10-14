@@ -135,10 +135,10 @@ test('the environment cannot redirect or re-authenticate the client (explicit ba
 test('the full pipeline over the real SDK: success settles from reported usage; a 500 on the reviewer is HELD after one request', async () => {
   const setup = async () => {
     const db = new FakeDb(await manifest({ screenshots: [] }));
-    db.approved = { ANALYST: { model: OPUS, maxOutputTokens: 16000 }, REVIEWER: { model: SONNET, maxOutputTokens: 8000 } };
+    db.approved = { ANALYST: { model: OPUS, maxOutputTokens: 8000 }, REVIEWER: { model: SONNET, maxOutputTokens: 8000 } };
     db.prices = { ANALYST: [4, 20], REVIEWER: [2, 10] };
     db.inputBound = { ANALYST: 9000, REVIEWER: 30000 };
-    db.reservedUsd = 0.496;
+    db.reservedUsd = 0.336;
     const run = () => runAnalysisPipeline(CASE, { founderDb: db, serviceDb: db, provider: new AnthropicProvider(client(), 'medium'), logger: new MemoryLogger(),
       config: { analyst: anthropicModelConfig(OPUS)!, reviewer: anthropicModelConfig(SONNET)!, textOnly: true, callTimeoutMs: 2000, deadlineMs: 10000, completionReserveMs: 500, maxScreenshotBytes: 1024 } });
     return { db, run };

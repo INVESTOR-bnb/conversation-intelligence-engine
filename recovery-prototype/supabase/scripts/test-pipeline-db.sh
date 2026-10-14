@@ -22,7 +22,7 @@ trap cleanup EXIT
 load() { "$PGBIN/psql" -h "$WORK" -p "$PORT" -U postgres -d postgres -X -q -v ON_ERROR_STOP=1 < "$1" >/dev/null || { echo "failed: $1"; exit 1; }; }
 load "$HERE/tests/local/00_supabase_emulation.sql"
 if [ "${INSTALL:-migrations}" = deploy ]; then
-  for f in stage2a1 stage2a4b stage2a4c stage2a4c1 stage2a5a stage2a5b stage2a5d1 stage2a5d2 stage2a5d3a stage2a6a; do load "$HERE/deploy/${f}_deploy.sql"; done
+  for f in stage2a1 stage2a4b stage2a4c stage2a4c1 stage2a5a stage2a5b stage2a5d1 stage2a5d2 stage2a5d3a stage2a6a stage2a6c; do load "$HERE/deploy/${f}_deploy.sql"; done
 else
   for f in "$HERE"/migrations/*.sql; do load "$f"; done
 fi

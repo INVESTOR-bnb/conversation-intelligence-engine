@@ -1,8 +1,9 @@
 // Stage 2A-6b — the Anthropic adapter (scripted messages client: no network, no key) through the
 // pipeline against the REAL local database: the real reservation, reservation terms, dispatch
 // record, usage report and settlement. Synthetic data only.
-// The two allowlisted models are priced in the LOCAL TEST DATABASE only (staging has no such
-// rows: adding them is a separate founder decision); every test restores them.
+// Stage 2A-6c: the two allowlisted models are priced by the migration, INACTIVE. These tests
+// ACTIVATE them in the LOCAL TEST DATABASE only (activation on staging is a separate founder
+// decision) and restore the migration's state afterwards.
 
 import { expect, test } from '@playwright/test';
 import { PROMPT_VERSION, runAnalysisPipeline, type PipelineConfig } from '../../supabase/functions/_shared/analysis-pipeline/index.ts';
@@ -16,17 +17,27 @@ const SONNET = 'claude-sonnet-5-5';
 const service = new PsqlServiceDb();
 let n = 0;
 
+/** Activates the migration's rows (local test database only), optionally with different prices. */
 function priceModels(opus: [number, number] = [4, 20], sonnet: [number, number] = [2, 10]) {
-  sql(`insert into private.ai_model_prices (model, input_usd_per_mtok, output_usd_per_mtok, max_output_tokens, active, note)
-       values (:'o', :'oi', :'oo', 12000, true, 'LOCAL TEST ONLY'), (:'s', :'si', :'so', 8000, true, 'LOCAL TEST ONLY')
-       on conflict (model) do update set input_usd_per_mtok = excluded.input_usd_per_mtok, output_usd_per_mtok = excluded.output_usd_per_mtok,
-         max_output_tokens = excluded.max_output_tokens, active = true`,
+  sql(`update private.ai_model_prices set active = true, input_usd_per_mtok = :'oi', output_usd_per_mtok = :'oo' where model = :'o';
+       update private.ai_model_prices set active = true, input_usd_per_mtok = :'si', output_usd_per_mtok = :'so' where model = :'s'`,
   { o: OPUS, oi: String(opus[0]), oo: String(opus[1]), s: SONNET, si: String(sonnet[0]), so: String(sonnet[1]) });
 }
+const MIGRATION_STATE = 'claude-opus-5-5:4.00:20.00:8000:f,claude-sonnet-5-5:2.00:10.00:8000:f';
+const paidRows = () => one(`select string_agg(format('%s:%s:%s:%s:%s', model, input_usd_per_mtok::numeric(8,2), output_usd_per_mtok::numeric(8,2), max_output_tokens, active), ',' order by model)
+  from private.ai_model_prices where model in (:'o', :'s')`, { o: OPUS, s: SONNET });
 
-test.beforeAll(() => { sql('select tests.seed() where not exists (select 1 from public.founders)'); });
+test.beforeAll(() => {
+  sql('select tests.seed() where not exists (select 1 from public.founders)');
+  expect(paidRows(), 'the migration installed both rows, inactive').toBe(MIGRATION_STATE);
+});
 test.beforeEach(() => { enableTestSpending(); priceModels(); });
-test.afterAll(() => { sql(`update private.ai_model_prices set active = false where model in (:'o', :'s')`, { o: OPUS, s: SONNET }); enableTestSpending(false); });
+test.afterAll(() => {
+  priceModels();
+  sql(`update private.ai_model_prices set active = false where model in (:'o', :'s')`, { o: OPUS, s: SONNET });
+  enableTestSpending(false);
+  expect(paidRows()).toBe(MIGRATION_STATE);
+});
 
 function textCase() {
   n += 1;
@@ -60,12 +71,12 @@ test('success: real reservation and terms; counted input within the bound; usage
   expect(res).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
   const l = ledger(res.analysisId!);
   expect(l).toMatchObject({ status: 'SETTLED', settled_by: 'REPORTED_USAGE', analyst_model: OPUS, reviewer_model: SONNET,
-    analyst_max_output: 12000, reviewer_max_output: 8000, analyst_input_tokens: 1200, analyst_output_tokens: 900, reviewer_input_tokens: 1200, reviewer_output_tokens: 900 });
+    analyst_max_output: 8000, reviewer_max_output: 8000, analyst_input_tokens: 1200, analyst_output_tokens: 900, reviewer_input_tokens: 1200, reviewer_output_tokens: 900 });
   // 1200 x 4 + 900 x 20 + 1200 x 2 + 900 x 10 = 34200 micro-dollars -> 0.0342
   expect(Number(l.actual_usd)).toBe(0.0342);
   expect(Number(l.actual_usd)).toBeLessThan(Number(l.reserved_usd));
   // the request used the database's caps and the counts were of the exact requests
-  expect(r.client.creates.map((x) => [x.body.model, x.body.max_tokens])).toEqual([[OPUS, 12000], [SONNET, 8000]]);
+  expect(r.client.creates.map((x) => [x.body.model, x.body.max_tokens])).toEqual([[OPUS, 8000], [SONNET, 8000]]);
   const counted = r.logger.events.filter((e) => e.name === 'spend.input_counted').map((e) => e.fields);
   expect(counted.map((f) => [f?.inputBound, f?.ok])).toEqual([[l.analyst_input_bound, true], [l.reviewer_input_bound, true]]);
   expect(analysis(res.analysisId!)).toMatchObject({ status: 'COMPLETE', model: `analyst:${OPUS}|reviewer:${SONNET}`, prompt_version: PROMPT_VERSION });
@@ -98,14 +109,17 @@ test('timeout and HTTP error: dispatched, usage unknown -> HELD in the real ledg
   }
 });
 
-test('input over the reserved bound: nothing dispatched, the real ledger settles at USD 0 (NO_DISPATCH)', async () => {
+test('input over the reserved bound: never generated; the count is recorded as a dispatch with 0/0 usage; the real ledger settles at USD 0', async () => {
   const { c, m1, m2 } = textCase();
   const r = run(c, good(m1, m2), { ANALYST: { input_tokens: 9_000_000 }, REVIEWER: { input_tokens: 1 } });
   const res = await r.result;
   expect(res).toMatchObject({ outcome: 'FAILED', code: 'INPUT_EXCEEDS_RESERVATION_ANALYST' });
   expect(r.client.creates).toHaveLength(0);
-  expect(ledger(res.analysisId!)).toMatchObject({ status: 'SETTLED', settled_by: 'NO_DISPATCH', analyst_dispatched_at: null });
-  expect(Number(ledger(res.analysisId!).actual_usd)).toBe(0);
+  expect(r.client.counts).toHaveLength(1);
+  const l = ledger(res.analysisId!);
+  expect(l).toMatchObject({ status: 'SETTLED', settled_by: 'REPORTED_USAGE', analyst_input_tokens: 0, analyst_output_tokens: 0, reviewer_dispatched_at: null });
+  expect(l.analyst_dispatched_at).not.toBeNull(); // the conversation went to the provider's count endpoint: on the record
+  expect(Number(l.actual_usd)).toBe(0);
 });
 
 test('a database price different from the verified price: refused before dispatch, USD 0', async () => {

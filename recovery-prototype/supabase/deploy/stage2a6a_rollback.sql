@@ -6,6 +6,7 @@
 -- WARNING: a pipeline that checks reservation terms before dispatch (Stage 2A-6b)
 -- then refuses to dispatch a paid provider request; the fake provider still works.
 -- Safe to re-run: if 2A-6a is not applied it refuses and changes nothing.
+-- Refuses while Stage 2A-6c (the Anthropic price rows) is applied: roll that back first.
 -- Afterwards run stage2a5d3a_verify.sql and the earlier verification files.
 -- ===================================================================
 
@@ -15,6 +16,9 @@ do $preflight$
 begin
   if to_regprocedure('public.internal_ai_reservation_terms(uuid)') is null then
     raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-6a is not applied.';
+  end if;
+  if exists (select 1 from private.ai_model_prices where model in ('claude-opus-5-5', 'claude-sonnet-5-5')) then
+    raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-6c (Anthropic prices) is applied; run stage2a6c_rollback.sql first.';
   end if;
   perform set_config('rre.fingerprint_before', (
     select string_agg(p.oid::regprocedure::text || '=' || md5(p.prosrc || coalesce(p.proacl::text, '') || p.prosecdef::text || coalesce(p.proconfig::text, '')), ';' order by p.oid::regprocedure::text)

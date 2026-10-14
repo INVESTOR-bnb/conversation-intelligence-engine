@@ -27,10 +27,8 @@ test.afterAll(async () => {
 });
 test.beforeEach(() => {
   enableTestSpending();
-  sql(`insert into private.ai_model_prices (model, input_usd_per_mtok, output_usd_per_mtok, max_output_tokens, active, note)
-       values (:'o', 4, 20, 12000, true, 'LOCAL TEST ONLY'), (:'s', 2, 10, 8000, true, 'LOCAL TEST ONLY')
-       on conflict (model) do update set input_usd_per_mtok = excluded.input_usd_per_mtok, output_usd_per_mtok = excluded.output_usd_per_mtok,
-         max_output_tokens = excluded.max_output_tokens, active = true`, { o: OPUS, s: SONNET });
+  // Activates the Stage 2A-6c rows (installed inactive by the migration) in the LOCAL test database only.
+  sql(`update private.ai_model_prices set active = true where model in (:'o', :'s')`, { o: OPUS, s: SONNET });
   logs = []; clients = []; fake.requests = [];
 });
 

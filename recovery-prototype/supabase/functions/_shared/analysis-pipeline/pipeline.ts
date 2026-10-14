@@ -25,11 +25,18 @@
 //     this code expects for that model; the cap is within the model's own maximum;
 //     and the worst case of both calls (input bound x input price + cap x output
 //     price) is covered by the reserved amount.
-//     Before each priced call, the exact request's input tokens are counted without
-//     generating anything (Anthropic's free count_tokens) and, with a 10% margin for
-//     the estimate, must be within the reserved input bound (INPUT_EXCEEDS_RESERVATION_<ROLE>).
-//     A call that cannot be counted is not sent. All of this happens before the dispatch
-//     record, so a refused call settles at USD 0: no request could have left.
+//     Any refusal so far happens before the dispatch record: no conversation data has left,
+//     and the reservation settles at USD 0 (NO_DISPATCH).
+//     Stage 2A-6c — a priced call needs a provider that can count its input
+//     (TOKEN_COUNT_UNAVAILABLE_<ROLE>, before dispatch). Counting sends the conversation to
+//     the provider, so it happens only AFTER the committed dispatch record: every request
+//     that carries conversation data, counted or generated, is on the ledger. The exact
+//     request's input is counted with the provider's free count_tokens endpoint (no
+//     generation) and, with a 10% margin for the estimate, must fit the reserved input bound
+//     (INPUT_EXCEEDS_RESERVATION_<ROLE>; a failed or hung count: TOKEN_COUNT_FAILED_<ROLE>).
+//     On either refusal no generation request was ever made, and counting is free, so the
+//     call's usage is reported as 0/0: the reservation settles at USD 0 with the dispatch
+//     (the disclosure) recorded. If even that report fails, the reservation is HELD.
 //     After a call: usage is reported first, then the answer is judged — an input count
 //     above the bound, an output above the cap, a refusal, a cut-off answer, invalid JSON
 //     or an answer outside the schema each fail closed (the billed usage stays recorded).
@@ -234,9 +241,7 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
    * reserved input bound, is refused before its dispatch record.
    */
   async function checkInput(role: Role, request: Omit<ProviderRequest, 'signal'>, bound: TermsCall): Promise<void> {
-    const priced = bound.inputUsdPerMTok > 0 || bound.outputUsdPerMTok > 0;
-    if (!priced && !provider.countInputTokens) return;
-    if (!provider.countInputTokens) throw new PipelineFailure(`TOKEN_COUNT_UNAVAILABLE_${role}`);
+    if (!provider.countInputTokens) return; // a priced call without a counter was refused before its dispatch
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let counted: number | null;
@@ -282,8 +287,10 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
     const approved = role === 'ANALYST' ? reservation!.analyst : reservation!.reviewer;
     const bound = role === 'ANALYST' ? terms!.analyst : terms!.reviewer;
     deadline(role, 1);
-    await checkInput(role, { role, model: approved.model, system, content, schema, maxOutputTokens: approved.maxOutputTokens }, bound);
-    const timeout = Math.min(config.callTimeoutMs, deadline(role, 1));
+    // A priced call must be countable before anything is recorded or sent.
+    if ((bound.inputUsdPerMTok > 0 || bound.outputUsdPerMTok > 0) && !provider.countInputTokens) {
+      throw new PipelineFailure(`TOKEN_COUNT_UNAVAILABLE_${role}`);
+    }
     // The dispatch record is committed before anything can leave. If it fails or its outcome is
     // unknown, nothing is sent (should it have committed, the database holds the reservation).
     let dispatched: ApprovedCall;
@@ -296,6 +303,19 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
     if (dispatched?.model !== approved.model || dispatched?.maxOutputTokens !== approved.maxOutputTokens || approved.model !== m.model) {
       throw new PipelineFailure(`DISPATCH_MISMATCH_${role}`);
     }
+    // Count the exact request (it carries the conversation: hence after the dispatch record).
+    try {
+      await checkInput(role, { role, model: approved.model, system, content, schema, maxOutputTokens: approved.maxOutputTokens }, bound);
+    } catch (e) {
+      // No generation request was made and counting is free: the call's usage is exactly 0/0.
+      try {
+        await serviceDb.reportUsage(analysisId, role, 0, 0);
+      } catch (r) {
+        logger.event('spend.usage_report_failed', { analysisId, role, dbCode: r instanceof DbError ? r.code : null });
+      }
+      throw e;
+    }
+    const timeout = Math.min(config.callTimeoutMs, deadline(role, 1));
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const t0 = now();
@@ -426,6 +446,7 @@ export function termsProblem(t: ReservationTerms | null | undefined, analysisId:
     if (c.model !== a.model || c.model !== m.model) return `${role}_MODEL`;
     if (!count(c.maxOutputTokens) || c.maxOutputTokens !== a.maxOutputTokens) return `${role}_OUTPUT_CAP`;
     if (m.maxOutputTokens !== undefined && c.maxOutputTokens > m.maxOutputTokens) return `${role}_CAP_ABOVE_MODEL_MAXIMUM`;
+    if (m.approvedOutputCap !== undefined && c.maxOutputTokens !== m.approvedOutputCap) return `${role}_CAP_NOT_APPROVED`;
     if (!count(c.inputBound)) return `${role}_INPUT_BOUND`;
     if (!price(c.inputUsdPerMTok) || !price(c.outputUsdPerMTok)) return `${role}_PRICE_INVALID`;
     if (c.inputUsdPerMTok !== m.inputPerMTok || c.outputUsdPerMTok !== m.outputPerMTok) return `${role}_PRICE`;

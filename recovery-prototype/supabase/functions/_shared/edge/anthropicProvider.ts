@@ -11,9 +11,13 @@
 //     DATABASE approved, the system prompt, one user turn (text, and images only if a
 //     caller ever allows them), structured output via
 //     output_config.format = {type: "json_schema", schema} and output_config.effort;
-//   * service_tier "standard_only" and inference_geo "global": the prices snapshotted in
-//     the reservation are the standard global prices (priority tier and US-only
-//     inference are priced differently);
+//   * inference_geo "global" (a documented value; the default when the workspace sets none):
+//     the reservation's snapshot prices are the global prices, and US-only inference costs
+//     1.1x. Sent explicitly so a workspace default of "us" can never bill above the snapshot;
+//     a workspace that does not allow "global" rejects the request instead (HTTP 400, HELD).
+//     Stage 2A-6c removed service_tier: Priority Tier is not offered on these models and is
+//     no longer sold, so the parameter only added compatibility uncertainty. The response's
+//     usage.service_tier is still checked (must be "standard" or absent);
 //   * NO retries (the client is built with maxRetries 0 and every request passes
 //     maxRetries 0), NO model fallback (no `fallbacks` parameter, no second model is
 //     ever tried), NO tools, NO prompt caching, NO beta headers, no `thinking` field
@@ -45,9 +49,11 @@ export const ANTHROPIC_API_URL = 'https://api.anthropic.com';
  * models overview and pricing pages, verified for Stage 2A-6b. A reservation is refused before
  * dispatch unless the database snapshotted exactly these prices (pipeline: SPEND_TERMS_MISMATCH).
  */
-export const ANTHROPIC_MODELS: Readonly<Record<string, Readonly<Omit<ModelConfig, 'model'>> & { maxOutputTokens: number }>> = Object.freeze({
-  'claude-opus-5-5': Object.freeze({ inputPerMTok: 4, outputPerMTok: 20, maxOutputTokens: 128_000 }),
-  'claude-sonnet-5-5': Object.freeze({ inputPerMTok: 2, outputPerMTok: 10, maxOutputTokens: 128_000 }),
+export const ANTHROPIC_MODELS: Readonly<Record<string, Readonly<{ inputPerMTok: number; outputPerMTok: number; maxOutputTokens: number; approvedOutputCap: number }>>> = Object.freeze({
+  // approvedOutputCap: the cap Stage 2A-6c puts in private.ai_model_prices (migration
+  // 20261020120000_stage2a6c_model_prices.sql); the pipeline refuses any other cap.
+  'claude-opus-5-5': Object.freeze({ inputPerMTok: 4, outputPerMTok: 20, maxOutputTokens: 128_000, approvedOutputCap: 8_000 }),
+  'claude-sonnet-5-5': Object.freeze({ inputPerMTok: 2, outputPerMTok: 10, maxOutputTokens: 128_000, approvedOutputCap: 8_000 }),
 });
 
 export const ANTHROPIC_EFFORTS = ['low', 'medium', 'high'] as const;
@@ -55,7 +61,7 @@ export type AnthropicEffort = (typeof ANTHROPIC_EFFORTS)[number];
 
 export function anthropicModelConfig(model: string): ModelConfig | null {
   const m = Object.prototype.hasOwnProperty.call(ANTHROPIC_MODELS, model) ? ANTHROPIC_MODELS[model] : undefined;
-  return m ? { model, inputPerMTok: m.inputPerMTok, outputPerMTok: m.outputPerMTok, maxOutputTokens: m.maxOutputTokens } : null;
+  return m ? { model, inputPerMTok: m.inputPerMTok, outputPerMTok: m.outputPerMTok, maxOutputTokens: m.maxOutputTokens, approvedOutputCap: m.approvedOutputCap } : null;
 }
 
 export interface RequestOptions { signal: AbortSignal; timeout: number; maxRetries: 0 }
@@ -103,12 +109,11 @@ export function messagesBody(r: Omit<ProviderRequest, 'signal'>, effort: Anthrop
     system: r.system,
     messages: [{ role: 'user', content: contentBlocks(r.content) }],
     output_config: { effort, format: { type: 'json_schema', schema: r.schema } },
-    service_tier: 'standard_only',
     inference_geo: 'global',
   };
 }
 
-/** The count_tokens body for the same call: what is billed as input (no max_tokens, tier or geography there). */
+/** The count_tokens body for the same call: what is billed as input (no max_tokens or geography there). */
 export function countBody(r: Omit<ProviderRequest, 'signal'>, effort: AnthropicEffort): Record<string, unknown> {
   const { model, system, messages, output_config } = messagesBody(r, effort);
   return { model, system, messages, output_config };

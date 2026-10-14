@@ -3,6 +3,7 @@
 // Synthetic data only. The real SDK against a local mock server: anthropicSdk.spec.ts.
 
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 import {
   ANALYST_SCHEMA, parseAnalyst, ProviderCallError, REVIEWER_SCHEMA, runAnalysisPipeline, termsProblem, type PipelineConfig, type ProviderRequest,
   type ReservationTerms, type SpendReservation,
@@ -23,11 +24,11 @@ const httpError = (status: number) => Object.assign(new Error(`${status} SYNTHET
 /** The pipeline run with the real adapter over a scripted client, against the ledger-mirroring FakeDb. */
 async function setup(create: Record<'ANALYST' | 'REVIEWER', Script>, opts: { count?: Record<'ANALYST' | 'REVIEWER', Script>; shots?: boolean; config?: Partial<PipelineConfig> } = {}) {
   const db = new FakeDb(await manifest(opts.shots ? {} : { screenshots: [] }));
-  db.approved = { ANALYST: { model: OPUS, maxOutputTokens: 16000 }, REVIEWER: { model: SONNET, maxOutputTokens: 8000 } };
+  db.approved = { ANALYST: { model: OPUS, maxOutputTokens: 8000 }, REVIEWER: { model: SONNET, maxOutputTokens: 8000 } };
   db.prices = { ANALYST: [4, 20], REVIEWER: [2, 10] };
   db.inputBound = { ANALYST: 9000, REVIEWER: 30000 };
-  // worst case: 9000x4 + 16000x20 + 30000x2 + 8000x10 = 36000 + 320000 + 60000 + 80000 = 496000 -> USD 0.4960
-  db.reservedUsd = 0.496;
+  // worst case: 9000x4 + 8000x20 + 30000x2 + 8000x10 = 36000 + 160000 + 60000 + 80000 = 336000 -> USD 0.3360
+  db.reservedUsd = 0.336;
   const client = new ScriptedClient(create, opts.count);
   const provider = new AnthropicProvider(client, 'medium');
   const logger = new MemoryLogger();
@@ -44,8 +45,8 @@ const GOOD = { ANALYST: message(analystAnswer()), REVIEWER: message(reviewAnswer
 
 test('the model allowlist is exactly the two verified models, with their documented prices and output maximum; frozen', () => {
   expect(ANTHROPIC_MODELS).toEqual({
-    'claude-opus-5-5': { inputPerMTok: 4, outputPerMTok: 20, maxOutputTokens: 128000 },
-    'claude-sonnet-5-5': { inputPerMTok: 2, outputPerMTok: 10, maxOutputTokens: 128000 },
+    'claude-opus-5-5': { inputPerMTok: 4, outputPerMTok: 20, maxOutputTokens: 128000, approvedOutputCap: 8000 },
+    'claude-sonnet-5-5': { inputPerMTok: 2, outputPerMTok: 10, maxOutputTokens: 128000, approvedOutputCap: 8000 },
   });
   expect(Object.isFrozen(ANTHROPIC_MODELS) && Object.isFrozen(ANTHROPIC_MODELS[OPUS])).toBe(true);
   for (const m of ['claude-opus-4-8', 'claude-haiku-5-5', 'FAKE-PROVIDER-NOT-AI', 'toString', '__proto__', '']) expect(anthropicModelConfig(m), m).toBeNull();
@@ -56,8 +57,9 @@ test('request: approved model, DB-approved max_tokens, structured output, effort
   expect(await run()).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
   expect(client.creates).toHaveLength(2);
   const [a, r] = client.creates;
-  expect(Object.keys(a.body).sort()).toEqual(['inference_geo', 'max_tokens', 'messages', 'model', 'output_config', 'service_tier', 'system']);
-  expect(a.body).toMatchObject({ model: OPUS, max_tokens: 16000, service_tier: 'standard_only', inference_geo: 'global',
+  // Stage 2A-6c: no service_tier (Priority Tier is not offered on these models); inference_geo stays explicit.
+  expect(Object.keys(a.body).sort()).toEqual(['inference_geo', 'max_tokens', 'messages', 'model', 'output_config', 'system']);
+  expect(a.body).toMatchObject({ model: OPUS, max_tokens: 8000, inference_geo: 'global',
     output_config: { effort: 'medium', format: { type: 'json_schema', schema: ANALYST_SCHEMA } } });
   expect(r.body).toMatchObject({ model: SONNET, max_tokens: 8000, output_config: { effort: 'medium', format: { type: 'json_schema', schema: REVIEWER_SCHEMA } } });
   const msgs = a.body.messages as { role: string; content: { type: string }[] }[];
@@ -210,7 +212,7 @@ test('malformed output: prose, broken JSON, outside the schema, max_tokens — u
     ['broken JSON', message('{"analysis_status": "COMPLETE", '), 'INVALID_JSON_ANALYST'],
     ['outside the schema', message({ ...analystAnswer(), secret_note: 'x' }), 'SCHEMA_INVALID_ANALYST'],
     ['wrong enum', message(analystAnswer(undefined, undefined, { classification: 'PURPLE' })), 'SCHEMA_INVALID_ANALYST'],
-    ['cut off', message('{"analysis_status": "COMP', { stop_reason: 'max_tokens' }, { output_tokens: 16000 }), 'PROVIDER_INCOMPLETE_ANALYST'],
+    ['cut off', message('{"analysis_status": "COMP', { stop_reason: 'max_tokens' }, { output_tokens: 8000 }), 'PROVIDER_INCOMPLETE_ANALYST'],
   ] as [string, unknown, string][]) {
     const { db, run } = await setup({ ...GOOD, ANALYST: raw });
     expect(await run(), name).toMatchObject({ outcome: 'FAILED', code });
@@ -221,16 +223,16 @@ test('malformed output: prose, broken JSON, outside the schema, max_tokens — u
 });
 
 test('token limits: more output than the cap, or more input than the reserved bound, is reported in full and fails the run', async () => {
-  let s = await setup({ ...GOOD, ANALYST: message(analystAnswer(), {}, { output_tokens: 16001 }) });
+  let s = await setup({ ...GOOD, ANALYST: message(analystAnswer(), {}, { output_tokens: 8001 }) });
   expect(await s.run()).toMatchObject({ outcome: 'FAILED', code: 'PROVIDER_LIMIT_EXCEEDED_ANALYST' });
-  expect(s.db.calls).toContain('usage:ANALYST:1200:16001');
+  expect(s.db.calls).toContain('usage:ANALYST:1200:8001');
   s = await setup({ ...GOOD, ANALYST: message(analystAnswer(), {}, { input_tokens: 9001 }) });
   expect(await s.run()).toMatchObject({ outcome: 'FAILED', code: 'PROVIDER_INPUT_EXCEEDED_ANALYST' });
   expect(s.db.calls).toContain('usage:ANALYST:9001:900');
   expect(s.db.spend()).toBe('SETTLED:REPORTED_USAGE');
 });
 
-test('input above the reserved bound (with the 10% margin) is never sent: no dispatch record, USD 0', async () => {
+test('input above the reserved bound (with the 10% margin) is never generated: counted only after the dispatch record, then 0/0 usage, USD 0', async () => {
   for (const [name, count, code, creates] of [
     ['analyst over', { ANALYST: { input_tokens: 8182 }, REVIEWER: { input_tokens: 1 } }, 'INPUT_EXCEEDS_RESERVATION_ANALYST', 0], // ceil(8182 x 1.1) = 9001
     ['reviewer over', { ANALYST: { input_tokens: 8181 }, REVIEWER: { input_tokens: 27273 } }, 'INPUT_EXCEEDS_RESERVATION_REVIEWER', 1], // 8181 x 1.1 = 8999.1 ok
@@ -238,21 +240,41 @@ test('input above the reserved bound (with the 10% margin) is never sent: no dis
     const { db, client, run } = await setup(GOOD, { count });
     expect(await run(), name).toMatchObject({ outcome: 'FAILED', code });
     expect(client.creates, name).toHaveLength(creates);
-    expect(db.calls.filter((x) => x.startsWith('dispatch:')), name).toHaveLength(creates);
-    expect(db.spend(), name).toBe(creates === 0 ? 'SETTLED:NO_DISPATCH' : 'SETTLED:REPORTED_USAGE');
+    // the refused call was dispatched (the count carried the conversation) and reported as 0/0: nothing was generated
+    const role = code.endsWith('ANALYST') ? 'ANALYST' : 'REVIEWER';
+    expect(db.calls.filter((x) => x.startsWith('dispatch:')), name).toHaveLength(creates + 1);
+    expect(db.calls, name).toContain(`usage:${role}:0:0`);
+    expect(db.calls.indexOf(`dispatch:${role}`), name).toBeLessThan(db.calls.indexOf(`usage:${role}:0:0`));
+    expect(client.counts, name).toHaveLength(creates + 1);
+    expect(db.spend(), name).toBe('SETTLED:REPORTED_USAGE');
   }
 });
 
-test('a call that cannot be counted is not sent: count error, malformed count, hung count', async () => {
+test('a call that cannot be counted is not generated: count error, malformed count, hung count -> dispatch recorded, 0/0 usage, USD 0', async () => {
   for (const [name, count] of [
     ['error', httpError(429)], ['malformed', { tokens: 5 }], ['negative', { input_tokens: -1 }], ['hung', 'HANG'],
   ] as [string, Script][]) {
     const { db, client, run } = await setup(GOOD, { count: { ANALYST: count, REVIEWER: { input_tokens: 1 } }, config: { deadlineMs: 2000 } });
     expect(await run(), name).toMatchObject({ outcome: 'FAILED', code: 'TOKEN_COUNT_FAILED_ANALYST' });
     expect(client.creates, name).toHaveLength(0);
-    expect(db.calls.some((x) => x.startsWith('dispatch:')), name).toBe(false);
-    expect(db.spend(), name).toBe('SETTLED:NO_DISPATCH');
+    expect(db.calls.filter((x) => /^(dispatch|usage):/.test(x)), name).toEqual(['dispatch:ANALYST', 'usage:ANALYST:0:0']);
+    expect(db.spend(), name).toBe('SETTLED:REPORTED_USAGE');
   }
+});
+
+test('a refused count whose 0/0 report also fails leaves the reservation HELD (never assumed free without a report)', async () => {
+  const { db, client, run } = await setup(GOOD, { count: { ANALYST: { input_tokens: 9000 }, REVIEWER: { input_tokens: 1 } } });
+  db.usageError.ANALYST = 'REFUSE';
+  expect(await run()).toMatchObject({ outcome: 'FAILED', code: 'INPUT_EXCEEDS_RESERVATION_ANALYST' });
+  expect(client.creates).toHaveLength(0);
+  expect(db.spend()).toBe('HELD:UNKNOWN_USAGE');
+});
+
+test('the count never happens before the dispatch record: a refused dispatch sends nothing at all', async () => {
+  const { db, client, run } = await setup(GOOD);
+  db.dispatchError.ANALYST = 'REFUSE';
+  expect(await run()).toMatchObject({ outcome: 'FAILED', code: 'DISPATCH_FAILED_ANALYST' });
+  expect(client.counts.length + client.creates.length).toBe(0);
 });
 
 test('reservation terms that do not match this run refuse it before any dispatch (USD 0)', async () => {
@@ -260,10 +282,11 @@ test('reservation terms that do not match this run refuse it before any dispatch
     ['analyst price differs', (db: FakeDb) => { db.prices.ANALYST = [3, 15]; }, 'ANALYST_PRICE'],
     ['reviewer output price differs', (db: FakeDb) => { db.prices.REVIEWER = [2, 12]; }, 'REVIEWER_PRICE'],
     ['free price for a paid model', (db: FakeDb) => { db.prices.ANALYST = [0, 0]; }, 'ANALYST_PRICE'],
-    ['cap differs from the reservation', (db: FakeDb) => { db.termsOver.ANALYST = { maxOutputTokens: 15999 }; }, 'ANALYST_OUTPUT_CAP'],
+    ['cap differs from the reservation', (db: FakeDb) => { db.termsOver.ANALYST = { maxOutputTokens: 7999 }; }, 'ANALYST_OUTPUT_CAP'],
+    ['a database cap other than the approved 8000', (db: FakeDb) => { db.approved.ANALYST.maxOutputTokens = 12000; db.reservedUsd = 2; }, 'ANALYST_CAP_NOT_APPROVED'],
     ['cap above the model maximum', (db: FakeDb) => { db.approved.REVIEWER.maxOutputTokens = 128001; db.reservedUsd = 2; }, 'REVIEWER_CAP_ABOVE_MODEL_MAXIMUM'],
     ['model differs', (db: FakeDb) => { db.termsOver.REVIEWER = { model: OPUS }; }, 'REVIEWER_MODEL'],
-    ['not covered by the reserved amount', (db: FakeDb) => { db.reservedUsd = 0.4959; }, 'NOT_COVERED'],
+    ['not covered by the reserved amount', (db: FakeDb) => { db.reservedUsd = 0.3359; }, 'NOT_COVERED'],
     ['no input bound', (db: FakeDb) => { db.inputBound.ANALYST = 0; }, 'ANALYST_INPUT_BOUND'],
   ] as [string, (db: FakeDb) => void, string][]) {
     const { db, client, logger, run } = await setup(GOOD);
@@ -359,4 +382,23 @@ test('a priced call from a provider that cannot count its input is never sent (T
   expect(r).toMatchObject({ outcome: 'FAILED', code: 'TOKEN_COUNT_UNAVAILABLE_ANALYST' });
   expect(client.creates).toHaveLength(0);
   expect(db.spend()).toBe('SETTLED:NO_DISPATCH');
+});
+
+// ---------------------------------------------------------------- Stage 2A-6c: database, deployment and code agree
+
+test('the pricing migration, the deployment self-check, the verification and the code allowlist carry the same prices and caps', () => {
+  const read = (p: string) => readFileSync(new URL(`../../supabase/${p}`, import.meta.url), 'utf8');
+  const migration = read('migrations/20261020120000_stage2a6c_model_prices.sql');
+  const rows = [...migration.matchAll(/^\s+\('([a-z0-9-]+)', ([0-9.]+), ([0-9.]+), ([0-9]+), (true|false), '/gm)]
+    .map((m) => [m[1], { inputPerMTok: Number(m[2]), outputPerMTok: Number(m[3]), cap: Number(m[4]), active: m[5] === 'true' }] as const);
+  expect(Object.fromEntries(rows)).toEqual(Object.fromEntries(Object.entries(ANTHROPIC_MODELS).map(([model, m]) =>
+    [model, { inputPerMTok: m.inputPerMTok, outputPerMTok: m.outputPerMTok, cap: m.approvedOutputCap, active: false }])));
+  for (const [model, m] of Object.entries(ANTHROPIC_MODELS)) {
+    expect(m.approvedOutputCap).toBeLessThanOrEqual(m.maxOutputTokens);
+    const tuple = `(${m.inputPerMTok}::numeric, ${m.outputPerMTok}::numeric, ${m.approvedOutputCap}, false)`;
+    expect(read('deploy/parts-2a6c/90_postcheck.sql'), model).toContain(tuple);
+    expect(read('deploy/stage2a6c_verify.sql'), model)
+      .toContain(`input_usd_per_mtok = ${m.inputPerMTok} and output_usd_per_mtok = ${m.outputPerMTok} and max_output_tokens = ${m.approvedOutputCap}`);
+  }
+  expect(read('deploy/stage2a6c_deploy.sql')).toContain(migration);
 });

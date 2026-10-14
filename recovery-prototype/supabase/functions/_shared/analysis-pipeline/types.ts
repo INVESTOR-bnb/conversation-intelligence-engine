@@ -152,7 +152,8 @@ export interface AnalysisProvider {
    * The input tokens `call(request)` would be billed for, counted WITHOUT sending it for
    * generation (Anthropic: the free count_tokens endpoint). Required for any call whose
    * reserved prices are not zero: the pipeline refuses to dispatch a priced call it cannot
-   * prove is inside the reservation's input bound.
+   * prove is inside the reservation's input bound. It carries the conversation to the
+   * provider, so the pipeline calls it only after the call's dispatch record (Stage 2A-6c).
    */
   countInputTokens?(request: ProviderRequest): Promise<number>;
 }
@@ -193,6 +194,12 @@ export interface ModelConfig {
    * is refused before dispatch. Omitted for the fake.
    */
   maxOutputTokens?: number;
+  /**
+   * Stage 2A-6c: the output cap this code approves for the model. The database's cap (the price
+   * row, snapshotted in the reservation) must equal it, or the run is refused before dispatch
+   * (SPEND_TERMS_MISMATCH): prices and caps cannot silently differ between database and code.
+   */
+  approvedOutputCap?: number;
 }
 
 export interface PipelineConfig {

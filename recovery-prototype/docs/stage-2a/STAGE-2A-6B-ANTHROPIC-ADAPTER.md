@@ -1,5 +1,13 @@
 # Stage 2A-6b — Anthropic provider adapter (offline only)
 
+> **Changed in Stage 2A-6c** (see `DEPLOY-STAGE-2A-6C.md`):
+> - `service_tier` is no longer sent;
+> - the input count now runs **after** the dispatch record, so a refused count is a recorded dispatch with 0/0 usage (USD 0), not `NO_DISPATCH`;
+> - the database cap must equal the code's approved cap (8,000);
+> - the two models are priced (inactive) by a migration.
+>
+> Statements below that contradict these are superseded.
+
 **Status.** Implemented and tested **offline**. Every Anthropic response in the tests is
 mocked.
 - No live API call was made.
