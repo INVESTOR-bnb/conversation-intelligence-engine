@@ -14,12 +14,17 @@
 //   400 INVALID_JSON / INVALID_REQUEST   401 UNAUTHENTICATED   403 FORBIDDEN / ORIGIN_NOT_ALLOWED
 //   404 NOT_FOUND   405 METHOD_NOT_ALLOWED   409 CONTACT_RESTRICTED / INVALID_STATE / INSUFFICIENT_EVIDENCE
 //   413 BODY_TOO_LARGE   415 UNSUPPORTED_MEDIA_TYPE
-//   503 CONFIG_INVALID / PROVIDER_NOT_CONFIGURED / FAKE_PROVIDER_NOT_ALLOWED / AUTH_UNAVAILABLE /
+//   Stage 2A-6b (paid provider): FAILED also with SPEND_TERMS_UNAVAILABLE / SPEND_TERMS_MISMATCH,
+//   TOKEN_COUNT_FAILED_<ROLE> / INPUT_EXCEEDS_RESERVATION_<ROLE> (nothing sent: USD 0) and
+//   PAID_PROVIDER_TEXT_ONLY (screenshots are refused before any reservation).
+//   503 CONFIG_INVALID / PROVIDER_NOT_CONFIGURED / FAKE_PROVIDER_NOT_ALLOWED / PAID_PROVIDER_NOT_ALLOWED /
+//       PROVIDER_KEY_INVALID / PROVIDER_ENV_UNSAFE / MODEL_NOT_ALLOWED / AUTH_UNAVAILABLE /
 //       START_FAILED / PRECHECK_FAILED / LOCK_HELD (the analysis stays PENDING: founder_abandon_analysis)
 //   500 INTERNAL_ERROR
 
 import { runAnalysisPipeline, type PipelineLogger, type PipelineResult } from '../analysis-pipeline/index.ts';
 import { authenticateFounder } from './auth.ts';
+import { anthropicModelConfig, AnthropicProvider, type MessagesClient } from './anthropicProvider.ts';
 import { readConfig, type EdgeConfig } from './config.ts';
 import { FAKE_MODEL_CONFIG, FakeAnalysisProvider } from './fakeProvider.ts';
 import { founderRest, serviceRest, UUID } from './supabaseRest.ts';
@@ -37,7 +42,16 @@ export interface HandlerDeps {
   /** One structured line per event: names, ids and codes only. */
   log: (line: string) => void;
   now?: () => number;
+  /**
+   * Stage 2A-6b: builds the Anthropic SDK client for a key (analyze-case/index.ts passes the pinned
+   * SDK). Without it, ANALYSIS_PROVIDER=anthropic is refused with PROVIDER_NOT_CONFIGURED.
+   */
+  anthropicClient?: (apiKey: string) => MessagesClient;
 }
+
+/** Per call. The paid models think before answering: they get longer than the fake. */
+const FAKE_CALL_TIMEOUT_MS = 45000;
+const PAID_CALL_TIMEOUT_MS = 55000;
 
 type Body = { outcome: (typeof OUTCOMES)[number]; code: string; analysis_id: string | null };
 
@@ -130,6 +144,10 @@ export function createAnalyzeCaseHandler(deps: HandlerDeps): (req: Request) => P
         return respond(503, sanitize('NOT_STARTED', cfg.code, null), cors);
       }
       const config: EdgeConfig = cfg.config;
+      if (config.provider === 'anthropic' && !deps.anthropicClient) {
+        log('config.refused', { code: 'PROVIDER_NOT_CONFIGURED' });
+        return respond(503, sanitize('NOT_STARTED', 'PROVIDER_NOT_CONFIGURED', null), cors);
+      }
 
       const auth = await authenticateFounder(req, { supabaseUrl: config.supabaseUrl, publishableKey: config.publishableKey, fetch: deps.fetch, timeoutMs: 10000 });
       if (!auth.ok) {
@@ -147,14 +165,17 @@ export function createAnalyzeCaseHandler(deps: HandlerDeps): (req: Request) => P
 
       const rest = { supabaseUrl: config.supabaseUrl, publishableKey: config.publishableKey, fetch: deps.fetch, timeoutMs: 15000, maxFileBytes: 5_242_880 };
       const logger: PipelineLogger = { event: (name, fields) => log(name, fields ?? {}) };
+      const paid = config.anthropic;
       const result: PipelineResult = await runAnalysisPipeline(parsed.caseId, {
         founderDb: founderRest(rest, auth.jwt),
         serviceDb: serviceRest(rest, config.serviceKey),
-        provider: new FakeAnalysisProvider(),
+        provider: paid ? new AnthropicProvider(deps.anthropicClient!(paid.apiKey), paid.effort) : new FakeAnalysisProvider(),
         logger,
         config: {
-          analyst: FAKE_MODEL_CONFIG, reviewer: FAKE_MODEL_CONFIG,
-          callTimeoutMs: 45000,
+          analyst: paid ? anthropicModelConfig(paid.analystModel)! : FAKE_MODEL_CONFIG,
+          reviewer: paid ? anthropicModelConfig(paid.reviewerModel)! : FAKE_MODEL_CONFIG,
+          textOnly: paid !== null,
+          callTimeoutMs: paid ? PAID_CALL_TIMEOUT_MS : FAKE_CALL_TIMEOUT_MS,
           deadlineMs: Math.max(1000, config.deadlineMs - (now() - started)),
           completionReserveMs: 15000,
           maxScreenshotBytes: 5_242_880,

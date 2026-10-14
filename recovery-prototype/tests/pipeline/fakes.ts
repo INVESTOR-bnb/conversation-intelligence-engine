@@ -7,7 +7,7 @@
 import {
   DbError, sha256Hex, type AnalysisProvider, type AnalysisRecord, type ApprovedCall, type CompletionParams, type FounderDb, type MessageRow,
   type PipelineConfig, type PipelineLogger, type ProviderRequest, type ProviderResponse, type Role, type ScreenshotFile, type ServiceDb,
-  type SpendReservation,
+  type ReservationTerms, type SpendReservation, type TermsCall,
 } from '../../supabase/functions/_shared/analysis-pipeline/index.ts';
 
 export const CASE = 'c0000000-0000-4000-8000-000000000001';
@@ -65,6 +65,11 @@ export class FakeDb implements FounderDb, ServiceDb {
   dispatchError: Partial<Record<Role, 'REFUSE' | 'COMMIT_THEN_LOSE'>> = {};
   /** Per role: refuse the usage report, or commit it and then lose the reply. */
   usageError: Partial<Record<Role, 'REFUSE' | 'COMMIT_THEN_LOSE'>> = {};
+  /** The terms internal_ai_reservation_terms reports per role (input bound, snapshotted prices). Edit to simulate a mismatch. */
+  termsOver: Partial<Record<Role, Partial<TermsCall>>> = {};
+  inputBound: Record<Role, number> = { ANALYST: 10000, REVIEWER: 15000 };
+  prices: Record<Role, [number, number]> = { ANALYST: [2, 10], REVIEWER: [4, 20] };
+  termsError: Error | null = null;
   ledger: { status: 'RESERVED' | 'SETTLED' | 'HELD'; settledBy: string | null; dispatched: Role[]; usage: Partial<Record<Role, [number, number]>> } | null = null;
   messageIdsRequested: string[][] = [];
 
@@ -105,6 +110,17 @@ export class FakeDb implements FounderDb, ServiceDb {
     if (analystModel !== this.approved.ANALYST.model || reviewerModel !== this.approved.REVIEWER.model) throw new DbError('MODEL_NOT_PRICED');
     this.ledger = { status: 'RESERVED', settledBy: null, dispatched: [], usage: {} };
     return { reservedUsd: this.reservedUsd, analyst: { ...this.approved.ANALYST }, reviewer: { ...this.approved.REVIEWER } };
+  }
+  async reservationTerms(id: string): Promise<ReservationTerms> {
+    this.calls.push('terms');
+    if (this.termsError) throw this.termsError;
+    const l = this.ledger;
+    if (!l || this.analysis?.id !== id) throw new DbError('NOT_RESERVED');
+    const call = (r: Role): TermsCall => ({
+      model: this.approved[r].model, maxOutputTokens: this.approved[r].maxOutputTokens, inputBound: this.inputBound[r],
+      inputUsdPerMTok: this.prices[r][0], outputUsdPerMTok: this.prices[r][1], ...this.termsOver[r],
+    });
+    return { analysisId: id, status: l.status, reservedUsd: this.reservedUsd, analyst: call('ANALYST'), reviewer: call('REVIEWER') };
   }
   async recordDispatch(id: string, role: Role): Promise<ApprovedCall> {
     this.calls.push(`dispatch:${role}`);
@@ -160,7 +176,17 @@ type Reply = ProviderResponse | Error | 'HANG' | ((r: ProviderRequest) => Provid
 export class FakeProvider implements AnalysisProvider {
   readonly maxRetries = 0 as const;
   requests: ProviderRequest[] = [];
+  counted: Role[] = [];
+  /** What countInputTokens answers per role (a number, an Error to throw, or 'HANG'). */
+  counts: Partial<Record<Role, number | Error | 'HANG'>> = {};
   constructor(public replies: Partial<Record<'ANALYST' | 'REVIEWER', Reply>>) {}
+  async countInputTokens(r: ProviderRequest): Promise<number> {
+    this.counted.push(r.role);
+    const c = this.counts[r.role] ?? 1000;
+    if (c === 'HANG') return new Promise(() => {});
+    if (c instanceof Error) throw c;
+    return c;
+  }
   async call(r: ProviderRequest): Promise<ProviderResponse> {
     this.requests.push(r);
     const reply = this.replies[r.role];

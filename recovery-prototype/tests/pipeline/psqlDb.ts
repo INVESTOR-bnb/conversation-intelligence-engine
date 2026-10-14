@@ -8,7 +8,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   DbError, type AnalysisRecord, type ApprovedCall, type CompletionParams, type FounderDb, type MessageRow, type Role, type ScreenshotFile,
-  type ServiceDb, type SpendReservation,
+  type ReservationTerms, type ServiceDb, type SpendReservation, type TermsCall,
 } from '../../supabase/functions/_shared/analysis-pipeline/index.ts';
 
 const HOST = process.env.PIPELINE_PGHOST;
@@ -79,7 +79,16 @@ export class PsqlFounderDb implements FounderDb {
 
 const approved = (o: { model: string; max_output_tokens: number }): ApprovedCall => ({ model: o.model, maxOutputTokens: o.max_output_tokens });
 
+const termsCall = (o: Record<string, number | string>): TermsCall => ({
+  model: String(o.model), maxOutputTokens: Number(o.max_output_tokens), inputBound: Number(o.input_bound),
+  inputUsdPerMTok: Number(o.input_usd_per_mtok), outputUsdPerMTok: Number(o.output_usd_per_mtok),
+});
+
 export class PsqlServiceDb implements ServiceDb {
+  async reservationTerms(id: string): Promise<ReservationTerms> {
+    const t = JSON.parse(one(`select public.internal_ai_reservation_terms(:'a')`, { a: id }, { role: 'service_role' })!);
+    return { analysisId: t.analysis_id, status: t.status, reservedUsd: Number(t.reserved_usd), analyst: termsCall(t.analyst), reviewer: termsCall(t.reviewer) };
+  }
   async reserveSpend(id: string, analystModel: string, reviewerModel: string): Promise<SpendReservation> {
     const r = JSON.parse(one(`select public.internal_reserve_ai_spend(:'a', :'am', :'rm')`, { a: id, am: analystModel, rm: reviewerModel }, { role: 'service_role' })!);
     return { reservedUsd: Number(r.reserved_usd), analyst: approved(r.analyst), reviewer: approved(r.reviewer) };

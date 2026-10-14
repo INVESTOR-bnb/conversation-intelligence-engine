@@ -81,9 +81,13 @@ test('the reviewer is a separate request: own instructions, the analyst output a
 
 test('an analyst cannot review itself or pick the contract version', async () => {
   const sneaky = analystAnswer(M1, M2, { contract_version: 'rre-analysis/1', adversarial_review: { challenges: [], verdict: 'UPHOLD', verdict_rationale: 'self' } });
-  const { db, run } = await setup({ analyst: ok(sneaky), reviewer: ok(reviewAnswer('REJECT_RECOMMENDATION')) });
-  await run();
-  const out = db.completions[0].output!;
+  // Stage 2A-6b: properties outside the schema now fail closed before the merge (no reviewer call)...
+  const { db, provider, run } = await setup({ analyst: ok(sneaky), reviewer: ok(reviewAnswer('REJECT_RECOMMENDATION')) });
+  expect(await run()).toMatchObject({ outcome: 'FAILED', code: 'SCHEMA_INVALID_ANALYST' });
+  expect(provider.requests).toHaveLength(1);
+  expect(db.completions[0].output).toBeNull();
+  // ...and the merge itself still overrides them (defence in depth).
+  const out = merge(parseAnalyst(sneaky), reviewAnswer('REJECT_RECOMMENDATION')).output;
   expect(out.contract_version).toBe('rre-analysis/2');
   expect(out.adversarial_review).toEqual(reviewAnswer('REJECT_RECOMMENDATION'));
 });
@@ -266,16 +270,24 @@ test('provider failures, timeouts, truncation, refusals, invalid JSON and bad sh
     ['analyst hangs', { analyst: 'HANG' }, 'PROVIDER_TIMEOUT_ANALYST', 1],
     ['reviewer hangs', { reviewer: 'HANG' }, 'PROVIDER_TIMEOUT_REVIEWER', 2],
     ['analyst truncated', { analyst: { ...ok(analystAnswer()), stopReason: 'max_tokens' } }, 'PROVIDER_INCOMPLETE_ANALYST', 1],
-    ['analyst refused', { analyst: { ...ok(analystAnswer()), stopReason: 'refusal' } }, 'PROVIDER_INCOMPLETE_ANALYST', 1],
-    ['reviewer refused', { reviewer: { ...ok(reviewAnswer('UPHOLD')), stopReason: 'refusal' } }, 'PROVIDER_INCOMPLETE_REVIEWER', 2],
+    ['analyst refused', { analyst: { ...ok(analystAnswer()), stopReason: 'refusal' } }, 'PROVIDER_REFUSED_ANALYST', 1],
+    ['reviewer refused', { reviewer: { ...ok(reviewAnswer('UPHOLD')), stopReason: 'refusal' } }, 'PROVIDER_REFUSED_REVIEWER', 2],
+    ['analyst paused', { analyst: { ...ok(analystAnswer()), stopReason: 'pause_turn' } }, 'PROVIDER_INCOMPLETE_ANALYST', 1],
     ['analyst invalid JSON', { analyst: bad('{"observations": [') }, 'INVALID_JSON_ANALYST', 1],
     ['analyst prose', { analyst: bad('Sure! Here is my analysis.') }, 'INVALID_JSON_ANALYST', 1],
     ['reviewer invalid JSON', { reviewer: bad('not json') }, 'INVALID_JSON_REVIEWER', 2],
-    ['analyst wrong shape', { analyst: ok({ verdict: 'buy' }) }, 'INVALID_OUTPUT_ANALYST', 1],
-    ['analyst unknown status', { analyst: ok(analystAnswer(M1, M2, { analysis_status: 'DONE' })) }, 'INVALID_OUTPUT_ANALYST', 1],
-    ['analyst unknown classification', { analyst: ok(analystAnswer(M1, M2, { classification: 'BLUE' })) }, 'INVALID_OUTPUT_ANALYST', 1],
-    ['reviewer unknown verdict', { reviewer: ok(reviewAnswer('UPHOLD', M1, { verdict: 'APPROVE' })) }, 'INVALID_OUTPUT_REVIEWER', 2],
-    ['reviewer missing challenges', { reviewer: ok({ verdict: 'UPHOLD', verdict_rationale: 'x' }) }, 'INVALID_OUTPUT_REVIEWER', 2],
+    // Stage 2A-6b: shapes outside the structured-output schema are caught by our own schema check
+    ['analyst wrong shape', { analyst: ok({ verdict: 'buy' }) }, 'SCHEMA_INVALID_ANALYST', 1],
+    ['analyst unknown status', { analyst: ok(analystAnswer(M1, M2, { analysis_status: 'DONE' })) }, 'SCHEMA_INVALID_ANALYST', 1],
+    ['analyst unknown classification', { analyst: ok(analystAnswer(M1, M2, { classification: 'BLUE' })) }, 'SCHEMA_INVALID_ANALYST', 1],
+    ['analyst JSON array', { analyst: bad('[]') }, 'SCHEMA_INVALID_ANALYST', 1],
+    ['analyst missing a section', { analyst: ok((({ unknowns: _u, ...rest }) => rest)(analystAnswer())) }, 'SCHEMA_INVALID_ANALYST', 1],
+    ['analyst string where a list belongs', { analyst: ok(analystAnswer(M1, M2, { hypotheses: 'none' })) }, 'SCHEMA_INVALID_ANALYST', 1],
+    ['analyst position not an integer', { analyst: ok(analystAnswer(M1, M2, { observations: [{ id: 'O1', actor: 'PROSPECT', behavior: 'x',
+      evidence: [{ type: 'SCREENSHOT', position: 1.5 }] }] })) }, 'SCHEMA_INVALID_ANALYST', 1],
+    ['reviewer unknown verdict', { reviewer: ok(reviewAnswer('UPHOLD', M1, { verdict: 'APPROVE' })) }, 'SCHEMA_INVALID_REVIEWER', 2],
+    ['reviewer missing challenges', { reviewer: ok({ verdict: 'UPHOLD', verdict_rationale: 'x' }) }, 'SCHEMA_INVALID_REVIEWER', 2],
+    ['reviewer extra property', { reviewer: ok(reviewAnswer('UPHOLD', M1, { approved_by: 'founder' })) }, 'SCHEMA_INVALID_REVIEWER', 2],
   ];
   for (const [name, opts, code, calls] of cases) {
     const { db, provider, run } = await setup(opts);
@@ -547,7 +559,8 @@ test('spending: an unusable answer is still billed — usage is reported before 
   for (const [name, opts, code] of [
     ['truncated', { analyst: { ...ok(analystAnswer(), 900, 8000), stopReason: 'max_tokens' } }, 'PROVIDER_INCOMPLETE_ANALYST'],
     ['invalid JSON', { analyst: { text: '{"x": [', stopReason: 'end_turn', inputTokens: 900, outputTokens: 20 } }, 'INVALID_JSON_ANALYST'],
-    ['refusal', { reviewer: { ...ok(reviewAnswer('UPHOLD'), 700, 5), stopReason: 'refusal' } }, 'PROVIDER_INCOMPLETE_REVIEWER'],
+    ['refusal', { reviewer: { ...ok(reviewAnswer('UPHOLD'), 700, 5), stopReason: 'refusal' } }, 'PROVIDER_REFUSED_REVIEWER'],
+    ['outside the schema', { analyst: ok({ verdict: 'buy' }, 800, 30) }, 'SCHEMA_INVALID_ANALYST'],
   ] as [string, Record<string, unknown>, string][]) {
     const { db, run } = await setup(opts);
     expect(await run(), name).toMatchObject({ outcome: 'FAILED', code });

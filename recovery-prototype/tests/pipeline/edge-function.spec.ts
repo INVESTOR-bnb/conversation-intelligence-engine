@@ -115,7 +115,7 @@ test('the service credential is used only for the spending calls and the complet
   const c = textCase();
   const r = await call({ token: founder(), body: caseBody(c) });
   const service = fake.requests.filter((x) => x.cred.startsWith('service'));
-  expect(service.map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_reserve_ai_spend', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_complete_analysis']);
+  expect(service.map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_reserve_ai_spend', '/rest/v1/rpc/internal_ai_reservation_terms', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_complete_analysis']);
   expect(service.every((x) => x.method === 'POST' && x.cred === 'service:secret')).toBe(true);
   expect(spend(r.body.analysis_id)).toBe('SETTLED:REPORTED_USAGE:0.0000');
   expect(fake.requests.filter((x) => !x.cred.startsWith('service')).every((x) => x.cred === `user:${FOUNDER}`)).toBe(true);
@@ -126,7 +126,7 @@ test('a legacy service_role JWT works too (apikey + Bearer), for the same servic
   const c = textCase();
   const r = await call({ token: founder(), body: caseBody(c), env: { SUPABASE_SECRET_KEYS: undefined, SUPABASE_SERVICE_ROLE_KEY: LEGACY_SERVICE } });
   expect(r.body.outcome).toBe('COMPLETED');
-  expect(fake.requests.filter((x) => x.cred.startsWith('service')).map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_reserve_ai_spend', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_complete_analysis']);
+  expect(fake.requests.filter((x) => x.cred.startsWith('service')).map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_reserve_ai_spend', '/rest/v1/rpc/internal_ai_reservation_terms', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_complete_analysis']);
 });
 
 // ---------------------------------------------------------------- authentication and authorisation
@@ -260,7 +260,10 @@ test('configuration: no provider, no fake permission, a non-staging project, or 
   const c = textCase();
   for (const [name, over, code] of [
     ['provider unset', { ANALYSIS_PROVIDER: undefined }, 'PROVIDER_NOT_CONFIGURED'],
-    ['real provider named', { ANALYSIS_PROVIDER: 'anthropic' }, 'PROVIDER_NOT_CONFIGURED'],
+    ['paid provider named without permission', { ANALYSIS_PROVIDER: 'anthropic' }, 'PAID_PROVIDER_NOT_ALLOWED'],
+    ['another provider named', { ANALYSIS_PROVIDER: 'openai' }, 'PROVIDER_NOT_CONFIGURED'],
+    ['paid provider allowed but no SDK client wired', { ANALYSIS_PROVIDER: 'anthropic', ALLOW_PAID_PROVIDER: 'staging-only',
+      ANTHROPIC_API_KEY: 'sk-ant-TEST-ONLY-not-a-real-key-0000', ANALYST_MODEL: 'claude-opus-5-5', REVIEWER_MODEL: 'claude-sonnet-5-5' }, 'PROVIDER_NOT_CONFIGURED'],
     ['fake not allowed', { ALLOW_FAKE_PROVIDER: undefined }, 'FAKE_PROVIDER_NOT_ALLOWED'],
     ['fake flag wrong', { ALLOW_FAKE_PROVIDER: 'true' }, 'FAKE_PROVIDER_NOT_ALLOWED'],
     ['missing secret', { SUPABASE_SECRET_KEYS: undefined }, 'CONFIG_INVALID'],
@@ -443,7 +446,8 @@ test('responses and logs never carry tokens, keys, evidence or analysis content'
   }
   for (const b of bodies) expect(Object.keys(JSON.parse(b))).toEqual(['outcome', 'code', 'analysis_id']);
   for (const line of logs) expect(Object.keys(JSON.parse(line)).every((k) => ['fn', 'event', 'code', 'analysisId', 'outcome', 'ms', 'role', 'ok',
-    'inputTokens', 'outputTokens', 'stopReason', 'restrictionsKept', 'restrictionsNotRecorded', 'alreadyRecorded', 'dbCode', 'reservedUsd', 'usageKnown'].includes(k)), line).toBe(true);
+    'inputTokens', 'outputTokens', 'stopReason', 'restrictionsKept', 'restrictionsNotRecorded', 'alreadyRecorded', 'dbCode', 'reservedUsd', 'usageKnown',
+    'requestId', 'errorKind', 'httpStatus', 'check', 'inputBound', 'path'].includes(k)), line).toBe(true);
 });
 
 // ---------------------------------------------------------------- Stage 2A-5d-3b: spending controls

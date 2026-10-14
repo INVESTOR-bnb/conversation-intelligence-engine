@@ -18,6 +18,21 @@
 //  that fails, times out or returns no usable counts is never reported as zero:
 //  completion then settles the reservation as HELD (potentially billable) until an
 //  administrator reconciles it. Providers never retry (maxRetries: 0).
+//  4b. Stage 2A-6b — the reservation's terms (internal_ai_reservation_terms) must match
+//     what this run will send, or nothing is dispatched (SPEND_TERMS_MISMATCH):
+//     the reservation is RESERVED; each call's model and output cap equal the
+//     reservation's and the configuration's; the snapshotted prices equal the prices
+//     this code expects for that model; the cap is within the model's own maximum;
+//     and the worst case of both calls (input bound x input price + cap x output
+//     price) is covered by the reserved amount.
+//     Before each priced call, the exact request's input tokens are counted without
+//     generating anything (Anthropic's free count_tokens) and, with a 10% margin for
+//     the estimate, must be within the reserved input bound (INPUT_EXCEEDS_RESERVATION_<ROLE>).
+//     A call that cannot be counted is not sent. All of this happens before the dispatch
+//     record, so a refused call settles at USD 0: no request could have left.
+//     After a call: usage is reported first, then the answer is judged — an input count
+//     above the bound, an output above the cap, a refusal, a cut-off answer, invalid JSON
+//     or an answer outside the schema each fail closed (the billed usage stays recorded).
 //  5. Call A, the forensic analyst. 6. Call B, the adversarial reviewer: a
 //     separate request with its own instructions, given the evidence and the
 //     analyst's output as data (never the analyst's instructions or reasoning).
@@ -46,9 +61,10 @@
 import { loadEvidence, PipelineFailure, snapshotRestricted } from './evidence.ts';
 import { analystContent, ANALYST_SYSTEM, PROMPT_VERSION, reviewerContent, REVIEWER_SYSTEM } from './prompts.ts';
 import { ANALYST_SCHEMA, REVIEWER_SCHEMA } from './schemas.ts';
+import { schemaProblems, validateOutput } from './structuredOutput.ts';
 import {
-  DbError, type ApprovedCall, type CompletionParams, type ModelConfig, type PipelineDeps, type PipelineResult, type ProviderResponse,
-  type Role, type SpendReservation,
+  DbError, ProviderCallError, type ApprovedCall, type CompletionParams, type ModelConfig, type PipelineConfig, type PipelineDeps,
+  type PipelineResult, type ProviderRequest, type ProviderResponse, type ReservationTerms, type Role, type SpendReservation, type TermsCall,
 } from './types.ts';
 
 export { PROMPT_VERSION };
@@ -65,6 +81,10 @@ const START_CODES = ['INSUFFICIENT_EVIDENCE', 'INVALID_STATE', 'FORBIDDEN', 'NOT
 const SPEND_CODES = ['SPENDING_DISABLED', 'BUDGET_EXCEEDED', 'RATE_LIMITED', 'MODEL_NOT_PRICED', 'RESERVATION_TOO_LARGE'];
 /** The database accepts 0..10,000,000 tokens per count. */
 const MAX_TOKENS = 10_000_000;
+/** count_tokens is an estimate ("may differ by a small amount"): the bound must hold with this margin. */
+export const INPUT_COUNT_MARGIN = 1.1;
+/** Longest wait for a token count (it generates nothing; a slow count just refuses the call). */
+const COUNT_TIMEOUT_MS = 10_000;
 
 /** What replaces a recommendation the independent review rejected. States the reason; contains no contact. */
 export const REJECTED_RECOMMENDATION = {
@@ -91,9 +111,12 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
   const model = `analyst:${config.analyst.model}|reviewer:${config.reviewer.model}`.slice(0, 100);
   let detected: CompletionParams['detectedRestrictions'] = [];
   let reservation: SpendReservation | null = null;
+  let terms: ReservationTerms | null = null;
 
   // ---- 0. a provider that may retry could send unrecorded, unreserved requests
   if ((provider as { maxRetries?: unknown }).maxRetries !== 0) return refused('PROVIDER_RETRIES_NOT_DISABLED');
+  // a schema the provider would reject (or only partly enforce) is never sent
+  if (schemaProblems(ANALYST_SCHEMA).length > 0 || schemaProblems(REVIEWER_SCHEMA).length > 0) return refused('SCHEMA_UNSUPPORTED');
 
   // ---- 1. restriction pre-check (no analysis row, no provider call)
   try {
@@ -120,10 +143,13 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
     }
     if (snapshotRestricted(record.evidenceManifest)) throw new PipelineFailure('CONTACT_RESTRICTED');
     const evidence = await loadEvidence(founderDb, record, config.maxScreenshotBytes);
+    if (config.textOnly && evidence.screenshots.length > 0) throw new PipelineFailure('PAID_PROVIDER_TEXT_ONLY');
 
     // 4a: reserve before any provider request (the database computes the amount)
     deadline('ANALYST', 1);
     reservation = await reserve();
+    // 4b: the reservation's full terms must match what will be sent
+    terms = await readTerms(reservation);
 
     // A: forensic analyst
     const analyst = parseAnalyst(await call('ANALYST', config.analyst, ANALYST_SYSTEM, analystContent(evidence), ANALYST_SCHEMA));
@@ -185,6 +211,56 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
     return r;
   }
 
+  /** Reads the reservation's terms; any mismatch with this run refuses it before the first dispatch. */
+  async function readTerms(r: SpendReservation): Promise<ReservationTerms> {
+    let t: ReservationTerms;
+    try {
+      t = await serviceDb.reservationTerms(analysisId);
+    } catch (e) {
+      logger.event('spend.terms_unavailable', { analysisId, dbCode: e instanceof DbError ? e.code : null });
+      throw new PipelineFailure('SPEND_TERMS_UNAVAILABLE');
+    }
+    const problem = termsProblem(t, analysisId, r, config);
+    if (problem) {
+      logger.event('spend.terms_mismatch', { analysisId, check: problem });
+      throw new PipelineFailure('SPEND_TERMS_MISMATCH');
+    }
+    return t;
+  }
+
+  /**
+   * Counts the exact request's input tokens without sending it for generation. Required for a
+   * priced call; a call that cannot be counted, or whose count (with the margin) exceeds the
+   * reserved input bound, is refused before its dispatch record.
+   */
+  async function checkInput(role: Role, request: Omit<ProviderRequest, 'signal'>, bound: TermsCall): Promise<void> {
+    const priced = bound.inputUsdPerMTok > 0 || bound.outputUsdPerMTok > 0;
+    if (!priced && !provider.countInputTokens) return;
+    if (!provider.countInputTokens) throw new PipelineFailure(`TOKEN_COUNT_UNAVAILABLE_${role}`);
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let counted: number | null;
+    try {
+      counted = tokenCount(await Promise.race([
+        provider.countInputTokens({ ...request, signal: controller.signal }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => { controller.abort(); reject(new Error('count timeout')); }, Math.min(COUNT_TIMEOUT_MS, deadline(role, 1)));
+        }),
+      ]));
+    } catch {
+      counted = null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (counted === null) {
+      logger.event('spend.input_count_failed', { analysisId, role });
+      throw new PipelineFailure(`TOKEN_COUNT_FAILED_${role}`);
+    }
+    const ok = Math.ceil(counted * INPUT_COUNT_MARGIN) <= bound.inputBound;
+    logger.event('spend.input_counted', { analysisId, role, inputTokens: counted, inputBound: bound.inputBound, ok });
+    if (!ok) throw new PipelineFailure(`INPUT_EXCEEDS_RESERVATION_${role}`);
+  }
+
   function refused(code: string): PipelineResult {
     logger.event('pipeline.refused', { code });
     return { outcome: 'NOT_STARTED', code, analysisId: null };
@@ -203,8 +279,11 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
 
   async function call(role: Role, m: ModelConfig, system: string, content: ReturnType<typeof analystContent>,
     schema: Record<string, unknown>): Promise<unknown> {
-    const timeout = Math.min(config.callTimeoutMs, deadline(role, 1));
     const approved = role === 'ANALYST' ? reservation!.analyst : reservation!.reviewer;
+    const bound = role === 'ANALYST' ? terms!.analyst : terms!.reviewer;
+    deadline(role, 1);
+    await checkInput(role, { role, model: approved.model, system, content, schema, maxOutputTokens: approved.maxOutputTokens }, bound);
+    const timeout = Math.min(config.callTimeoutMs, deadline(role, 1));
     // The dispatch record is committed before anything can leave. If it fails or its outcome is
     // unknown, nothing is sent (should it have committed, the database holds the reservation).
     let dispatched: ApprovedCall;
@@ -230,8 +309,12 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
       ]);
     } catch (e) {
       // Usage unknown: the request may have reached the provider. Nothing is reported, so the
-      // reservation is held (potentially billable) until reconciliation.
-      logger.event('provider.call', { analysisId, role, ok: false, ms: now() - t0 });
+      // reservation is held (potentially billable) until reconciliation — whatever the error
+      // says (even an HTTP error is not taken as proof that nothing was billed).
+      const pe = e instanceof ProviderCallError ? e : null;
+      logger.event('provider.call', { analysisId, role, ok: false, ms: now() - t0, usageKnown: false,
+        errorKind: pe ? pe.kind : e instanceof PipelineFailure ? 'TIMEOUT' : 'OTHER', httpStatus: pe?.httpStatus ?? null,
+        requestId: safeId(pe?.requestId) });
       throw e instanceof PipelineFailure ? e : new PipelineFailure(`PROVIDER_ERROR_${role}`);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
@@ -244,7 +327,7 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
     }
     const stop = typeof response?.stopReason === 'string' ? response.stopReason : 'missing';
     logger.event('provider.call', { analysisId, role, ok: stop === 'end_turn', ms: now() - t0, inputTokens: inTok, outputTokens: outTok,
-      stopReason: stop === 'end_turn' || KNOWN_STOPS.includes(stop) ? stop : 'other' });
+      stopReason: stop === 'end_turn' || KNOWN_STOPS.includes(stop) ? stop : 'other', requestId: safeId(response.requestId) });
     // Billed whatever the answer turns out to be: report before judging it.
     try {
       await serviceDb.reportUsage(analysisId, role, inTok, outTok);
@@ -256,13 +339,22 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
     usage.outputTokens += outTok;
     usage.costUsd += (inTok * m.inputPerMTok + outTok * m.outputPerMTok) / 1_000_000;
     if (outTok > approved.maxOutputTokens) throw new PipelineFailure(`PROVIDER_LIMIT_EXCEEDED_${role}`);
+    if (inTok > bound.inputBound) throw new PipelineFailure(`PROVIDER_INPUT_EXCEEDED_${role}`);
+    if (stop === 'refusal') throw new PipelineFailure(`PROVIDER_REFUSED_${role}`);
     if (stop !== 'end_turn') throw new PipelineFailure(`PROVIDER_INCOMPLETE_${role}`);
     if (typeof response.text !== 'string') throw new PipelineFailure(`INVALID_JSON_${role}`);
+    let value: unknown;
     try {
-      return JSON.parse(response.text);
+      value = JSON.parse(response.text);
     } catch {
       throw new PipelineFailure(`INVALID_JSON_${role}`);
     }
+    const off = validateOutput(value, schema);
+    if (off !== null) {
+      logger.event('provider.schema_invalid', { analysisId, role, path: off.slice(0, 120) });
+      throw new PipelineFailure(`SCHEMA_INVALID_${role}`);
+    }
+    return value;
   }
 
   /**
@@ -307,6 +399,41 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
 /** A provider-reported token count, or null when it is not a plausible count (usage then counts as unknown). */
 export function tokenCount(v: unknown): number | null {
   return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= MAX_TOKENS ? v : null;
+}
+
+/** A provider request id fit for a log line (opaque, short, no spaces), or null. */
+function safeId(v: unknown): string | null {
+  return typeof v === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(v) ? v : null;
+}
+
+const price = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+const count = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0 && v <= MAX_TOKENS;
+
+/**
+ * Why the reservation's terms do not cover this run (a short fixed label), or null when they do.
+ * Exported for tests. Prices are compared exactly: the database snapshots them as numeric(12,6).
+ */
+export function termsProblem(t: ReservationTerms | null | undefined, analysisId: string, r: SpendReservation,
+  config: Pick<PipelineConfig, 'analyst' | 'reviewer'>): string | null {
+  if (!t || typeof t !== 'object') return 'MISSING';
+  if (t.analysisId !== analysisId) return 'ANALYSIS';
+  if (t.status !== 'RESERVED') return 'STATUS';
+  if (!price(t.reservedUsd) || t.reservedUsd !== r.reservedUsd) return 'RESERVED_USD';
+  const pairs: [string, TermsCall, ApprovedCall, ModelConfig][] = [['ANALYST', t.analyst, r.analyst, config.analyst], ['REVIEWER', t.reviewer, r.reviewer, config.reviewer]];
+  let worst = 0;
+  for (const [role, c, a, m] of pairs) {
+    if (!c || typeof c !== 'object') return `${role}_MISSING`;
+    if (c.model !== a.model || c.model !== m.model) return `${role}_MODEL`;
+    if (!count(c.maxOutputTokens) || c.maxOutputTokens !== a.maxOutputTokens) return `${role}_OUTPUT_CAP`;
+    if (m.maxOutputTokens !== undefined && c.maxOutputTokens > m.maxOutputTokens) return `${role}_CAP_ABOVE_MODEL_MAXIMUM`;
+    if (!count(c.inputBound)) return `${role}_INPUT_BOUND`;
+    if (!price(c.inputUsdPerMTok) || !price(c.outputUsdPerMTok)) return `${role}_PRICE_INVALID`;
+    if (c.inputUsdPerMTok !== m.inputPerMTok || c.outputUsdPerMTok !== m.outputPerMTok) return `${role}_PRICE`;
+    worst += c.inputBound * c.inputUsdPerMTok + c.maxOutputTokens * c.outputUsdPerMTok;
+  }
+  // The database rounds the reservation up to 4 decimals; it must cover the worst case of both calls.
+  if (Math.ceil(worst / 100 - 1e-6) / 10000 > t.reservedUsd + 1e-9) return 'NOT_COVERED';
+  return null;
 }
 
 function approvedFor(a: ApprovedCall | undefined, m: ModelConfig): boolean {

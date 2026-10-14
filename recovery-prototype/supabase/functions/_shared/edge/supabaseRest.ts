@@ -5,7 +5,8 @@
 //                     `authenticated` with that user's claims, so RLS and function
 //                     grants decide. Used for reads, the lock, Storage downloads.
 //   serviceRest(key)  the service credential, used only for the service-role RPCs:
-//                     internal_reserve_ai_spend, internal_ai_dispatch,
+//                     internal_reserve_ai_spend, internal_ai_reservation_terms
+//                     (Stage 2A-6a, read-only), internal_ai_dispatch,
 //                     internal_ai_report_usage and internal_complete_analysis.
 //
 // Ids are validated before they reach a URL; every request has a timeout; a
@@ -13,7 +14,7 @@
 
 import {
   DbError, type AnalysisRecord, type ApprovedCall, type CompletionParams, type FounderDb, type MessageRow, type Role, type ScreenshotFile,
-  type ServiceDb, type SpendReservation,
+  type ReservationTerms, type ServiceDb, type SpendReservation, type TermsCall,
 } from '../analysis-pipeline/index.ts';
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -170,6 +171,18 @@ function approvedCall(v: unknown): ApprovedCall {
   return { model: o.model, maxOutputTokens: o.max_output_tokens as number };
 }
 
+/** One call's terms from internal_ai_reservation_terms, or RESPONSE_INVALID. Numbers stay numbers (no coercion). */
+function termsCall(v: unknown): TermsCall {
+  const o = v && typeof v === 'object' ? (v as Record<string, unknown>) : null;
+  const num = (x: unknown) => typeof x === 'number' && Number.isFinite(x);
+  if (!o || typeof o.model !== 'string' || !Number.isSafeInteger(o.max_output_tokens) || !Number.isSafeInteger(o.input_bound)
+      || !num(o.input_usd_per_mtok) || !num(o.output_usd_per_mtok)) throw new DbError('RESPONSE_INVALID');
+  return {
+    model: o.model, maxOutputTokens: o.max_output_tokens as number, inputBound: o.input_bound as number,
+    inputUsdPerMTok: o.input_usd_per_mtok as number, outputUsdPerMTok: o.output_usd_per_mtok as number,
+  };
+}
+
 function role(r: Role): Role {
   if (r !== 'ANALYST' && r !== 'REVIEWER') throw new DbError('INVALID_ROLE');
   return r;
@@ -189,6 +202,12 @@ export function serviceRest(o: RestOptions, serviceKey: string): ServiceDb {
       const usd = Number(o?.reserved_usd);
       if (!o || !Number.isFinite(usd)) throw new DbError('RESPONSE_INVALID');
       return { reservedUsd: usd, analyst: approvedCall(o.analyst), reviewer: approvedCall(o.reviewer) };
+    },
+    async reservationTerms(analysisId): Promise<ReservationTerms> {
+      const r = await c.rpc('internal_ai_reservation_terms', { p_analysis_id: uuid(analysisId) });
+      const o = r && typeof r === 'object' ? (r as Record<string, unknown>) : null;
+      if (!o || typeof o.analysis_id !== 'string' || typeof o.status !== 'string' || typeof o.reserved_usd !== 'number') throw new DbError('RESPONSE_INVALID');
+      return { analysisId: o.analysis_id, status: o.status, reservedUsd: o.reserved_usd, analyst: termsCall(o.analyst), reviewer: termsCall(o.reviewer) };
     },
     async recordDispatch(analysisId, r): Promise<ApprovedCall> {
       return approvedCall(await c.rpc('internal_ai_dispatch', { p_analysis_id: uuid(analysisId), p_role: role(r) }));

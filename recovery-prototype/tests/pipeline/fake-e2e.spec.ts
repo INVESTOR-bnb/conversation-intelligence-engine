@@ -12,7 +12,7 @@
 // Run via supabase/scripts/test-pipeline-db.sh.
 
 import { expect, test } from '@playwright/test';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -48,6 +48,17 @@ function functionSources(dir = FUNCTIONS_DIR): string {
     return statSync(p).isDirectory() ? functionSources(p) : `// ${p}\n${readFileSync(p, 'utf8')}`;
   }).join('\n');
 }
+/**
+ * Stage 2A-6b: the function sources as DEPLOYED on staging (commit 9ee3767, the last change to
+ * supabase/functions before 2A-6b). The working tree now carries the Anthropic adapter, which this
+ * script must refuse (see the test below); the fake run is verified against what is deployed.
+ */
+const DEPLOYED_COMMIT = '9ee3767';
+function deployedSources(): string {
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: FUNCTIONS_DIR, encoding: 'utf8', maxBuffer: 20_000_000 });
+  return git('ls-tree', '-r', '--name-only', DEPLOYED_COMMIT, '--', '.').split('\n').filter(Boolean).sort()
+    .map((f) => `// ${f}\n${git('show', `${DEPLOYED_COMMIT}:./${f}`)}`).join('\n');
+}
 const ezbr = (text: string) => Buffer.concat([Buffer.from('EZBR'), brotliCompressSync(Buffer.from(text))]);
 
 interface Knobs {
@@ -69,7 +80,7 @@ const mgmtLog: string[] = [];
 const fnCalls: string[] = [];
 
 function reset() {
-  const body = ezbr(functionSources());
+  const body = ezbr(deployedSources());
   knobs = {
     deny: new Set(), fail: new Map(), before: new Map(), tokenRejected: false,
     fn: { id: 'fn-1', slug: 'analyze-case', name: 'analyze-case', status: 'ACTIVE', version: 3, verify_jwt: true, ezbr_sha256: sha(body) },
@@ -256,7 +267,8 @@ const preflightRefusals: [string, () => void, string][] = [
   ['spending already enabled', () => sql(`update private.ai_spend_config set enabled = true where id`), 'spending is already ENABLED. Not touching it'],
   ['verify_jwt off on the deployed function', () => { knobs.fn.verify_jwt = false; }, 'is not ACTIVE with verify_jwt ON'],
   ['the function not ACTIVE', () => { knobs.fn.status = 'THROTTLED'; }, 'is not ACTIVE with verify_jwt ON'],
-  ['provider SDK in the deployed source', () => { knobs.body = ezbr(`${functionSources()}\nimport Anthropic from '@anthropic-ai/sdk';`); }, 'DEPLOYED function source contains an AI-provider SDK'],
+  ['provider SDK in the deployed source', () => { knobs.body = ezbr(`${deployedSources()}\nimport Anthropic from '@anthropic-ai/sdk';`); }, 'DEPLOYED function source contains an AI-provider SDK'],
+  ['the Stage 2A-6b sources (Anthropic adapter) deployed', () => { knobs.body = ezbr(functionSources()); }, 'DEPLOYED function source contains an AI-provider SDK'],
   ['an unreadable deployed source', () => { knobs.body = Buffer.from('EZBR not brotli at all'); }, 'could not be read to verify it'],
   ['a deployed version without spending controls', () => { knobs.body = ezbr("const FAKE = 'FAKE-PROVIDER-NOT-AI'; // old version"); }, 'not the reviewed version'],
   ['a provider key among the function secrets', () => { knobs.secrets.push({ name: 'ANTHROPIC_API_KEY', value: sha('x') }); }, 'include an AI-provider key name'],

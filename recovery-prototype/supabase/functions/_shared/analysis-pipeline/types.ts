@@ -8,7 +8,8 @@
 //   ServiceDb  — the service-role calls: the spending controls (reserve,
 //                dispatch, usage; Stage 2A-5d-3b) and internal_complete_analysis.
 //                Nothing else uses the service role.
-//   AnalysisProvider — one model call, never retried. No real provider exists yet.
+//   AnalysisProvider — one model call, never retried. Stage 2A-6b: the fake, or the
+//                Anthropic adapter (edge/anthropicProvider.ts), chosen by configuration.
 //   PipelineLogger   — receives event names and codes only, never content.
 
 export type Role = 'ANALYST' | 'REVIEWER';
@@ -79,10 +80,31 @@ export interface SpendReservation {
   reviewer: ApprovedCall;
 }
 
+/** One call's terms exactly as the reservation recorded them (Stage 2A-6a, public.internal_ai_reservation_terms). */
+export interface TermsCall {
+  model: string;
+  maxOutputTokens: number;
+  /** The most input tokens the reservation priced for this call. */
+  inputBound: number;
+  /** The prices snapshotted at reservation, USD per million tokens. */
+  inputUsdPerMTok: number;
+  outputUsdPerMTok: number;
+}
+
+export interface ReservationTerms {
+  analysisId: string;
+  status: string;
+  reservedUsd: number;
+  analyst: TermsCall;
+  reviewer: TermsCall;
+}
+
 /** Runs with the service role. */
 export interface ServiceDb {
   /** public.internal_reserve_ai_spend: refuses (SPENDING_DISABLED, BUDGET_EXCEEDED, ...) or reserves the database's estimate. */
   reserveSpend(analysisId: string, analystModel: string, reviewerModel: string): Promise<SpendReservation>;
+  /** public.internal_ai_reservation_terms (Stage 2A-6a): the reservation's full terms, read-only. */
+  reservationTerms(analysisId: string): Promise<ReservationTerms>;
   /** public.internal_ai_dispatch: must succeed (committed) before the provider request; once per role. */
   recordDispatch(analysisId: string, role: Role): Promise<ApprovedCall>;
   /** public.internal_ai_report_usage: the provider's reported usage for one dispatched call; once per role. */
@@ -110,6 +132,8 @@ export interface ProviderRequest {
 export interface ProviderResponse {
   /** The raw answer text; the pipeline parses it (invalid JSON fails closed). */
   text: string;
+  /** The provider's request id, when it gave one (an opaque id for reconciliation; never content). */
+  requestId?: string;
   /** 'end_turn' is the only acceptable stop; anything else (max_tokens, refusal, ...) fails closed. */
   stopReason: string;
   inputTokens: number;
@@ -124,6 +148,33 @@ export interface ProviderResponse {
 export interface AnalysisProvider {
   readonly maxRetries: 0;
   call(request: ProviderRequest): Promise<ProviderResponse>;
+  /**
+   * The input tokens `call(request)` would be billed for, counted WITHOUT sending it for
+   * generation (Anthropic: the free count_tokens endpoint). Required for any call whose
+   * reserved prices are not zero: the pipeline refuses to dispatch a priced call it cannot
+   * prove is inside the reservation's input bound.
+   */
+  countInputTokens?(request: ProviderRequest): Promise<number>;
+}
+
+/** Why a provider call failed, as fixed values only (never provider text). */
+export type ProviderErrorKind = 'HTTP' | 'TIMEOUT' | 'CONNECTION' | 'ABORTED' | 'MALFORMED_RESPONSE' | 'MODEL_MISMATCH' | 'PRICING_MISMATCH' | 'OTHER';
+
+/**
+ * A provider failure. It never says the request was free: after dispatch, every failure
+ * leaves the usage unknown and the reservation HELD until an administrator reconciles it.
+ */
+export class ProviderCallError extends Error {
+  readonly kind: ProviderErrorKind;
+  readonly httpStatus: number | null;
+  readonly requestId: string | null;
+  constructor(kind: ProviderErrorKind, httpStatus: number | null = null, requestId: string | null = null) {
+    super(`provider call failed: ${kind}${httpStatus === null ? '' : ` ${httpStatus}`}`);
+    this.name = 'ProviderCallError';
+    this.kind = kind;
+    this.httpStatus = httpStatus;
+    this.requestId = requestId;
+  }
 }
 
 export interface PipelineLogger {
@@ -137,6 +188,11 @@ export interface ModelConfig {
   /** Price per million tokens, for analyses.estimated_cost_usd only (the spending ledger uses the database's prices). */
   inputPerMTok: number;
   outputPerMTok: number;
+  /**
+   * The model's own maximum output (Stage 2A-6b). A reservation whose approved cap is larger
+   * is refused before dispatch. Omitted for the fake.
+   */
+  maxOutputTokens?: number;
 }
 
 export interface PipelineConfig {
@@ -150,6 +206,11 @@ export interface PipelineConfig {
   completionReserveMs: number;
   /** Largest screenshot accepted, in bytes. */
   maxScreenshotBytes: number;
+  /**
+   * Stage 2A-6b: refuse evidence with screenshots before any reservation (PAID_PROVIDER_TEXT_ONLY).
+   * Set for the paid provider: its first evaluation is synthetic text only.
+   */
+  textOnly?: boolean;
   now?: () => number;
 }
 

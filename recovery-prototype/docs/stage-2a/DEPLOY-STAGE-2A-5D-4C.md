@@ -1,5 +1,10 @@
 # Stage 2A-5d-4c — first controlled staging deployment of `analyze-case` (Android runbook)
 
+> **From Stage 2A-6b on, this script refuses the branch's function code**: it now contains the
+> pinned Anthropic SDK (inert without a key and explicit configuration). This is deliberate. Staging keeps
+> the deployed fake-only function (code as of `9ee3767`). Deploying the 2A-6b code needs its own approved
+> stage. See `STAGE-2A-6B-ANTHROPIC-ADAPTER.md`.
+
 **Scope.** This deploys the `analyze-case` Edge Function to the Supabase **staging** project
 `aqwdwswpmbnzmkvyuqil` only, then checks it.
 - **Provider:** the fake only (`ANALYSIS_PROVIDER=fake`).

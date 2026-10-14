@@ -22,7 +22,7 @@ const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
 const TABLES = ['contact_restrictions', 'analyses', 'case_messages', 'case_screenshots', 'cases', 'audit_log'];
 const RPCS: Record<string, 'uuid' | 'jsonb' | 'void'> = {
   founder_start_analysis: 'uuid', founder_abandon_analysis: 'void', internal_complete_analysis: 'void', whoami: 'jsonb',
-  internal_reserve_ai_spend: 'jsonb', internal_ai_dispatch: 'jsonb', internal_ai_report_usage: 'void',
+  internal_reserve_ai_spend: 'jsonb', internal_ai_reservation_terms: 'jsonb', internal_ai_dispatch: 'jsonb', internal_ai_report_usage: 'void',
   client_create_case: 'uuid', client_submit_case: 'void', client_get_case: 'jsonb', founder_ai_spend_summary: 'jsonb',
 };
 

@@ -54,8 +54,22 @@ test('under Deno: a founder run completes; unauthenticated, non-founder and malf
   const ok = await post(JSON.stringify({ case_id: c }), { authorization: `Bearer ${founderToken}` });
   expect(ok).toMatchObject({ status: 200, body: { outcome: 'COMPLETED', code: 'OK' } });
   expect(one(`select model from public.analyses where id = :'a'`, { a: ok.body.analysis_id })).toBe('analyst:FAKE-PROVIDER-NOT-AI|reviewer:FAKE-PROVIDER-NOT-AI');
-  expect(fake.requests.filter((x) => x.cred.startsWith('service')).map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_reserve_ai_spend', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_complete_analysis']);
+  expect(fake.requests.filter((x) => x.cred.startsWith('service')).map((x) => x.path)).toEqual(['/rest/v1/rpc/internal_reserve_ai_spend', '/rest/v1/rpc/internal_ai_reservation_terms', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_ai_dispatch', '/rest/v1/rpc/internal_ai_report_usage', '/rest/v1/rpc/internal_complete_analysis']);
   expect(spend(ok.body.analysis_id)).toBe('SETTLED:REPORTED_USAGE:0.0000');
   for (const s of [founderToken, SECRET, PUBLISHABLE, BODY1]) expect(output).not.toContain(s);
   expect(output).toContain('"event":"request.done"');
+});
+
+test('Stage 2A-6b, under Deno: the pinned npm: SDK through the adapter against a local mock API — one request per call, explicit key, no beta, no env access', async () => {
+  test.setTimeout(240000);
+  const { execFileSync } = await import('node:child_process');
+  // --allow-env with no variable allowed: the SDK must not need (or be steered by) any environment variable.
+  const out = execFileSync('npx', [...DENO, 'run', '--allow-net=127.0.0.1', '--allow-env=RRE_NONE', 'tests/pipeline/deno/anthropic-sdk.ts'],
+    { encoding: 'utf8', timeout: 230000 });
+  const r = JSON.parse(out.trim().split('\n').pop()!);
+  expect(r.counted).toBe(77);
+  expect(r.ok).toEqual({ text: '{"a":"ok"}', stopReason: 'end_turn', inputTokens: 70, outputTokens: 9, requestId: 'req_deno01' });
+  expect(r.failed).toEqual({ name: 'ProviderCallError', kind: 'HTTP', httpStatus: 529 });
+  expect(r.seen.map((s: { path: string }) => s.path)).toEqual(['/v1/messages/count_tokens', '/v1/messages', '/v1/messages']); // the 529 was not retried
+  for (const s of r.seen) expect(s).toMatchObject({ key: 'sk-ant-TEST-ONLY-not-a-real-key-0000', auth: null, beta: null, retry: '0', model: 'claude-sonnet-5-5' });
 });

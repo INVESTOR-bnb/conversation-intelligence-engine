@@ -5,7 +5,7 @@
 //     this repository with a fake `npx` on PATH: nothing can reach Supabase.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -168,11 +168,22 @@ test('the live check never signs out globally, never enables spending, never cal
 
 const TOKEN = `sbp_${'0123456789abcdef'.repeat(2)}0123456789`;
 
+/**
+ * The last commit whose function code this script may deploy (Stage 2A-6a; the functions as of
+ * Stage 2A-5d-3b). From Stage 2A-6b the function code carries the Anthropic adapter, which this
+ * fake-only deploy script refuses: deploying it needs its own, separately approved stage.
+ */
+const DEPLOYABLE_COMMIT = '2c0c70dbc28cb11cd1e39e3f6681bb889376daf3';
+
 function deployEnv(opts: { failOn?: string; branch?: string; dirty?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ac-deploy-'));
   const clone = join(dir, 'clone');
   const r = spawnSync('git', ['clone', '-q', '--branch', BRANCH, REPO, clone], { encoding: 'utf8' });
   if (r.status !== 0) throw new Error(r.stderr);
+  // The branch as pushed at the deployable commit: a local bare origin holding exactly that.
+  spawnSync('git', ['-C', clone, 'reset', '-q', '--hard', DEPLOYABLE_COMMIT]);
+  spawnSync('git', ['clone', '-q', '--bare', clone, `${clone}.git`]);
+  spawnSync('git', ['-C', clone, 'remote', 'set-url', 'origin', `${clone}.git`]);
   const app = join(clone, 'recovery-prototype');
   if (opts.branch) spawnSync('git', ['-C', clone, 'checkout', '-q', '-b', opts.branch]);
   if (opts.dirty) writeFileSync(join(app, 'supabase', 'functions', 'stray.ts'), '// local change\n');
@@ -276,6 +287,23 @@ test('deploy refuses function code that imports an AI-provider SDK (even when co
     writeFileSync(join(d.app, 'supabase', 'functions', '_shared', 'provider.ts'), "import Anthropic from '@anthropic-ai/sdk';\nexport default Anthropic;\n");
     g('add', '-A');
     g('-c', 'user.name=t', '-c', 'user.email=t@synthetic.invalid', 'commit', '-q', '-m', 'synthetic provider');
+    g('push', '-q', 'origin', `HEAD:${BRANCH}`);
+    const { code, out } = d.deploy(`${REF}\n${TOKEN}\n`);
+    expect(code).toBe(2);
+    expect(out).toContain('contains an AI-provider SDK, endpoint or key');
+    expect(d.calls()).toEqual([]);
+  } finally { d.cleanup(); }
+});
+
+test('deploy refuses the Stage 2A-6b function code (the Anthropic adapter), committed and pushed', () => {
+  const d = deployEnv();
+  try {
+    const g = (...a: string[]) => spawnSync('git', ['-C', d.clone, ...a], { encoding: 'utf8' });
+    const target = join(d.app, 'supabase', 'functions');
+    rmSync(target, { recursive: true, force: true });
+    cpSync(fileURLToPath(new URL('../../supabase/functions', import.meta.url)), target, { recursive: true });
+    g('add', '-A');
+    g('-c', 'user.name=t', '-c', 'user.email=t@synthetic.invalid', 'commit', '-q', '-m', 'the working tree functions');
     g('push', '-q', 'origin', `HEAD:${BRANCH}`);
     const { code, out } = d.deploy(`${REF}\n${TOKEN}\n`);
     expect(code).toBe(2);

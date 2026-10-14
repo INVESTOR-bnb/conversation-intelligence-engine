@@ -1,7 +1,8 @@
 # Stage 2A-6a — reservation terms for pre-dispatch checks (database only)
 
-**Status.** Implemented and tested locally. **Not deployed.** No AI provider, no
-credentials, no spending change.
+**Status.** Implemented and tested locally. Deployed to staging by the founder;
+verification reported `PASS (4 pass, 0 fail, 1 info)`. No AI provider, no credentials,
+no spending change. Stage 2A-6b's pipeline now uses this function before every dispatch.
 
 ## What changes
 - **Migration:** `20261019120000_stage2a6a_reservation_terms.sql` adds **one** function:

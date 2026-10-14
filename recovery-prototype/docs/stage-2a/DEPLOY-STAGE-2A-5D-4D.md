@@ -1,5 +1,9 @@
 # Stage 2A-5d-4d — guarded fake-provider end-to-end test on staging (Android runbook)
 
+> **Stage 2A-6b note:** this test still runs against the deployed fake-only function (code as of
+> `9ee3767`). It would refuse a function deployed from the 2A-6b code, which contains the pinned Anthropic
+> SDK. This is deliberate. Deploying that code needs its own approved stage. See `STAGE-2A-6B-ANTHROPIC-ADAPTER.md`.
+
 **Status.** The script and its offline tests exist. **It has not been run against
 staging.** Run it only after explicit approval.
 
