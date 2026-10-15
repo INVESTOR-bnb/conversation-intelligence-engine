@@ -39,10 +39,9 @@
 
 import { createHash } from 'node:crypto';
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
-import { createInterface } from 'node:readline';
 import { createClient } from '@supabase/supabase-js';
 import { deployedProblems } from './function-source-guard.mjs';
-import { accessToken, publishableKeyProblem, stagingUrlProblem } from './live-guards.mjs';
+import { accessToken, answerReader, publishableKeyProblem, stagingUrlProblem, trimEdges } from './live-guards.mjs';
 
 const REF = 'aqwdwswpmbnzmkvyuqil';
 const MGMT = 'https://api.supabase.com';
@@ -157,7 +156,7 @@ if (recoveryOnly) {
 const urlProblem = stagingUrlProblem(env('RRE_SUPABASE_URL'));
 if (urlProblem) { err(`refused: ${urlProblem}.`); process.exit(2); }
 const URL_ = process.env.RRE_SUPABASE_URL.replace(/\/$/, '');
-const KEY = env('RRE_PUBLISHABLE_KEY');
+const KEY = trimEdges(env('RRE_PUBLISHABLE_KEY'));
 const keyProblem = publishableKeyProblem(KEY);
 if (keyProblem) { err(`refused: ${keyProblem}. Use the publishable key (sb_publishable_…) only.`); process.exit(2); }
 const ACCOUNTS = Object.fromEntries(['CLIENT_A', 'CLIENT_B', 'FOUNDER'].map((p) => [p, { email: env(`${p}_EMAIL`), password: env(`${p}_PASSWORD`) }]));
@@ -200,14 +199,10 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
 process.on('uncaughtException', (e) => { err(`crashed: ${e?.message ?? e}`); void finish(2); });
 process.on('unhandledRejection', (e) => { err(`crashed: ${e?.message ?? e}`); void finish(2); });
 
-function askPhrase() {
-  return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, terminal: false });
-    process.stdout.write(`Type ${PHRASE} to enable spending for this single fake run (anything else cancels): `);
-    let done = false;
-    rl.once('line', (line) => { done = true; rl.close(); resolve(line); });
-    rl.once('close', () => { if (!done) resolve(''); });
-  });
+// The typed approval (live-guards.mjs answerReader): only what is typed after the prompt counts.
+async function askPhrase() {
+  const answers = answerReader();
+  try { return await answers.ask(`Type ${PHRASE} to enable spending for this single fake run (anything else cancels): `); } finally { answers.close(); }
 }
 
 /** The deployed function's source: the EZBR (brotli eszip) body, decoded for scanning. */

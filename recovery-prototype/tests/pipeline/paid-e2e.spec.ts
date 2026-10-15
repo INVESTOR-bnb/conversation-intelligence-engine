@@ -305,7 +305,8 @@ test('approved run with an Opus analyst and a Sonnet reviewer: both models activ
 
 for (const [name, answers] of [
   ['no limit confirmation', ['', RUN_OK]], ['a lower-case limit confirmation', ['provider-limit-confirmed', RUN_OK]],
-  ['the run phrase given as the limit confirmation', [RUN_OK, RUN_OK]], ['no run phrase', [LIMIT_OK, '']], ['a padded run phrase', [LIMIT_OK, ` ${RUN_OK}`]],
+  ['the run phrase given as the limit confirmation', [RUN_OK, RUN_OK]], ['no run phrase', [LIMIT_OK, '']], ['the run phrase with an extra character', [LIMIT_OK, `${RUN_OK}X`]],
+  ['the run phrase with a typographic dash', [LIMIT_OK, RUN_OK.replace('-', '\u2013')]],
   ['the input ends', []],
 ] as [string, string[]][]) {
   test(`confirmation: ${name} — nothing is changed`, async () => {
@@ -317,6 +318,14 @@ for (const [name, answers] of [
     expect(fnCalls).toHaveLength(0);
   });
 }
+
+test('confirmation: the exact phrases with stray spaces or a carriage return at their ends (Android keyboards) are accepted', async () => {
+  const r = await run([` ${LIMIT_OK} `, `${RUN_OK} \r`]);
+  expect(r.code, r.out).toBe(0);
+  expect(mgmtLog.filter((t) => t === 'enable')).toHaveLength(1);
+  expect(paidState()).toBe(OFF);
+  expect(secretsOff()).toBe(true);
+});
 
 // ---------------------------------------------------------------- refusals before anything changes
 

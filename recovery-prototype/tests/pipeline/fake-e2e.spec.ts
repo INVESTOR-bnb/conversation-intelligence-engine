@@ -258,7 +258,7 @@ test('Stage 2A-6d: the fake regression run passes against the reviewed Anthropic
 
 // ---------------------------------------------------------------- approval
 
-for (const answer of ['', 'yes', 'enable-fake-spending', ' ENABLE-FAKE-SPENDING', 'ENABLE-FAKE-SPENDING ', 'ENABLE FAKE SPENDING']) {
+for (const answer of ['', 'yes', 'enable-fake-spending', 'ENABLE FAKE SPENDING', 'ENABLE-FAKE-SPENDINGX', 'ENABLE\u2013FAKE-SPENDING']) {
   test(`approval: ${JSON.stringify(answer)} is not the exact phrase — spending is never touched`, async () => {
     const r = await run(answer);
     expect(r.code).toBe(2);
@@ -268,6 +268,13 @@ for (const answer of ['', 'yes', 'enable-fake-spending', ' ENABLE-FAKE-SPENDING'
     expect(enabled()).toBe('f');
   });
 }
+
+test('approval: the exact phrase with stray spaces or a carriage return at its ends (Android keyboards) is accepted', async () => {
+  const r = await run(` ${PHRASE} \r`);
+  expect(r.code, r.out).toBe(0);
+  expect(mgmtLog.filter((t) => t === 'enable')).toHaveLength(1);
+  expect(enabled()).toBe('f');
+});
 
 // ---------------------------------------------------------------- refusals before enabling
 

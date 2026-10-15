@@ -10,38 +10,57 @@
 # disk, shell history or the output.
 set -euo pipefail
 [ -f supabase/scripts/paid-pipeline-e2e.mjs ] || { echo "run this from recovery-prototype/" >&2; exit 2; }
-[ -d node_modules/@supabase/supabase-js ] || npm ci --no-audit --no-fund >/dev/null
+if [ ! -d node_modules/@supabase/supabase-js ]; then
+  echo "Installing dependencies (about a minute). Type nothing until the first prompt appears."
+  npm ci --no-audit --no-fund >/dev/null
+fi
+
+# ask NAME KIND hidden|shown "PROMPT": asks until the answer passes check-input.mjs (at most three
+# times), at the SAME prompt. Lines typed before the prompt appeared are discarded first (an
+# Enter pressed while waiting, the rest of a paste), so no answer can land on a later prompt.
+# The value goes to the checker on stdin only; nothing ever prints it.
+ask() {
+  local name=$1 kind=$2 mode=$3 label=$4 v problem _discard
+  for _ in 1 2 3; do
+    if [ -t 0 ]; then while read -r -s -t 0.05 _discard 2>/dev/null; do :; done; fi
+    v=''
+    if [ "$mode" = hidden ]; then read -rs -p "$label" v || true; echo; else read -r -p "$label" v || true; fi
+    if problem="$(printf '%s' "$v" | node supabase/scripts/check-input.mjs "$kind" 2>&1 >/dev/null)"; then
+      printf -v "$name" '%s' "$v"; export "${name?}"; v=''; return 0
+    fi
+    v=''
+    echo "  not accepted: ${problem:-invalid} — please answer this same prompt again" >&2
+  done
+  echo "refused: three answers in a row were not accepted; nothing was sent" >&2
+  exit 2
+}
 
 echo "Staging project: aqwdwswpmbnzmkvyuqil (synthetic data only)"
-read -rs -p 'Scoped Supabase access token (sbp_…, hidden): ' SUPABASE_ACCESS_TOKEN; echo
-export SUPABASE_ACCESS_TOKEN
+echo "Answer each prompt once, then press Enter once. A wrong answer is asked again at the same prompt."
+ask SUPABASE_ACCESS_TOKEN pat hidden 'Scoped Supabase access token (sbp_…, hidden): '
 if [ "${1:-}" != --paid-off ]; then
   RRE_SUPABASE_URL=https://aqwdwswpmbnzmkvyuqil.supabase.co
-  read -r  -p 'Publishable key (sb_publishable_…): ' RRE_PUBLISHABLE_KEY
-  read -r  -p 'Client A email: '     CLIENT_A_EMAIL
-  read -rs -p 'Client A password: '  CLIENT_A_PASSWORD; echo
-  read -r  -p 'Client B email: '     CLIENT_B_EMAIL
-  read -rs -p 'Client B password: '  CLIENT_B_PASSWORD; echo
-  read -r  -p 'Founder email: '      FOUNDER_EMAIL
-  read -rs -p 'Founder password: '   FOUNDER_PASSWORD; echo
-  read -r  -p 'Paid provider (kimi or anthropic): ' PAID_PROVIDER
+  ask RRE_PUBLISHABLE_KEY publishable shown 'Publishable key (sb_publishable_…): '
+  ask CLIENT_A_EMAIL    email    shown  'Client A email: '
+  ask CLIENT_A_PASSWORD password hidden 'Client A password: '
+  ask CLIENT_B_EMAIL    email    shown  'Client B email: '
+  ask CLIENT_B_PASSWORD password hidden 'Client B password: '
+  ask FOUNDER_EMAIL     email    shown  'Founder email: '
+  ask FOUNDER_PASSWORD  password hidden 'Founder password: '
+  ask PAID_PROVIDER     provider shown  'Paid provider (kimi or anthropic): '
   case "$PAID_PROVIDER" in
     kimi)
-      read -rs -p 'Kimi API key (sk-…, hidden): ' KIMI_API_KEY; echo
-      read -r  -p 'The credit on that Kimi account (or its spending limit), in USD (at most 15): ' PROVIDER_LIMIT_USD
-      export KIMI_API_KEY ;;
+      ask KIMI_API_KEY kimi-key hidden 'Kimi API key (sk-…, hidden): '
+      ask PROVIDER_LIMIT_USD usd shown 'The credit on that Kimi account (or its spending limit), in USD (at most 15): ' ;;
     anthropic)
-      read -rs -p 'Anthropic API key for the limited evaluation workspace (sk-ant-…, hidden): ' ANTHROPIC_API_KEY; echo
-      read -r  -p 'Analyst model (claude-sonnet-5-5 or claude-opus-5-5): '  PAID_ANALYST_MODEL
-      read -r  -p 'Reviewer model (claude-sonnet-5-5 or claude-opus-5-5): ' PAID_REVIEWER_MODEL
-      read -r  -p 'The spending limit you set on that Anthropic workspace, in USD (at most 15): ' PROVIDER_LIMIT_USD
-      export ANTHROPIC_API_KEY PAID_ANALYST_MODEL PAID_REVIEWER_MODEL ;;
-    *) echo "refused: the provider must be exactly kimi or anthropic" >&2; exit 2 ;;
+      ask ANTHROPIC_API_KEY anthropic-key hidden 'Anthropic API key for the limited evaluation workspace (sk-ant-…, hidden): '
+      ask PAID_ANALYST_MODEL  model shown 'Analyst model (claude-sonnet-5-5 or claude-opus-5-5): '
+      ask PAID_REVIEWER_MODEL model shown 'Reviewer model (claude-sonnet-5-5 or claude-opus-5-5): '
+      ask PROVIDER_LIMIT_USD  usd   shown 'The spending limit you set on that Anthropic workspace, in USD (at most 15): ' ;;
   esac
-  read -r  -p 'Budget for this single run, in USD (at most 3) [3]: ' RUN_BUDGET_USD
+  ask RUN_BUDGET_USD usd-or-default shown 'Budget for this single run, in USD (at most 3) [3]: '
   RUN_BUDGET_USD="${RUN_BUDGET_USD:-3}"
-  export RRE_SUPABASE_URL RRE_PUBLISHABLE_KEY CLIENT_A_EMAIL CLIENT_A_PASSWORD CLIENT_B_EMAIL CLIENT_B_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD \
-         PAID_PROVIDER PROVIDER_LIMIT_USD RUN_BUDGET_USD
+  export RRE_SUPABASE_URL RUN_BUDGET_USD
 fi
 
 set +e

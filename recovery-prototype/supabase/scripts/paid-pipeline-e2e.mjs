@@ -50,11 +50,10 @@
 // prompts in the .sh wrapper) and are never printed or written anywhere: every line this script
 // prints passes through a redactor. No file is written.
 
-import { createInterface } from 'node:readline';
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 import { createClient } from '@supabase/supabase-js';
 import { deployedProblems, kimiDeployedProblems } from './function-source-guard.mjs';
-import { accessToken, publishableKeyProblem, stagingUrlProblem } from './live-guards.mjs';
+import { accessToken, answerReader, providerKeyProblem, publishableKeyProblem, stagingUrlProblem, trimEdges } from './live-guards.mjs';
 
 const REF = 'aqwdwswpmbnzmkvyuqil';
 const MGMT = 'https://api.supabase.com';
@@ -72,9 +71,9 @@ const PAID_MODELS = Object.freeze({
 /** The two paid providers this run can use, and what each needs. */
 const PROVIDERS = Object.freeze({
   anthropic: Object.freeze({ label: 'Anthropic', console: 'the Anthropic console', keyEnv: 'ANTHROPIC_API_KEY', models: ['claude-opus-5-5', 'claude-sonnet-5-5'],
-    keyOk: (k) => /^sk-ant-[A-Za-z0-9_-]{20,300}$/.test(k), keyShape: 'an Anthropic API key (sk-ant-…)' }),
+    keyShape: 'an Anthropic API key (sk-ant-…)' }),
   kimi: Object.freeze({ label: 'Kimi', console: 'the Kimi (Moonshot) platform console', keyEnv: 'KIMI_API_KEY', models: ['kimi-k3'],
-    keyOk: (k) => /^sk-[A-Za-z0-9_-]{20,300}$/.test(k) && !k.startsWith('sk-ant-'), keyShape: 'a Kimi API key (sk-…)' }),
+    keyShape: 'a Kimi API key (sk-…)' }),
 });
 const PAID_MODEL_LIST = Object.keys(PAID_MODELS).map((m) => `'${m}'`).join(', ');
 const RUN_BUDGET_MAX_USD = 3;
@@ -231,15 +230,16 @@ if (recoveryOnly) {
 const urlProblem = stagingUrlProblem(env('RRE_SUPABASE_URL'));
 if (urlProblem) { err(`refused: ${urlProblem}.`); process.exit(2); }
 const URL_ = process.env.RRE_SUPABASE_URL.replace(/\/$/, '');
-const KEY = env('RRE_PUBLISHABLE_KEY');
+const KEY = trimEdges(env('RRE_PUBLISHABLE_KEY'));
 const keyProblem = publishableKeyProblem(KEY);
 if (keyProblem) { err(`refused: ${keyProblem}. Use the publishable key (sb_publishable_…) only.`); process.exit(2); }
 const ACCOUNTS = Object.fromEntries(['CLIENT_A', 'CLIENT_B', 'FOUNDER'].map((p) => [p, { email: env(`${p}_EMAIL`), password: env(`${p}_PASSWORD`) }]));
 const PROVIDER_NAME = process.env.PAID_PROVIDER ?? '';
 if (!Object.hasOwn(PROVIDERS, PROVIDER_NAME)) { err(`refused: PAID_PROVIDER must be exactly one of ${Object.keys(PROVIDERS).join(', ')}.`); process.exit(2); }
 const P = PROVIDERS[PROVIDER_NAME];
-const PROVIDER_KEY = env(P.keyEnv);
-if (!P.keyOk(PROVIDER_KEY)) { err(`refused: that is not shaped like ${P.keyShape}.`); process.exit(2); }
+const PROVIDER_KEY = trimEdges(env(P.keyEnv));
+secrets.push(PROVIDER_KEY);
+if (providerKeyProblem(PROVIDER_NAME, PROVIDER_KEY)) { err(`refused: that is not shaped like ${P.keyShape}.`); process.exit(2); }
 // Kimi: one model, fixed in the code for both stages. Anthropic: the two models you choose.
 const ANALYST = PROVIDER_NAME === 'kimi' ? 'kimi-k3' : process.env.PAID_ANALYST_MODEL ?? '';
 const REVIEWER = PROVIDER_NAME === 'kimi' ? 'kimi-k3' : process.env.PAID_REVIEWER_MODEL ?? '';
@@ -295,19 +295,9 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
 process.on('uncaughtException', (e) => { err(`crashed: ${e?.message ?? e}`); void finish(2); });
 process.on('unhandledRejection', (e) => { err(`crashed: ${e?.message ?? e}`); void finish(2); });
 
-const lines = [];
-let waiting = null;
-let inputClosed = false;
-const rl = createInterface({ input: process.stdin, terminal: false });
-rl.on('line', (l) => { if (waiting) { const w = waiting; waiting = null; w(l); } else lines.push(l); });
-rl.on('close', () => { inputClosed = true; if (waiting) { const w = waiting; waiting = null; w(''); } });
-/** One typed line; an empty answer if the input has ended (which cancels). */
-function ask(prompt) {
-  process.stdout.write(prompt);
-  if (lines.length) return Promise.resolve(lines.shift());
-  if (inputClosed) return Promise.resolve('');
-  return new Promise((resolve) => { waiting = resolve; });
-}
+// Typed confirmations (live-guards.mjs answerReader): only what is typed after each prompt counts.
+const answers = answerReader();
+const ask = (prompt) => answers.ask(prompt);
 
 function decodeBody(bytes) {
   const b = Buffer.from(bytes);
@@ -496,5 +486,5 @@ try {
     code = e?.exitCode ?? 2;
   }
 }
-rl.close();
+answers.close();
 await finish(code);
