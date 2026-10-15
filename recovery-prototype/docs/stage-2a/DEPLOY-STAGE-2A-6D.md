@@ -145,15 +145,17 @@ bash supabase/scripts/paid-pipeline-e2e.sh --paid-off
 ```
 It needs only the token. It:
 - disables spending;
-- deactivates both paid models;
-- deletes `ANTHROPIC_API_KEY`, `ALLOW_PAID_PROVIDER`, `ANALYST_MODEL`, `REVIEWER_MODEL` and `ANTHROPIC_EFFORT`;
+- deactivates every paid model (both Anthropic models and `kimi-k3`);
+- deletes `ANTHROPIC_API_KEY`, `KIMI_API_KEY`, `ALLOW_PAID_PROVIDER`, `ANALYST_MODEL`, `REVIEWER_MODEL` and `ANTHROPIC_EFFORT`;
 - restores the fake settings;
 - reads everything back.
 
 **Without a Codespace:**
 1. Supabase SQL Editor: run `supabase/deploy/stage2a6d_paid_off.sql` (database part).
-2. Dashboard → Edge Functions → Secrets: delete those five settings and set `ANALYSIS_PROVIDER=fake`.
-3. Revoke the key in the Anthropic console.
+2. Dashboard → Edge Functions → Secrets: delete those six settings and set `ANALYSIS_PROVIDER=fake`.
+3. Revoke the key in the Anthropic or Kimi console.
+
+For a **Kimi** paid run, see `KIMI-FIRST-PAID-RUN.md` (Stage 2A-6e).
 
 ## What cannot be guaranteed, and the exposure if it fails
 

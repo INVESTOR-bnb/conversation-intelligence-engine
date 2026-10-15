@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 2A-6d — one command for the guarded single-case PAID synthetic analysis on STAGING,
+# Stage 2A-6d (Kimi-aware since 2A-6e) — one command for the guarded single-case PAID synthetic analysis on STAGING,
 # for a GitHub Codespace on Android. Run from recovery-prototype/, ONLY after the founder's
 # separate approval of the paid run (docs/stage-2a/DEPLOY-STAGE-2A-6D.md):
 #   bash supabase/scripts/paid-pipeline-e2e.sh             the run
@@ -24,20 +24,30 @@ if [ "${1:-}" != --paid-off ]; then
   read -rs -p 'Client B password: '  CLIENT_B_PASSWORD; echo
   read -r  -p 'Founder email: '      FOUNDER_EMAIL
   read -rs -p 'Founder password: '   FOUNDER_PASSWORD; echo
-  read -rs -p 'Anthropic API key for the limited evaluation workspace (sk-ant-…, hidden): ' ANTHROPIC_API_KEY; echo
-  read -r  -p 'Analyst model (claude-sonnet-5-5 or claude-opus-5-5): '  PAID_ANALYST_MODEL
-  read -r  -p 'Reviewer model (claude-sonnet-5-5 or claude-opus-5-5): ' PAID_REVIEWER_MODEL
-  read -r  -p 'The spending limit you set on that Anthropic workspace, in USD (at most 15): ' PROVIDER_LIMIT_USD
+  read -r  -p 'Paid provider (kimi or anthropic): ' PAID_PROVIDER
+  case "$PAID_PROVIDER" in
+    kimi)
+      read -rs -p 'Kimi API key (sk-…, hidden): ' KIMI_API_KEY; echo
+      read -r  -p 'The credit on that Kimi account (or its spending limit), in USD (at most 15): ' PROVIDER_LIMIT_USD
+      export KIMI_API_KEY ;;
+    anthropic)
+      read -rs -p 'Anthropic API key for the limited evaluation workspace (sk-ant-…, hidden): ' ANTHROPIC_API_KEY; echo
+      read -r  -p 'Analyst model (claude-sonnet-5-5 or claude-opus-5-5): '  PAID_ANALYST_MODEL
+      read -r  -p 'Reviewer model (claude-sonnet-5-5 or claude-opus-5-5): ' PAID_REVIEWER_MODEL
+      read -r  -p 'The spending limit you set on that Anthropic workspace, in USD (at most 15): ' PROVIDER_LIMIT_USD
+      export ANTHROPIC_API_KEY PAID_ANALYST_MODEL PAID_REVIEWER_MODEL ;;
+    *) echo "refused: the provider must be exactly kimi or anthropic" >&2; exit 2 ;;
+  esac
   read -r  -p 'Budget for this single run, in USD (at most 3) [3]: ' RUN_BUDGET_USD
   RUN_BUDGET_USD="${RUN_BUDGET_USD:-3}"
   export RRE_SUPABASE_URL RRE_PUBLISHABLE_KEY CLIENT_A_EMAIL CLIENT_A_PASSWORD CLIENT_B_EMAIL CLIENT_B_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD \
-         ANTHROPIC_API_KEY PAID_ANALYST_MODEL PAID_REVIEWER_MODEL PROVIDER_LIMIT_USD RUN_BUDGET_USD
+         PAID_PROVIDER PROVIDER_LIMIT_USD RUN_BUDGET_USD
 fi
 
 set +e
 node supabase/scripts/paid-pipeline-e2e.mjs "$@"
 code=$?
 set -e
-unset SUPABASE_ACCESS_TOKEN RRE_PUBLISHABLE_KEY CLIENT_A_EMAIL CLIENT_A_PASSWORD CLIENT_B_EMAIL CLIENT_B_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD ANTHROPIC_API_KEY
+unset SUPABASE_ACCESS_TOKEN RRE_PUBLISHABLE_KEY CLIENT_A_EMAIL CLIENT_A_PASSWORD CLIENT_B_EMAIL CLIENT_B_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD ANTHROPIC_API_KEY KIMI_API_KEY
 echo "exit code: $code"
 exit "$code"

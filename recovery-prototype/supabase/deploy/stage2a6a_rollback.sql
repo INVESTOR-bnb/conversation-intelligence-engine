@@ -20,6 +20,9 @@ begin
   if exists (select 1 from private.ai_model_prices where model in ('claude-opus-5-5', 'claude-sonnet-5-5')) then
     raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-6c (Anthropic prices) is applied; run stage2a6c_rollback.sql first.';
   end if;
+  if exists (select 1 from private.ai_model_prices where model = 'kimi-k3') then
+    raise exception 'ROLLBACK REFUSED (nothing changed): Stage 2A-6e (Kimi price) is applied; run stage2a6e_rollback.sql first.';
+  end if;
   perform set_config('rre.fingerprint_before', (
     select string_agg(p.oid::regprocedure::text || '=' || md5(p.prosrc || coalesce(p.proacl::text, '') || p.prosecdef::text || coalesce(p.proconfig::text, '')), ';' order by p.oid::regprocedure::text)
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace

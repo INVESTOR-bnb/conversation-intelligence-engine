@@ -37,15 +37,19 @@ export const KIMI_MODEL = 'kimi-k3';
 export const KIMI_REASONING_EFFORT = 'low';
 
 /**
- * The only allowlisted Kimi model. Prices are deliberately NOT set in this phase: pricing is a
- * separately authorised step, and until both prices are filled in (and match a database price
- * row exactly) configuration refuses ANALYSIS_PROVIDER=kimi with MODEL_PRICE_NOT_CONFIGURED.
+ * The only allowlisted Kimi model. Prices (USD per million tokens) equal the Stage 2A-6e price
+ * row exactly (a test compares them; the pipeline refuses any difference with
+ * SPEND_TERMS_MISMATCH): input 3 — the regular and 5-minute cache-write price, applied to ALL
+ * prompt_tokens, so no cached-input discount (0.30) is ever taken; output 15, reasoning
+ * included. The row is INACTIVE: the database refuses to reserve kimi-k3 (MODEL_NOT_PRICED)
+ * until a separately approved paid run activates it. A model whose prices are null here is
+ * refused by configuration with MODEL_PRICE_NOT_CONFIGURED.
  * approvedOutputCap: 8,000 tokens — the same cap as the other paid models: room for low-effort
  * reasoning plus an rre-analysis answer (typically 2-4k tokens); the database's cap must equal it.
  * maxOutputTokens: the model's own maximum is UNVERIFIED, so it is set to the approved cap.
  */
 export const KIMI_MODELS: Readonly<Record<string, Readonly<{ inputPerMTok: number | null; outputPerMTok: number | null; maxOutputTokens: number; approvedOutputCap: number }>>> = Object.freeze({
-  'kimi-k3': Object.freeze({ inputPerMTok: null, outputPerMTok: null, maxOutputTokens: 8_000, approvedOutputCap: 8_000 }),
+  'kimi-k3': Object.freeze({ inputPerMTok: 3, outputPerMTok: 15, maxOutputTokens: 8_000, approvedOutputCap: 8_000 }),
 });
 
 /** The pipeline model configuration, or null if the model is not allowlisted or not priced yet. */
@@ -140,10 +144,11 @@ export function parseCompletion(raw: unknown, requestedModel: string, schema: Sc
   const output = tokens(u.completion_tokens);
   if (input === null || output === null) throw new ProviderCallError('MALFORMED_RESPONSE', null, requestId);
   if (u.total_tokens !== undefined && u.total_tokens !== null && tokens(u.total_tokens) !== input + output) throw new ProviderCallError('MALFORMED_RESPONSE', null, requestId);
-  // Context caching (automatic on kimi-k3): cached and cache-written tokens must be PART of
-  // prompt_tokens, which the ledger bills in full at the input price the pricing phase sets
-  // (the higher of the regular and cache-write prices, so the bill is never understated). Any
-  // other shape — invalid values, or more cache tokens than prompt tokens — is not trusted: HELD.
+  // Context caching (automatic on kimi-k3, 5-minute TTL): prompt_tokens is the TOTAL input;
+  // cached_tokens (cache reads) and cache_write_tokens are disjoint parts of it. The ledger bills
+  // all prompt_tokens at the input price (USD 3, the regular and cache-write price), so the bill
+  // is never understated. Any other shape — invalid values, or more cache tokens than prompt
+  // tokens — is not trusted: HELD.
   const pd = isObj(u.prompt_tokens_details) ? u.prompt_tokens_details : {};
   let cacheTokens = 0;
   for (const v of [pd.cached_tokens, pd.cache_write_tokens]) {

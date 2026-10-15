@@ -1,38 +1,42 @@
 #!/usr/bin/env node
-// Stage 2A-6d — ONE guarded, PAID, synthetic analysis on the STAGING project, through the
-// deployed analyze-case function and the Anthropic API. Run it yourself, only after a separate
+// Stage 2A-6d (Kimi-aware since 2A-6e) — ONE guarded, PAID, synthetic analysis on the STAGING
+// project, through the deployed analyze-case function and ONE paid provider, chosen explicitly
+// with PAID_PROVIDER: 'anthropic' (Anthropic API, Stage 2A-6c prices) or 'kimi' (Moonshot
+// kimi-k3 for both analyst and reviewer, Stage 2A-6e price). Anything else is refused. Run it yourself, only after a separate
 // founder approval (Android: GitHub Codespace): bash supabase/scripts/paid-pipeline-e2e.sh
 // Recovery (paid provider OFF; nothing else is changed):
 //   bash supabase/scripts/paid-pipeline-e2e.sh --paid-off
 //
 // What it does, in this order:
 //  1. Read-only audit (Management API, scoped access token), refusing on any surprise:
-//     spending DISABLED; the only active model is the free fake; both Anthropic price rows
-//     exist exactly as reviewed (Stage 2A-6c) and are INACTIVE; no unsettled reservation;
-//     analyze-case ACTIVE with verify_jwt ON, its deployed source the reviewed
-//     Anthropic-capable version (function-source-guard.mjs); its settings fake, with no
-//     provider key or paid setting. Three synthetic accounts sign in; client A creates and
-//     submits ONE synthetic text case. The database's own estimate of the most this case can
+//     spending DISABLED; the only active model is the free fake; the chosen provider's price
+//     rows exist exactly as reviewed (2A-6c / 2A-6e) and are INACTIVE; no unsettled reservation;
+//     analyze-case ACTIVE with verify_jwt ON, its deployed source the reviewed version
+//     (function-source-guard.mjs; for Kimi also the Kimi-capable adapter); its settings fake,
+//     with no provider key or paid setting (Anthropic or Kimi). Three synthetic accounts sign
+//     in; client A creates and submits ONE synthetic text case. The database's own estimate of the most this case can
 //     cost with the chosen models must be within the run budget (at most USD 3), the database's
 //     USD 1 per-analysis limit and the provider-side spending limit you state.
-//  2. Two typed confirmations: PROVIDER-LIMIT-CONFIRMED (the Anthropic workspace of this key
-//     has a spending limit of at most the amount you stated, independently set by you, and
-//     allows global inference), then RUN-ONE-PAID-ANALYSIS. Anything else ends the run with
+//  2. Two typed confirmations: PROVIDER-LIMIT-CONFIRMED (the provider account of this key has a
+//     spending limit — for Kimi, a prepaid balance — of at most the amount you stated,
+//     independently set by you), then RUN-ONE-PAID-ANALYSIS. Anything else ends the run with
 //     nothing changed.
 //  3. The window:
-//     a. function settings: ANALYSIS_PROVIDER=anthropic, ALLOW_PAID_PROVIDER=staging-only,
-//        the key, the two models, ANTHROPIC_EFFORT=medium (read back by name);
+//     a. function settings (read back by name): Anthropic — ANALYSIS_PROVIDER=anthropic,
+//        ALLOW_PAID_PROVIDER=staging-only, ANTHROPIC_API_KEY, the two models,
+//        ANTHROPIC_EFFORT=medium; Kimi — ANALYSIS_PROVIDER=kimi, ALLOW_PAID_PROVIDER=staging-only,
+//        KIMI_API_KEY (the model is fixed in the code: kimi-k3, reasoning effort low);
 //     b. ONE guarded SQL statement activates exactly the chosen model(s) and enables spending,
 //        only if spending is still off, the rows still have the reviewed prices and caps, and
 //        no other paid model is active (otherwise nothing changes);
 //     c. ONE founder call to analyze-case;
-//     d. IMMEDIATELY after the call: one statement disables spending and deactivates both
+//     d. IMMEDIATELY after the call: one statement disables spending and deactivates every
 //        paid models (retried, then read back); then the paid settings are deleted and the fake
 //        settings restored (read back by name).
 //     The same restore runs on any failure, Ctrl-C, SIGTERM, SIGHUP or crash of this process.
 //     It CANNOT run if the Codespace itself dies: then run --paid-off (or the SQL file
 //     supabase/deploy/stage2a6d_paid_off.sql and delete the key in the dashboard).
-//  4. Verification (everything already off): the analysis was made by the paid models; one
+//  4. Verification (everything already off): the analysis was made by the paid model(s); one
 //     new ledger row; reserved within the run budget; settled from reported usage (or HELD:
 //     reconcile); no overrun; spending, models and settings off; founder-only access.
 //     The analysis content is NOT printed: read it in the founder workspace.
@@ -49,26 +53,38 @@
 import { createInterface } from 'node:readline';
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 import { createClient } from '@supabase/supabase-js';
-import { deployedProblems } from './function-source-guard.mjs';
+import { deployedProblems, kimiDeployedProblems } from './function-source-guard.mjs';
 import { publishableKeyProblem, stagingUrlProblem } from './live-guards.mjs';
 
 const REF = 'aqwdwswpmbnzmkvyuqil';
 const MGMT = 'https://api.supabase.com';
 const FN = 'analyze-case';
 const FAKE_MODEL = 'FAKE-PROVIDER-NOT-AI';
-/** Must equal ANTHROPIC_MODELS in supabase/functions/_shared/edge/anthropicProvider.ts and the 2A-6c migration (a test compares them). */
+/**
+ * Must equal ANTHROPIC_MODELS (anthropicProvider.ts) and the 2A-6c migration, and KIMI_MODELS
+ * (kimiProvider.ts) and the 2A-6e migration (tests compare them).
+ */
 const PAID_MODELS = Object.freeze({
   'claude-opus-5-5': Object.freeze({ in: 4, out: 20, cap: 8000 }),
   'claude-sonnet-5-5': Object.freeze({ in: 2, out: 10, cap: 8000 }),
+  'kimi-k3': Object.freeze({ in: 3, out: 15, cap: 8000 }),
 });
+/** The two paid providers this run can use, and what each needs. */
+const PROVIDERS = Object.freeze({
+  anthropic: Object.freeze({ label: 'Anthropic', console: 'the Anthropic console', keyEnv: 'ANTHROPIC_API_KEY', models: ['claude-opus-5-5', 'claude-sonnet-5-5'],
+    keyOk: (k) => /^sk-ant-[A-Za-z0-9_-]{20,300}$/.test(k), keyShape: 'an Anthropic API key (sk-ant-…)' }),
+  kimi: Object.freeze({ label: 'Kimi', console: 'the Kimi (Moonshot) platform console', keyEnv: 'KIMI_API_KEY', models: ['kimi-k3'],
+    keyOk: (k) => /^sk-[A-Za-z0-9_-]{20,300}$/.test(k) && !k.startsWith('sk-ant-'), keyShape: 'a Kimi API key (sk-…)' }),
+});
+const PAID_MODEL_LIST = Object.keys(PAID_MODELS).map((m) => `'${m}'`).join(', ');
 const RUN_BUDGET_MAX_USD = 3;
 const EVAL_CEILING_USD = 15;
 const LIMIT_PHRASE = 'PROVIDER-LIMIT-CONFIRMED';
 const RUN_PHRASE = 'RUN-ONE-PAID-ANALYSIS';
-const PAID_SECRET_NAMES = ['ANTHROPIC_API_KEY', 'ALLOW_PAID_PROVIDER', 'ANALYST_MODEL', 'REVIEWER_MODEL', 'ANTHROPIC_EFFORT'];
-const PAID_SECRET = /^(ANTHROPIC_[A-Z0-9_]*|ALLOW_PAID_PROVIDER|ANALYST_MODEL|REVIEWER_MODEL)$/;
+const PAID_SECRET_NAMES = ['ANTHROPIC_API_KEY', 'KIMI_API_KEY', 'ALLOW_PAID_PROVIDER', 'ANALYST_MODEL', 'REVIEWER_MODEL', 'ANTHROPIC_EFFORT'];
+const PAID_SECRET = /^(ANTHROPIC_[A-Z0-9_]*|KIMI_[A-Z0-9_]*|ALLOW_PAID_PROVIDER|ANALYST_MODEL|REVIEWER_MODEL)$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const PAID_OFF_SQL = "update private.ai_spend_config set enabled = false, updated_at = now() where id; update private.ai_model_prices set active = false where model in ('claude-opus-5-5', 'claude-sonnet-5-5');";
+const PAID_OFF_SQL = `update private.ai_spend_config set enabled = false, updated_at = now() where id; update private.ai_model_prices set active = false where model in (${PAID_MODEL_LIST});`;
 const recoveryOnly = process.argv.includes('--paid-off');
 
 // ---------------------------------------------------------------- output: never a credential
@@ -152,7 +168,7 @@ function enableSql(models) {
     select (select count(*) from act) as activated, (select count(*) from en) as enabled`;
 }
 const OFF_SQL = `with en as (update private.ai_spend_config set enabled = false, updated_at = now() where id returning enabled),
-    act as (update private.ai_model_prices set active = false where model in ('claude-opus-5-5', 'claude-sonnet-5-5') and active returning model)
+    act as (update private.ai_model_prices set active = false where model in (${PAID_MODEL_LIST}) and active returning model)
     select (select count(*) from en) as disabled, (select count(*) from act) as deactivated`;
 
 // ---------------------------------------------------------------- restore (the whole point)
@@ -196,7 +212,7 @@ async function restoreSecrets() {
   }
   secretsArmed = false;
   err('ALERT: the paid provider settings could NOT be confirmed removed. NOW: Supabase dashboard → Edge Functions → Secrets:');
-  err(`       delete ${PAID_SECRET_NAMES.join(', ')}; set ANALYSIS_PROVIDER=fake. Then revoke the Anthropic key in the Anthropic console.`);
+  err(`       delete ${PAID_SECRET_NAMES.join(', ')}; set ANALYSIS_PROVIDER=fake. Then revoke the provider key in its console (Anthropic or Kimi).`);
   err('       or: bash supabase/scripts/paid-pipeline-e2e.sh --paid-off');
   return false;
 }
@@ -217,12 +233,16 @@ const KEY = env('RRE_PUBLISHABLE_KEY');
 const keyProblem = publishableKeyProblem(KEY);
 if (keyProblem) { err(`refused: ${keyProblem}. Use the publishable key (sb_publishable_…) only.`); process.exit(2); }
 const ACCOUNTS = Object.fromEntries(['CLIENT_A', 'CLIENT_B', 'FOUNDER'].map((p) => [p, { email: env(`${p}_EMAIL`), password: env(`${p}_PASSWORD`) }]));
-const PROVIDER_KEY = env('ANTHROPIC_API_KEY');
-if (!/^sk-ant-[A-Za-z0-9_-]{20,300}$/.test(PROVIDER_KEY)) { err('refused: that is not shaped like an Anthropic API key (sk-ant-…).'); process.exit(2); }
-const ANALYST = process.env.PAID_ANALYST_MODEL ?? '';
-const REVIEWER = process.env.PAID_REVIEWER_MODEL ?? '';
-if (!Object.hasOwn(PAID_MODELS, ANALYST) || !Object.hasOwn(PAID_MODELS, REVIEWER)) {
-  err(`refused: the analyst and reviewer models must each be one of ${Object.keys(PAID_MODELS).join(', ')}.`); process.exit(2);
+const PROVIDER_NAME = process.env.PAID_PROVIDER ?? '';
+if (!Object.hasOwn(PROVIDERS, PROVIDER_NAME)) { err(`refused: PAID_PROVIDER must be exactly one of ${Object.keys(PROVIDERS).join(', ')}.`); process.exit(2); }
+const P = PROVIDERS[PROVIDER_NAME];
+const PROVIDER_KEY = env(P.keyEnv);
+if (!P.keyOk(PROVIDER_KEY)) { err(`refused: that is not shaped like ${P.keyShape}.`); process.exit(2); }
+// Kimi: one model, fixed in the code for both stages. Anthropic: the two models you choose.
+const ANALYST = PROVIDER_NAME === 'kimi' ? 'kimi-k3' : process.env.PAID_ANALYST_MODEL ?? '';
+const REVIEWER = PROVIDER_NAME === 'kimi' ? 'kimi-k3' : process.env.PAID_REVIEWER_MODEL ?? '';
+if (!P.models.includes(ANALYST) || !P.models.includes(REVIEWER)) {
+  err(`refused: the analyst and reviewer models must each be one of ${P.models.join(', ')}.`); process.exit(2);
 }
 const LIMIT = Number(process.env.PROVIDER_LIMIT_USD);
 if (!Number.isFinite(LIMIT) || LIMIT <= 0 || LIMIT > EVAL_CEILING_USD) {
@@ -324,20 +344,20 @@ async function run() {
   if (active.length !== 1 || active[0].model !== FAKE_MODEL || Number(active[0].in) !== 0 || Number(active[0].out) !== 0) {
     throw new Stop(`the active models are not exactly ${FAKE_MODEL} at USD 0/0. Not changing anything.`);
   }
-  for (const m of Object.keys(PAID_MODELS)) {
+  for (const m of P.models) {
     const row = before.models.find((x) => x.model === m);
-    if (!reviewedRow(m, row)) throw new Stop(`the price row for ${m} is missing or differs from the reviewed price and cap (Stage 2A-6c)`);
+    if (!reviewedRow(m, row)) throw new Stop(`the price row for ${m} is missing or differs from the reviewed price and cap (Stage ${PROVIDER_NAME === 'kimi' ? '2A-6e' : '2A-6c'})`);
   }
   if (Number(before.unsettled) !== 0) throw new Stop(`${before.unsettled} reservation(s) are RESERVED or HELD: reconcile them first`);
-  record('PASS', 'spending disabled; only the free fake active; both paid models priced as reviewed and inactive; nothing unsettled',
+  record('PASS', `spending disabled; only the free fake active; ${P.models.join(', ')} priced as reviewed and inactive; nothing unsettled`,
     `committed ${before.committed} USD, ${before.ledger_rows} ledger rows; limits ${before.limits?.budget}/${before.limits?.stop}/${before.limits?.max}`);
 
   const fn = await mgmt(`/functions/${FN}`);
   if (fn?.status !== 'ACTIVE' || fn?.verify_jwt !== true) throw new Stop(`the deployed ${FN} is not ACTIVE with verify_jwt ON`);
   const src = decodeBody(await mgmt(`/functions/${FN}/body`, { raw: true }));
-  const srcProblems = deployedProblems(src ?? '');
-  if (src === null || srcProblems.length) throw new Stop(`the deployed function is not the reviewed Anthropic-capable version: ${srcProblems[0] ?? 'unreadable'} (deploy it with deploy-analyze-case-2a6d.sh first)`);
-  record('PASS', `${FN} ACTIVE, JWT check ON, deployed source is the reviewed Anthropic-capable version`);
+  const srcProblems = [...deployedProblems(src ?? ''), ...(PROVIDER_NAME === 'kimi' ? kimiDeployedProblems(src ?? '') : [])];
+  if (src === null || srcProblems.length) throw new Stop(`the deployed function is not the reviewed version: ${srcProblems[0] ?? 'unreadable'} (deploy it with deploy-analyze-case-2a6d.sh first)`);
+  record('PASS', `${FN} ACTIVE, JWT check ON, deployed source is the reviewed ${P.label}-capable version`);
   const names0 = await secretNames();
   if (names0.some((n) => PAID_SECRET.test(n))) throw new Stop('a paid-provider setting is already present among the function settings: run --paid-off first');
   if (!names0.includes('ANALYSIS_PROVIDER') || !names0.includes('ALLOW_FAKE_PROVIDER')) throw new Stop('the fake settings ANALYSIS_PROVIDER / ALLOW_FAKE_PROVIDER are missing');
@@ -375,24 +395,27 @@ async function run() {
 
   // ---- 2. confirmations
   out('');
-  out(`Provider-side limit: you stated USD ${LIMIT}. This script cannot read it: only you can confirm it in the Anthropic console.`);
-  const c1 = await ask(`Type ${LIMIT_PHRASE} to confirm the Anthropic workspace of this key has a spending limit of at most USD ${LIMIT} and allows global inference: `);
+  out(`Provider-side limit: you stated USD ${LIMIT}. This script cannot read it: only you can confirm it in ${P.console}.`);
+  const c1 = await ask(PROVIDER_NAME === 'kimi'
+    ? `Type ${LIMIT_PHRASE} to confirm the Kimi account of this key holds at most USD ${LIMIT} of credit (or has a spending limit of at most that): `
+    : `Type ${LIMIT_PHRASE} to confirm the Anthropic workspace of this key has a spending limit of at most USD ${LIMIT} and allows global inference: `);
   if (c1 !== LIMIT_PHRASE) throw new Stop('the provider-side spending limit was not confirmed: nothing was changed');
-  out(`About to: switch ${FN} to Anthropic (${ANALYST} / ${REVIEWER}), activate ${MODELS.join(' and ')}, enable spending, call ${FN} ONCE for ${ref},`);
+  out(`About to: switch ${FN} to ${P.label} (${ANALYST} / ${REVIEWER}), activate ${MODELS.join(' and ')}, enable spending, call ${FN} ONCE for ${ref},`);
   out(`then turn all of it off immediately. Most this can cost: USD ${est}.`);
   const c2 = await ask(`Type ${RUN_PHRASE} to run exactly one paid analysis (anything else cancels): `);
   if (c2 !== RUN_PHRASE) throw new Stop('not approved: nothing was changed');
 
   // ---- 3. the window
-  out('== Paid window');
+  out(`== Paid window (${P.label})`);
   secretsArmed = true;
-  await mgmt('/secrets', { method: 'POST', body: [
-    { name: 'ANALYSIS_PROVIDER', value: 'anthropic' }, { name: 'ALLOW_PAID_PROVIDER', value: 'staging-only' }, { name: 'ANTHROPIC_API_KEY', value: PROVIDER_KEY },
-    { name: 'ANALYST_MODEL', value: ANALYST }, { name: 'REVIEWER_MODEL', value: REVIEWER }, { name: 'ANTHROPIC_EFFORT', value: 'medium' },
-  ] });
+  const paidSettings = PROVIDER_NAME === 'kimi'
+    ? [{ name: 'ANALYSIS_PROVIDER', value: 'kimi' }, { name: 'ALLOW_PAID_PROVIDER', value: 'staging-only' }, { name: 'KIMI_API_KEY', value: PROVIDER_KEY }]
+    : [{ name: 'ANALYSIS_PROVIDER', value: 'anthropic' }, { name: 'ALLOW_PAID_PROVIDER', value: 'staging-only' }, { name: 'ANTHROPIC_API_KEY', value: PROVIDER_KEY },
+      { name: 'ANALYST_MODEL', value: ANALYST }, { name: 'REVIEWER_MODEL', value: REVIEWER }, { name: 'ANTHROPIC_EFFORT', value: 'medium' }];
+  await mgmt('/secrets', { method: 'POST', body: paidSettings });
   const names1 = await secretNames();
-  if (!['ANTHROPIC_API_KEY', 'ALLOW_PAID_PROVIDER', 'ANALYST_MODEL', 'REVIEWER_MODEL'].every((n) => names1.includes(n))) throw new Stop('the paid settings could not be confirmed written');
-  out('      function settings: Anthropic (key set; value never shown)');
+  if (!paidSettings.filter((x) => x.name !== 'ANALYSIS_PROVIDER').every((x) => names1.includes(x.name))) throw new Stop('the paid settings could not be confirmed written');
+  out(`      function settings: ${P.label} (key set; value never shown)`);
   dbArmed = true;
   const en = await sql('enable', enableSql(MODELS));
   if (Number(en[0]?.activated) !== MODELS.length || Number(en[0]?.enabled) !== 1) {
@@ -436,7 +459,7 @@ async function run() {
   expectOk(`reserved within the run budget (USD ${BUDGET}) and the database estimate`, l && Number(l.reserved_usd) <= BUDGET && Number(l.reserved_usd) <= est, `reserved USD ${l?.reserved_usd}`);
   expectOk('settled from reported usage (not HELD); actual within the reservation; no overrun',
     l?.status === 'SETTLED' && l.settled_by === 'REPORTED_USAGE' && Number(l.actual_usd) <= Number(l.reserved_usd) && l.overrun === false,
-    l?.status === 'HELD' ? 'HELD: usage unknown — reconcile it against the Anthropic console (runbook)' : `actual USD ${l?.actual_usd}`);
+    l?.status === 'HELD' ? `HELD: usage unknown — reconcile it against ${P.console} (runbook)` : `actual USD ${l?.actual_usd}`);
   out(`      tokens: analyst ${l?.analyst_input_tokens ?? '?'} in / ${l?.analyst_output_tokens ?? '?'} out; reviewer ${l?.reviewer_input_tokens ?? '?'} in / ${l?.reviewer_output_tokens ?? '?'} out`);
   expectOk(`committed spend grew by at most the run budget (USD ${BUDGET})`, Number(after.committed) - Number(before.committed) <= BUDGET,
     `${before.committed} -> ${after.committed}`);
@@ -451,7 +474,7 @@ async function run() {
   }
   const view = await A.c.rpc('client_get_case', { p_case_id: caseId });
   expectOk('client A\'s own case view carries nothing from the analysis or spending',
-    !view.error && !JSON.stringify(view.data ?? {}).includes(analysisId) && !/adversarial|hypothes|recommendation|verdict|reserved|usd|SPEND|claude/i.test(JSON.stringify(view.data ?? {})));
+    !view.error && !JSON.stringify(view.data ?? {}).includes(analysisId) && !/adversarial|hypothes|recommendation|verdict|reserved|usd|SPEND|claude|kimi|moonshot/i.test(JSON.stringify(view.data ?? {})));
   out(`Read the analysis in the founder workspace (case ${ref}). Its text is not printed here.`);
 }
 

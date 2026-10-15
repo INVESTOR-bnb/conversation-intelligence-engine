@@ -18,8 +18,9 @@
 #   * you type the staging project reference back exactly (the only project it can target);
 #   * the access token you paste (hidden) is shaped like a Supabase access token;
 #   * the function's current secrets contain NO paid-provider setting (ANALYSIS_PROVIDER other
-#     than fake is impossible to set from here; a key, ALLOW_PAID_PROVIDER or a model choice
-#     present means a paid configuration is live: turn it off first with
+#     than fake is impossible to set from here; an Anthropic or Kimi key (ANTHROPIC_* / KIMI_*),
+#     ALLOW_PAID_PROVIDER or a model choice present means a paid configuration is live: turn it
+#     off first with
 #     paid-pipeline-e2e.sh --paid-off).
 # Then it deploys ONLY analyze-case (never every function, never --prune) with the platform
 # JWT check ON (verify_jwt = true; never --no-verify-jwt), bundled by Supabase (--use-api),
@@ -34,7 +35,7 @@ REQUIRED_COMMIT=20cbdf2593e496b8cce4dc7fbaf8fd4bb198fe0a # Stage 2A-6c
 ROLLBACK_COMMIT=9ee3767ffbcca3706709c39469a74a19a033de62 # Stage 2A-5d-3b: the fake-only function deployed before 2A-6d
 CLI=supabase@2.117.0
 FN=analyze-case
-PAID_SECRETS='^(ANTHROPIC_[A-Z0-9_]*|ALLOW_PAID_PROVIDER|ANALYST_MODEL|REVIEWER_MODEL)$'
+PAID_SECRETS='^(ANTHROPIC_[A-Z0-9_]*|KIMI_[A-Z0-9_]*|ALLOW_PAID_PROVIDER|ANALYST_MODEL|REVIEWER_MODEL)$'
 
 refuse() { echo "REFUSED (nothing deployed): $*" >&2; exit 2; }
 mode=deploy
@@ -63,7 +64,7 @@ else
   git cat-file -e "$ROLLBACK_COMMIT^{commit}" 2>/dev/null || refuse "the rollback commit $ROLLBACK_COMMIT is not available in this checkout"
   git archive "$ROLLBACK_COMMIT" supabase/functions | tar -x -C "$work/src" || refuse "could not extract the rollback code"
   mv "$work/src/supabase/functions" "$work/src/functions"
-  if grep -rqE '@anthropic-ai|api\.anthropic\.com|sk-ant-|ANTHROPIC_API_KEY|openai|x-api-key' "$work/src/functions"; then refuse "the rollback code contains an AI-provider SDK, endpoint or key"; fi
+  if grep -rqE '@anthropic-ai|api\.anthropic\.com|sk-ant-|ANTHROPIC_API_KEY|api\.moonshot\.ai|KIMI_API_KEY|openai|x-api-key' "$work/src/functions"; then refuse "the rollback code contains an AI-provider SDK, endpoint or key"; fi
   what="the previous fake-only code (${ROLLBACK_COMMIT:0:7}), FAKE provider configured"
 fi
 

@@ -81,7 +81,7 @@ test('scripts: the staging project is the only target; no JWT bypass, no prune, 
   const deploy = readFileSync(join(APP, 'supabase', 'scripts', 'deploy-analyze-case-2a6d.sh'), 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
   expect(deploy).toMatch(/^REF=aqwdwswpmbnzmkvyuqil$/m);
   expect(deploy.match(/--project-ref/g)).toHaveLength(1);
-  expect(deploy).not.toMatch(/--no-verify-jwt|--prune|verify_jwt = false|ANTHROPIC_API_KEY=|ANALYSIS_PROVIDER=anthropic|ALLOW_PAID_PROVIDER=/);
+  expect(deploy).not.toMatch(/--no-verify-jwt|--prune|verify_jwt = false|ANTHROPIC_API_KEY=|KIMI_API_KEY=|ANALYSIS_PROVIDER=(anthropic|kimi)|ALLOW_PAID_PROVIDER=/);
   expect(deploy).toContain('cli secrets set ANALYSIS_PROVIDER=fake ALLOW_FAKE_PROVIDER=staging-only');
   const paid = readFileSync(join(APP, 'supabase', 'scripts', 'paid-pipeline-e2e.mjs'), 'utf8');
   expect(paid).toMatch(/^const REF = 'aqwdwswpmbnzmkvyuqil';$/m);
@@ -89,7 +89,7 @@ test('scripts: the staging project is the only target; no JWT bypass, no prune, 
   const off = readFileSync(join(APP, 'supabase', 'deploy', 'stage2a6d_paid_off.sql'), 'utf8').split('\n').filter((l) => !l.startsWith('--'));
   expect(off.filter((l) => /^\s*(update|delete|insert|alter|drop|create|grant|revoke|truncate)\b/i.test(l))).toEqual([
     'update private.ai_spend_config set enabled = false, updated_at = now() where id;',
-    "update private.ai_model_prices set active = false where model in ('claude-opus-5-5', 'claude-sonnet-5-5');",
+    "update private.ai_model_prices set active = false where model in ('claude-opus-5-5', 'claude-sonnet-5-5', 'kimi-k3');",
   ]);
 });
 
@@ -179,7 +179,7 @@ test('rollback: redeploys the previous fake-only code (9ee3767) with the fake se
 });
 
 test('deploy and rollback refuse while a paid-provider setting is present (nothing deployed)', () => {
-  for (const name of ['ANTHROPIC_API_KEY', 'ALLOW_PAID_PROVIDER', 'ANALYST_MODEL', 'REVIEWER_MODEL', 'ANTHROPIC_BASE_URL']) {
+  for (const name of ['ANTHROPIC_API_KEY', 'KIMI_API_KEY', 'ALLOW_PAID_PROVIDER', 'ANALYST_MODEL', 'REVIEWER_MODEL', 'ANTHROPIC_BASE_URL']) {
     for (const args of [[], ['--rollback']]) {
       const d = deployEnv({ secrets: [{ name: 'ANALYSIS_PROVIDER', value: 'x' }, { name, value: 'digest' }] });
       try {

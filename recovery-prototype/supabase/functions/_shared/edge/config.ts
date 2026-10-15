@@ -14,12 +14,12 @@
 //   ANTHROPIC_EFFORT         low | medium | high (default medium).
 //   Every other ANTHROPIC_* variable the SDK would read by itself (base URL, other
 //   credentials, profiles, extra headers, SDK logging) must be UNSET, or the function refuses.
-//   Kimi, only with ANALYSIS_PROVIDER=kimi (not set anywhere yet):
+//   Kimi, only with ANALYSIS_PROVIDER=kimi (set only inside a founder-approved paid run):
 //   ALLOW_PAID_PROVIDER      must be exactly 'staging-only'; only the staging project or a local host.
 //   KIMI_API_KEY             the provider key (shape-checked only; never logged or returned).
-//   The model is fixed (kimi-k3, both analyst and reviewer). Until its prices are set in
-//   kimiProvider.ts (a separately authorised pricing step) the function refuses with
-//   MODEL_PRICE_NOT_CONFIGURED.
+//   The model is fixed (kimi-k3, both analyst and reviewer), priced in kimiProvider.ts; a model
+//   without prices there is refused with MODEL_PRICE_NOT_CONFIGURED. Its database price row is
+//   INACTIVE, so the reservation refuses it (MODEL_NOT_PRICED) unless a paid run activates it.
 //   ANALYZE_ALLOWED_ORIGINS  comma-separated browser origins (default: the staging site).
 //   ANALYZE_DEADLINE_MS      whole-run deadline (default 110000, clamped to 30000-130000).
 //

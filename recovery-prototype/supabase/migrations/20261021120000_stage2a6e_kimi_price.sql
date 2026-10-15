@@ -1,0 +1,34 @@
+-- Stage 2A-6e — the price for kimi-k3 (Moonshot AI), INACTIVE.
+-- No provider credential exists; spending stays disabled.
+--
+-- One row is added to private.ai_model_prices and nothing else changes: no table, column,
+-- function, policy, privilege, setting or existing row (the fake provider's and the
+-- Anthropic rows are untouched).
+--
+-- Values (official Kimi K3 prices, as confirmed by the founder from the Moonshot
+-- documentation): regular input USD 3, cache write (5-minute TTL) USD 3, cached input
+-- USD 0.30, output USD 15, per million tokens. The ledger has one input price, applied to
+-- ALL prompt_tokens (which include the cached and cache-written tokens), so it is set to
+-- USD 3: no cached-input discount is taken and cache writes are never understated. Output,
+-- including reasoning tokens, is USD 15. These must equal the code allowlist
+-- (supabase/functions/_shared/edge/kimiProvider.ts, KIMI_MODELS) exactly: before every
+-- dispatch the pipeline compares the prices and cap snapshotted in the reservation with the
+-- allowlist and refuses any difference (SPEND_TERMS_MISMATCH). The tests compare them.
+--
+-- max_output_tokens = 8,000: the per-call cap the reservation prices and the request's
+-- max_completion_tokens (analyst and reviewer each).
+--
+-- active = false: the reservation function refuses inactive models (MODEL_NOT_PRICED), so
+-- kimi-k3 cannot be reserved, and so cannot be called, until a separately approved paid run
+-- activates it for that run only. The budget (USD 20), stop threshold (USD 18), USD 1
+-- per-analysis limit and the disabled state are not touched.
+--
+-- What one analysis may cost under the existing reservation formula (E = 6 x text bytes +
+-- 64 per message; analyst input bound 8000 + E; reviewer input bound 8000 + E + 2 x 8000):
+--   kimi-k3 analyst + kimi-k3 reviewer   0.336 + 6E/1e6  -> fits USD 1 up to E ~ 110,000
+--   (about 18 KB of conversation text); larger cases are refused (RESERVATION_TOO_LARGE).
+--
+-- Rollback: supabase/deploy/stage2a6e_rollback.sql (removes the row while inactive and unused).
+
+insert into private.ai_model_prices (model, input_usd_per_mtok, output_usd_per_mtok, max_output_tokens, active, note) values
+  ('kimi-k3', 3, 15, 8000, false, 'Stage 2A-6e: Kimi K3 list price; input at the regular/cache-write price, no cached discount. Inactive until separately approved.');

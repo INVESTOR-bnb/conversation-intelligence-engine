@@ -1,24 +1,25 @@
 // Kimi adapter — OFFLINE tests. A local mock of the two Moonshot endpoints (real fetch, 127.0.0.1
 // only), the real pipeline over the ledger-mirroring FakeDb, configuration and the source guard.
 // No request leaves the machine; the key is a synthetic string; all conversations are synthetic.
-// Prices used here (3 / 15 per million) are SYNTHETIC TEST VALUES, not Kimi's prices.
+// Prices: kimi-k3's configured 3 / 15 per million (Stage 2A-6e); no real request is ever made.
 
 import { expect, test } from '@playwright/test';
 import { createServer, type Server } from 'node:http';
 import {
-  ANALYST_SCHEMA, REVIEWER_SCHEMA, runAnalysisPipeline, schemaProblems, validateOutput, type ModelConfig, type PipelineConfig, type ProviderRequest,
+  ANALYST_SCHEMA, DbError, REVIEWER_SCHEMA, runAnalysisPipeline, schemaProblems, validateOutput, type ModelConfig, type PipelineConfig, type ProviderRequest,
 } from '../../supabase/functions/_shared/analysis-pipeline/index.ts';
 import { readConfig, STAGING_URL } from '../../supabase/functions/_shared/edge/config.ts';
 import { createAnalyzeCaseHandler } from '../../supabase/functions/_shared/edge/handler.ts';
 import {
   chatBody, estimateBody, KIMI_MODEL, KIMI_MODELS, KimiProvider, kimiModelConfig, parseCompletion, strictSchema, stripOptionalNulls,
 } from '../../supabase/functions/_shared/edge/kimiProvider.ts';
+import { readFileSync } from 'node:fs';
 import { readTree, sourceProblems } from '../../supabase/scripts/function-source-guard.mjs';
 import { analystAnswer, CASE, FakeDb, manifest, MemoryLogger, reviewAnswer } from '../pipeline/fakes';
 
 const KEY = 'sk-TESTONLY0synthetic0not0a0real0key000000';
 const REASONING = 'SYNTHETIC-REASONING-CONTENT-must-never-leave-the-adapter';
-const MODEL: ModelConfig = { model: KIMI_MODEL, inputPerMTok: 3, outputPerMTok: 15, maxOutputTokens: 8000, approvedOutputCap: 8000 };
+const MODEL: ModelConfig = kimiModelConfig(KIMI_MODEL)!;
 
 /** A chat-completions response as the adapter expects it (reasoning_content included, to prove it is ignored). */
 function completion(value: unknown, over: Record<string, unknown> = {}, usage: Record<string, unknown> = {}, choice: Record<string, unknown> = {}) {
@@ -295,7 +296,7 @@ test('10/11. HTTP 401, 429 and 500: one request each (no retry, no other model),
 
 // ---------------------------------------------------------------- 13. configuration and access controls
 
-test('13a. configuration: fake stays the default; Kimi needs the paid flag, staging, a key — and refuses until prices are configured', () => {
+test('13a. configuration: fake stays the default; Kimi needs the paid flag, staging and a key; kimi-k3 is priced, an unpriced model is refused', () => {
   const env = (over: Record<string, string | undefined> = {}, url = STAGING_URL) => (k: string) => ({
     SUPABASE_URL: url, SUPABASE_PUBLISHABLE_KEYS: JSON.stringify({ default: 'sb_publishable_SyntheticTestKey_0123' }), SUPABASE_SECRET_KEYS: JSON.stringify({ default: 'sb_secret_SyntheticTestKey_0123' }),
     ANALYSIS_PROVIDER: 'kimi', ALLOW_PAID_PROVIDER: 'staging-only', KIMI_API_KEY: KEY, ...over,
@@ -307,25 +308,36 @@ test('13a. configuration: fake stays the default; Kimi needs the paid flag, stag
   for (const k of [undefined, '', 'not-a-key', 'sk-short', `${KEY}\nX-Injected: 1`, 'sk-ant-api03-SyntheticAnthropicShapedKey0000000']) {
     expect(readConfig(env({ KIMI_API_KEY: k })), String(k)).toEqual({ ok: false, code: 'PROVIDER_KEY_INVALID' });
   }
-  // Everything valid: still refused, because kimi-k3's prices are deliberately not set in this phase.
-  expect(KIMI_MODELS['kimi-k3']).toEqual({ inputPerMTok: null, outputPerMTok: null, maxOutputTokens: 8000, approvedOutputCap: 8000 });
-  expect(kimiModelConfig('kimi-k3')).toBeNull();
-  expect(readConfig(env())).toEqual({ ok: false, code: 'MODEL_PRICE_NOT_CONFIGURED' });
+  // kimi-k3: 3 input (regular and cache-write; no cached discount) / 15 output, cap 8000 per call.
+  expect(KIMI_MODELS).toEqual({ 'kimi-k3': { inputPerMTok: 3, outputPerMTok: 15, maxOutputTokens: 8000, approvedOutputCap: 8000 } });
+  expect(Object.isFrozen(KIMI_MODELS) && Object.isFrozen(KIMI_MODELS['kimi-k3'])).toBe(true);
+  expect(kimiModelConfig('kimi-k3')).toEqual({ model: 'kimi-k3', inputPerMTok: 3, outputPerMTok: 15, maxOutputTokens: 8000, approvedOutputCap: 8000 });
+  expect(kimiModelConfig('kimi-k2')).toBeNull();
+  expect(readConfig(env())).toMatchObject({ ok: true, config: { provider: 'kimi', anthropic: null, kimi: { model: 'kimi-k3' } } });
 });
 
-test('13b. the function refuses ANALYSIS_PROVIDER=kimi before any request (no auth call, no provider call)', async () => {
-  const calls: string[] = [];
-  const handler = createAnalyzeCaseHandler({
-    env: (k) => ({ SUPABASE_URL: 'http://127.0.0.1:9', SUPABASE_PUBLISHABLE_KEYS: JSON.stringify({ default: 'sb_publishable_SyntheticTestKey_0123' }),
-      SUPABASE_SECRET_KEYS: JSON.stringify({ default: 'sb_secret_SyntheticTestKey_0123' }), ANALYSIS_PROVIDER: 'kimi', ALLOW_PAID_PROVIDER: 'staging-only', KIMI_API_KEY: KEY } as Record<string, string>)[k],
-    fetch: (i) => { calls.push(String(i)); return Promise.reject(new Error('no network in this test')); },
-    log: (l) => calls.push(`log ${l}`),
-  });
-  const res = await handler(new Request('https://edge.local/functions/v1/analyze-case', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer x' },
-    body: JSON.stringify({ case_id: CASE }) }));
-  expect([res.status, await res.json()]).toEqual([503, { outcome: 'NOT_STARTED', code: 'MODEL_PRICE_NOT_CONFIGURED', analysis_id: null }]);
-  expect(calls.filter((c) => !c.startsWith('log '))).toEqual([]);
-  expect(calls.join('\n')).not.toContain(KEY);
+test('13b. with Kimi configured, an inactive database price stops the run at the reservation: nothing is sent to Moonshot', async () => {
+  reset();
+  const s = await setup();
+  s.db.reserveError = new DbError('MODEL_NOT_PRICED');
+  expect(await s.run()).toMatchObject({ outcome: 'FAILED' });
+  expect(seen).toHaveLength(0);
+  expect(s.db.calls.filter((x) => /^(reserve|dispatch|usage)/.test(x))).toEqual(['reserve:kimi-k3:kimi-k3']);
+  expect(s.db.spend()).toBe('NONE');
+});
+
+test('13b-2. the pricing migration, its self-check, its verification and the code allowlist carry the same prices and cap', () => {
+  const read = (p: string) => readFileSync(new URL(`../../supabase/${p}`, import.meta.url), 'utf8');
+  const migration = read('migrations/20261021120000_stage2a6e_kimi_price.sql');
+  const rows = [...migration.matchAll(/^\s+\('([a-z0-9-]+)', ([0-9.]+), ([0-9.]+), ([0-9]+), (true|false), '/gm)]
+    .map((m) => [m[1], { inputPerMTok: Number(m[2]), outputPerMTok: Number(m[3]), cap: Number(m[4]), active: m[5] === 'true' }] as const);
+  expect(Object.fromEntries(rows)).toEqual(Object.fromEntries(Object.entries(KIMI_MODELS).map(([model, m]) =>
+    [model, { inputPerMTok: m.inputPerMTok, outputPerMTok: m.outputPerMTok, cap: m.approvedOutputCap, active: false }])));
+  const m = KIMI_MODELS['kimi-k3'];
+  expect(read('deploy/parts-2a6e/90_postcheck.sql')).toContain(`(${m.inputPerMTok}::numeric, ${m.outputPerMTok}::numeric, ${m.approvedOutputCap}, false)`);
+  expect(read('deploy/stage2a6e_verify.sql')).toContain(`input_usd_per_mtok = ${m.inputPerMTok} and output_usd_per_mtok = ${m.outputPerMTok} and max_output_tokens = ${m.approvedOutputCap}`);
+  expect(read('deploy/stage2a6e_deploy.sql')).toContain(migration);
+  expect(read('scripts/paid-pipeline-e2e.mjs')).toContain(`'kimi-k3': Object.freeze({ in: ${m.inputPerMTok}, out: ${m.outputPerMTok}, cap: ${m.approvedOutputCap} })`);
 });
 
 test('13c. screenshots are refused for the paid provider before any reservation or request', async () => {

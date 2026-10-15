@@ -79,6 +79,13 @@ export function deployedProblems(text) {
   return problems;
 }
 
+/** What a deployed bundle must also contain before a paid KIMI run: the reviewed Kimi adapter (Stage 2A-6e). */
+export const KIMI_DEPLOYED_MARKERS = ['api.moonshot.ai', 'max_completion_tokens', 'KIMI_API_KEY', 'MODEL_PRICE_NOT_CONFIGURED'];
+export function kimiDeployedProblems(text) {
+  if (typeof text !== 'string' || text.length === 0) return ['the deployed source could not be read'];
+  return KIMI_DEPLOYED_MARKERS.filter((m) => !text.includes(m)).map((m) => `the deployed source is not the reviewed Kimi-capable version (missing: ${m})`);
+}
+
 /** Every .ts/.json file under the functions directory, as {path, text}. */
 export function readTree(dir) {
   const out = [];
