@@ -8,6 +8,8 @@
 //   * any other non-relative import (npm:, jsr:, https:, bare names) and dynamic import();
 //   * anything shaped like an Anthropic key (sk-ant-…) — keys live only in function secrets;
 //   * any OpenAI reference; the Anthropic endpoint anywhere but anthropicProvider.ts;
+//   * the Kimi (Moonshot) endpoint anywhere but kimiProvider.ts, and anything shaped like a
+//     Kimi key (sk-… with a long token) — the Kimi adapter uses plain fetch, no library;
 //   * retries (maxRetries other than 0) and a model `fallbacks` parameter.
 // And the reviewed safeguards must be present: the fake guard, the paid-provider guard
 // (staging-only, unsafe environment refused), the spending controls, the reservation terms
@@ -31,6 +33,7 @@ export const REQUIRED_MARKERS = [
   'CAP_NOT_APPROVED',
 ];
 const KEY_SHAPED = /sk-ant-[A-Za-z0-9][A-Za-z0-9_-]{19,}/;
+const KIMI_KEY_SHAPED = /\bsk-[A-Za-z0-9]{32,}/;
 const OPENAI = /openai/i;
 const RETRIES = /maxRetries\s*:\s*[1-9]/;
 const FALLBACKS = /\bfallbacks\s*:/;
@@ -43,6 +46,8 @@ export function sourceProblems(files) {
   const all = files.map((f) => f.text).join('\n');
   for (const { path, text } of files) {
     if (KEY_SHAPED.test(text)) problems.push(`${path}: contains something shaped like an Anthropic key`);
+    if (KIMI_KEY_SHAPED.test(text)) problems.push(`${path}: contains something shaped like a Kimi key`);
+    if (text.includes('api.moonshot.ai') && path !== '_shared/edge/kimiProvider.ts') problems.push(`${path}: names the Kimi endpoint`);
     if (OPENAI.test(text)) problems.push(`${path}: mentions OpenAI`);
     if (RETRIES.test(text)) problems.push(`${path}: sets maxRetries above 0`);
     if (FALLBACKS.test(text)) problems.push(`${path}: sets a fallbacks parameter`);
@@ -67,6 +72,7 @@ export function deployedProblems(text) {
   const problems = [];
   if (typeof text !== 'string' || text.length === 0) return ['the deployed source could not be read'];
   if (KEY_SHAPED.test(text)) problems.push('the deployed source contains something shaped like an Anthropic key');
+  if (KIMI_KEY_SHAPED.test(text)) problems.push('the deployed source contains something shaped like a Kimi key');
   for (const marker of [...REQUIRED_MARKERS, '@anthropic-ai/sdk@0.133.0']) {
     if (!text.includes(marker)) problems.push(`the deployed source is not the reviewed Anthropic-capable version (missing: ${marker})`);
   }

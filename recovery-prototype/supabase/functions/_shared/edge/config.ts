@@ -14,12 +14,19 @@
 //   ANTHROPIC_EFFORT         low | medium | high (default medium).
 //   Every other ANTHROPIC_* variable the SDK would read by itself (base URL, other
 //   credentials, profiles, extra headers, SDK logging) must be UNSET, or the function refuses.
+//   Kimi, only with ANALYSIS_PROVIDER=kimi (not set anywhere yet):
+//   ALLOW_PAID_PROVIDER      must be exactly 'staging-only'; only the staging project or a local host.
+//   KIMI_API_KEY             the provider key (shape-checked only; never logged or returned).
+//   The model is fixed (kimi-k3, both analyst and reviewer). Until its prices are set in
+//   kimiProvider.ts (a separately authorised pricing step) the function refuses with
+//   MODEL_PRICE_NOT_CONFIGURED.
 //   ANALYZE_ALLOWED_ORIGINS  comma-separated browser origins (default: the staging site).
 //   ANALYZE_DEADLINE_MS      whole-run deadline (default 110000, clamped to 30000-130000).
 //
 // Nothing here is ever logged or returned. Any problem yields one fixed code.
 
 import { ANTHROPIC_EFFORTS, anthropicModelConfig, type AnthropicEffort } from './anthropicProvider.ts';
+import { KIMI_MODEL, kimiModelConfig } from './kimiProvider.ts';
 
 /** The only hosted project the fake (and, in Stage 2A-6b, the paid) provider may write to (staging). */
 export const STAGING_URL = 'https://aqwdwswpmbnzmkvyuqil.supabase.co';
@@ -32,15 +39,17 @@ export interface EdgeConfig {
   publishableKey: string;
   /** New secret key (sb_secret_…, sent on `apikey` only) or legacy service_role JWT (eyJ…, also as Bearer). */
   serviceKey: string;
-  provider: 'fake' | 'anthropic';
+  provider: 'fake' | 'anthropic' | 'kimi';
   /** Only when provider is 'anthropic'. */
   anthropic: { apiKey: string; analystModel: string; reviewerModel: string; effort: AnthropicEffort } | null;
+  /** Only when provider is 'kimi'. */
+  kimi: { apiKey: string; model: string } | null;
   allowedOrigins: string[];
   deadlineMs: number;
 }
 
 export type ConfigCode = 'CONFIG_INVALID' | 'PROVIDER_NOT_CONFIGURED' | 'FAKE_PROVIDER_NOT_ALLOWED' | 'PAID_PROVIDER_NOT_ALLOWED'
-  | 'PROVIDER_KEY_INVALID' | 'PROVIDER_ENV_UNSAFE' | 'MODEL_NOT_ALLOWED';
+  | 'PROVIDER_KEY_INVALID' | 'PROVIDER_ENV_UNSAFE' | 'MODEL_NOT_ALLOWED' | 'MODEL_PRICE_NOT_CONFIGURED';
 export type ConfigResult = { ok: true; config: EdgeConfig } | { ok: false; code: ConfigCode };
 
 /**
@@ -56,6 +65,8 @@ export const UNSAFE_PROVIDER_ENV = [
 ] as const;
 /** The shape of an Anthropic API key (the value itself is never logged or returned). */
 const ANTHROPIC_KEY = /^sk-ant-[A-Za-z0-9_-]{20,300}$/;
+/** The shape of a Kimi (Moonshot) API key, as far as it is checked (UNVERIFIED beyond the sk- prefix). */
+const KIMI_KEY = /^sk-[A-Za-z0-9_-]{20,300}$/;
 
 function defaultKey(json: string | undefined): string | null {
   if (!json) return null;
@@ -97,6 +108,7 @@ export function readConfig(env: (name: string) => string | undefined): ConfigRes
   // Only where neither provider can be mistaken for production: the staging project or a local host.
   const provider = env('ANALYSIS_PROVIDER');
   let anthropic: EdgeConfig['anthropic'] = null;
+  let kimi: EdgeConfig['kimi'] = null;
   if (provider === 'fake') {
     if (env('ALLOW_FAKE_PROVIDER') !== 'staging-only' || !(supabaseUrl === STAGING_URL || local)) {
       return { ok: false, code: 'FAKE_PROVIDER_NOT_ALLOWED' };
@@ -114,6 +126,14 @@ export function readConfig(env: (name: string) => string | undefined): ConfigRes
     const effort = (env('ANTHROPIC_EFFORT') ?? 'medium') as AnthropicEffort;
     if (!ANTHROPIC_EFFORTS.includes(effort)) return { ok: false, code: 'CONFIG_INVALID' };
     anthropic = { apiKey, analystModel, reviewerModel, effort };
+  } else if (provider === 'kimi') {
+    if (env('ALLOW_PAID_PROVIDER') !== 'staging-only' || !(supabaseUrl === STAGING_URL || local)) {
+      return { ok: false, code: 'PAID_PROVIDER_NOT_ALLOWED' };
+    }
+    const apiKey = env('KIMI_API_KEY') ?? '';
+    if (!KIMI_KEY.test(apiKey) || apiKey.startsWith('sk-ant-')) return { ok: false, code: 'PROVIDER_KEY_INVALID' };
+    if (!kimiModelConfig(KIMI_MODEL)) return { ok: false, code: 'MODEL_PRICE_NOT_CONFIGURED' };
+    kimi = { apiKey, model: KIMI_MODEL };
   } else {
     return { ok: false, code: 'PROVIDER_NOT_CONFIGURED' };
   }
@@ -126,5 +146,5 @@ export function readConfig(env: (name: string) => string | undefined): ConfigRes
   const d = Number(env('ANALYZE_DEADLINE_MS') ?? '110000');
   const deadlineMs = Number.isFinite(d) ? Math.min(130000, Math.max(30000, Math.trunc(d))) : 110000;
 
-  return { ok: true, config: { supabaseUrl, publishableKey, serviceKey, provider, anthropic, allowedOrigins, deadlineMs } };
+  return { ok: true, config: { supabaseUrl, publishableKey, serviceKey, provider, anthropic, kimi, allowedOrigins, deadlineMs } };
 }

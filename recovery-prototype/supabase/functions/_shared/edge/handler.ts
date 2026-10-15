@@ -26,6 +26,7 @@ import { runAnalysisPipeline, type PipelineLogger, type PipelineResult } from '.
 import { authenticateFounder } from './auth.ts';
 import { anthropicModelConfig, AnthropicProvider, type MessagesClient } from './anthropicProvider.ts';
 import { readConfig, type EdgeConfig } from './config.ts';
+import { KimiProvider, kimiModelConfig } from './kimiProvider.ts';
 import { FAKE_MODEL_CONFIG, FakeAnalysisProvider } from './fakeProvider.ts';
 import { founderRest, serviceRest, UUID } from './supabaseRest.ts';
 
@@ -166,16 +167,19 @@ export function createAnalyzeCaseHandler(deps: HandlerDeps): (req: Request) => P
       const rest = { supabaseUrl: config.supabaseUrl, publishableKey: config.publishableKey, fetch: deps.fetch, timeoutMs: 15000, maxFileBytes: 5_242_880 };
       const logger: PipelineLogger = { event: (name, fields) => log(name, fields ?? {}) };
       const paid = config.anthropic;
+      const kimi = config.kimi;
+      const provider = kimi ? new KimiProvider({ apiKey: kimi.apiKey, fetch: deps.fetch })
+        : paid ? new AnthropicProvider(deps.anthropicClient!(paid.apiKey), paid.effort) : new FakeAnalysisProvider();
       const result: PipelineResult = await runAnalysisPipeline(parsed.caseId, {
         founderDb: founderRest(rest, auth.jwt),
         serviceDb: serviceRest(rest, config.serviceKey),
-        provider: paid ? new AnthropicProvider(deps.anthropicClient!(paid.apiKey), paid.effort) : new FakeAnalysisProvider(),
+        provider,
         logger,
         config: {
-          analyst: paid ? anthropicModelConfig(paid.analystModel)! : FAKE_MODEL_CONFIG,
-          reviewer: paid ? anthropicModelConfig(paid.reviewerModel)! : FAKE_MODEL_CONFIG,
-          textOnly: paid !== null,
-          callTimeoutMs: paid ? PAID_CALL_TIMEOUT_MS : FAKE_CALL_TIMEOUT_MS,
+          analyst: kimi ? kimiModelConfig(kimi.model)! : paid ? anthropicModelConfig(paid.analystModel)! : FAKE_MODEL_CONFIG,
+          reviewer: kimi ? kimiModelConfig(kimi.model)! : paid ? anthropicModelConfig(paid.reviewerModel)! : FAKE_MODEL_CONFIG,
+          textOnly: paid !== null || kimi !== null,
+          callTimeoutMs: paid || kimi ? PAID_CALL_TIMEOUT_MS : FAKE_CALL_TIMEOUT_MS,
           deadlineMs: Math.max(1000, config.deadlineMs - (now() - started)),
           completionReserveMs: 15000,
           maxScreenshotBytes: 5_242_880,
