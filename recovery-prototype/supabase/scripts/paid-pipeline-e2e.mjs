@@ -54,7 +54,7 @@ import { createInterface } from 'node:readline';
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 import { createClient } from '@supabase/supabase-js';
 import { deployedProblems, kimiDeployedProblems } from './function-source-guard.mjs';
-import { publishableKeyProblem, stagingUrlProblem } from './live-guards.mjs';
+import { accessToken, publishableKeyProblem, stagingUrlProblem } from './live-guards.mjs';
 
 const REF = 'aqwdwswpmbnzmkvyuqil';
 const MGMT = 'https://api.supabase.com';
@@ -98,8 +98,10 @@ const env = (k) => {
   secrets.push(v);
   return v;
 };
-const TOKEN = env('SUPABASE_ACCESS_TOKEN');
-if (!/^sbp_[A-Za-z0-9_]{20,}$/.test(TOKEN)) { err('refused: SUPABASE_ACCESS_TOKEN is not a Supabase personal access token (sbp_…).'); process.exit(2); }
+const pat = accessToken(env('SUPABASE_ACCESS_TOKEN'));
+if (pat.problem) { err(`refused: SUPABASE_ACCESS_TOKEN is not a Supabase personal access token (sbp_…): ${pat.problem}.`); process.exit(2); }
+const TOKEN = pat.token;
+secrets.push(TOKEN);
 
 // ---------------------------------------------------------------- Management API (fixed statements only)
 class Stop extends Error {}

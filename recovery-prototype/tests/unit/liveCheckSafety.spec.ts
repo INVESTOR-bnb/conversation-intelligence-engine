@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, test } from '@playwright/test';
 // @ts-expect-error plain ES module without type declarations
-import { STAGING_URL, publishableKeyProblem, stagingUrlProblem } from '../../supabase/scripts/live-guards.mjs';
+import { STAGING_URL, accessToken, publishableKeyProblem, stagingUrlProblem } from '../../supabase/scripts/live-guards.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../../supabase/scripts/storage-live-check.mjs', import.meta.url));
 const FAKE = pathToFileURL(fileURLToPath(new URL('./fixtures/fake-supabase.mjs', import.meta.url))).href;
@@ -108,6 +108,45 @@ test('a missing account value stops the script before any request', () => {
   expect(out).toContain('missing environment variable FOUNDER_PASSWORD');
   expect(entries).toEqual([]);
   expectNothingSecret(out);
+});
+
+// ------------------------------------------------------------- personal access token guard (synthetic values only)
+
+const CLASSIC_PAT = `sbp_${'0123456789abcdef'.repeat(2)}01234567`; // sbp_ + 40 hex
+const SCOPED_PAT = `sbp_fc${'SyntheticScoped0'.repeat(2)}0123456`; // sbp_fc… (scoped)
+
+test('access token: classic and scoped (sbp_fc…) personal access tokens are accepted unchanged', () => {
+  for (const t of [CLASSIC_PAT, SCOPED_PAT, `sbp_${'a'.repeat(20)}`]) expect(accessToken(t), t.slice(0, 6)).toEqual({ token: t });
+});
+
+test('access token: invisible characters pasted at either end are trimmed; nothing else changes', () => {
+  for (const [name, raw] of [['trailing carriage return', `${SCOPED_PAT}\r`], ['trailing line break', `${SCOPED_PAT}\r\n`], ['byte-order mark', `\ufeff${SCOPED_PAT}`],
+    ['non-breaking space', `${SCOPED_PAT}\u00a0`], ['zero-width space', `\u200b${SCOPED_PAT}\u200b`], ['word joiner', `${SCOPED_PAT}\u2060`], ['spaces and tabs', ` \t${CLASSIC_PAT}\t `]]) {
+    const t = raw.trim() === SCOPED_PAT || raw.includes(SCOPED_PAT) ? SCOPED_PAT : CLASSIC_PAT;
+    expect(accessToken(raw), name).toEqual({ token: t });
+  }
+});
+
+test('access token: refused with a reason that never contains the value', () => {
+  for (const [name, raw, reason] of [
+    ['nothing', '', 'no access token given'], ['only invisible characters', ' \r\ufeff ', 'no access token given'], ['not a string', undefined, 'no access token given'],
+    ['a secret API key', ['sb', 'secret', 'SyntheticTestOnly0123456789'].join('_'), 'a secret API key was given'],
+    ['a publishable key', 'sb_publishable_SyntheticTestOnly0123456789', 'a publishable key was given'],
+    ['a JWT', 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.c2ln', 'a JWT was given'],
+    ['another prefix', 'sbx_0123456789012345678901234', 'does not start with sbp_'],
+    ['too short', 'sbp_fc0123', 'too short (10 characters'],
+    ['a hyphen inside', `${SCOPED_PAT.slice(0, 12)}-${SCOPED_PAT.slice(12)}`, 'a hyphen at character 13'],
+    ['a space inside', `${SCOPED_PAT.slice(0, 12)} ${SCOPED_PAT.slice(12)}`, 'a space at character 13'],
+    ['a line break inside', `${SCOPED_PAT.slice(0, 12)}\r${SCOPED_PAT.slice(12)}`, 'a line break at character 13'],
+    ['a zero-width space inside', `${SCOPED_PAT.slice(0, 12)}\u200b${SCOPED_PAT.slice(12)}`, 'an invisible character at character 13'],
+    ['a non-ASCII letter inside', `${SCOPED_PAT.slice(0, 12)}é${SCOPED_PAT.slice(12)}`, 'a non-ASCII character at character 13'],
+    ['a dot inside', `${SCOPED_PAT.slice(0, 12)}.${SCOPED_PAT.slice(12)}`, 'a dot at character 13'],
+  ] as [string, unknown, string][]) {
+    const r = accessToken(raw);
+    expect(r, name).not.toHaveProperty('token');
+    expect(r.problem, name).toContain(reason);
+    if (typeof raw === 'string' && raw.trim().length > 8) expect(r.problem, name).not.toContain(raw.trim().slice(-8));
+  }
 });
 
 // ------------------------------------------------------------- publishable key guard

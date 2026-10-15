@@ -465,6 +465,24 @@ for (const [name, over, message] of [
   });
 }
 
+test('a token pasted with invisible characters at its ends (carriage return, byte-order mark) is trimmed and used as is', async () => {
+  const r = await run(null, [], { SUPABASE_ACCESS_TOKEN: `\ufeff${PAT}\r` });
+  expect(r.out).not.toContain('not a Supabase personal access token');
+  expect(mgmtLog.length).toBeGreaterThan(0); // the Management API accepted exactly the trimmed token
+  expect(r.code).toBe(2); // no approval typed: nothing enabled
+  expect(enabled()).toBe('f');
+  expect(r.out).not.toContain(PAT);
+});
+
+test('a token with a hyphen inside is refused before any request; the reason names the character kind, never the token', async () => {
+  const bad = `${PAT.slice(0, 12)}-${PAT.slice(12)}`;
+  const r = await run(PHRASE, [], { SUPABASE_ACCESS_TOKEN: bad });
+  expect(r.code).toBe(2);
+  expect(r.out).toContain('not a Supabase personal access token (sbp_…): it contains a hyphen at character 13');
+  expect(r.out).not.toContain(PAT.slice(4, 12));
+  expect(mgmtLog).toEqual([]);
+});
+
 test('the script contains only its fixed SQL: two writes (guarded enable, disable), everything else reads', () => {
   const src = readFileSync(SCRIPT, 'utf8');
   expect(src.match(/update private\.ai_spend_config/g)).toHaveLength(3); // enable, disable, and the printed restore SQL
