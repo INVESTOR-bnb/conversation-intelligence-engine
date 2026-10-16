@@ -43,3 +43,27 @@ cd /workspaces/conversation-intelligence-engine/recovery-prototype && git checko
 | "HELD" in a paid-run result | Tell me the analysis id; I give you the one-line reconciliation SQL |
 | "Run analysis" says the service is unreachable | Reload the page: the case state shows whether anything started |
 | A business sees something it shouldn't | Stop sharing the link and tell me. Access is enforced by the database, tested 51/51 on staging |
+
+## Demo: a Nigerian training academy (synthetic — every name, fee and reply is invented)
+1. Sign in as the **test business** → New case → Reference `DEMO-ACADEMY-1`, product
+   "Data analysis course", then paste:
+   ```
+   [05/10/2026, 19:12] Synthetic Prospect: Good evening. I want to ask about the data analysis course. When is the next class?
+   [05/10/2026, 19:40] Synthetic Academy B: Good evening! Next cohort starts 20 October, 8 weeks, weekends.
+   [05/10/2026, 19:41] Synthetic Prospect: How much is it?
+   [05/10/2026, 19:55] Synthetic Academy B: The fee is 250,000.
+   [05/10/2026, 20:03] Synthetic Prospect: Ok. Can it be paid in instalments?
+   [06/10/2026, 11:30] Synthetic Academy B: Full payment is required before resumption.
+   [09/10/2026, 10:00] Synthetic Academy B: Hello, registration closes soon. Should I reserve your seat?
+   ```
+   Submit.
+2. Sign in as **founder** → open the case → Run analysis → review the evidence, the competing
+   explanations and the reviewer's challenge (the unanswered instalment question is the friction to look for).
+3. Approve or edit the message → Release.
+4. Back as the business → Open the case → only the approved message is shown → "I sent it".
+5. Either show the reply loop: "The prospect replied" → paste `[SIMULATED] Can I pay half now and
+   half in November?` → Add reply. The case returns to you for a new analysis and decision, and
+   the outcome is recorded after that round.
+6. Or close it directly from "Waiting for prospect": Record the outcome, with the note
+   "SIMULATED DEMO — not a real sale".
+Never present a demo outcome as a real recovery.

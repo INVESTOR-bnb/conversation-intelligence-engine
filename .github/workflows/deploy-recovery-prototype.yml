@@ -44,6 +44,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # Full history: the deploy-tooling tests check the branch contains earlier reviewed
+          # stages and read old commits (rollback code), which a shallow clone does not have.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
