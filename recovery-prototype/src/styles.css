@@ -342,3 +342,22 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .shot-state { font-size: 0.75rem; font-weight: 600; color: var(--text-2); }
 .shots-full { list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; }
 .shot-full img { width: 100%; height: auto; border-radius: var(--radius-sm); border: 1px solid var(--border); display: block; }
+
+/* ---------- live app header for businesses and visitors (demo deployment) ---------- */
+.appbar {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 0.5rem 1rem; padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+.appbar-row { display: flex; align-items: center; gap: 0.5rem; max-width: 880px; margin: 0 auto; }
+.appbar-brand { display: flex; align-items: center; gap: 0.5rem; margin-right: auto; min-width: 0; }
+.appbar-mark { width: 32px; height: 32px; flex: none; border-radius: 8px; background: var(--brand); color: #fff; display: grid; place-items: center; font-weight: 800; }
+.appbar-name { font-weight: 700; color: var(--brand); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.demo-pill {
+  flex: none; font-size: 0.6875rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--yellow); background: var(--yellow-bg); border: 1px solid var(--yellow-border); border-radius: 999px; padding: 0.0625rem 0.5rem;
+}
+.appbar .demobar-more { border-color: var(--border); color: var(--brand); background: var(--surface); flex: none; }
+.appbar-sub { margin-top: 0.25rem; align-items: flex-start; }
+.appbar-note { margin-right: auto; min-width: 0; color: var(--text-3); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.submit-reminder { text-align: center; }

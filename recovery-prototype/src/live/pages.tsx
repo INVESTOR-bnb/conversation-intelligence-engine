@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button, Card, EmptyState, ErrorBanner, Field, formatDate, Notice, ScreenHeader } from '../components/ui';
 import { FounderAnalysis } from './analysisUi';
 import { useAuth } from './auth';
+import { DEMO_RULE_SUBMIT, DEMO_RULE_SHORT, FOUNDER_ENVIRONMENT_LABEL, headerView, PRODUCT_NAME } from './environment';
 import { parseAuthCallback } from './authCallback';
 import { caseErrorMessage, clientStatusLabel, founderStateLabel, isAlreadySubmitted, LEAD_SOURCES, LIMITS, newRequestId, validateCase, type CaseErrors } from './cases';
 import { BUSINESS_NAME_MAX, INDUSTRY_MAX, onboardingErrorMessage, validateBusiness, validateLink, type BusinessErrors } from './onboarding';
@@ -17,21 +18,41 @@ export const MIN_PASSWORD_LENGTH = 10;
 
 function Shell({ children }: { children: ReactNode }) {
   const { status, profile, session, signOut } = useAuth();
+  const signOutButton = status === 'signedIn' && (
+    <button type="button" className="demobar-more" onClick={async () => { await signOut(); navigate('/login', { replace: true }); }}>
+      Sign out
+    </button>
+  );
   return (
     <div className="app app-live">
-      <div className="demobar" role="region" aria-label="Environment">
-        <div className="demobar-row">
-          <span className="demobar-tag">Staging · synthetic data only</span>
+      {headerView(profile?.role) === 'founder' ? (
+        <div className="demobar" role="region" aria-label="Environment">
+          <div className="demobar-row">
+            <span className="demobar-tag">{FOUNDER_ENVIRONMENT_LABEL}</span>
+            {signOutButton}
+          </div>
           {status === 'signedIn' && (
-            <button type="button" className="demobar-more" onClick={async () => { await signOut(); navigate('/login', { replace: true }); }}>
-              Sign out
-            </button>
+            <p className="demobar-note">Signed in as {session?.user.email ?? 'unknown'} · founder</p>
           )}
         </div>
-        {status === 'signedIn' && (
-          <p className="demobar-note">Signed in as {session?.user.email ?? 'unknown'}{profile ? ` · ${profile.role === 'NONE' ? 'not yet authorised' : profile.role.toLowerCase()}` : ''}</p>
-        )}
-      </div>
+      ) : (
+        <header className="appbar" role="region" aria-label="Environment">
+          <div className="appbar-row">
+            <span className="appbar-brand">
+              <span className="appbar-mark" aria-hidden="true">R</span>
+              <span className="appbar-name">{PRODUCT_NAME}</span>
+              <span className="demo-pill" data-testid="demo-label">Demo</span>
+            </span>
+          </div>
+          <div className="appbar-row appbar-sub">
+            <p className="appbar-note">
+              {DEMO_RULE_SHORT}
+              {status === 'signedIn' && <><br />{session?.user.email ?? 'unknown'}{profile?.role === 'NONE' ? ' (not yet authorised)' : ''}</>}
+            </p>
+            {signOutButton}
+          </div>
+        </header>
+      )}
       <main className="main">
         <div className="screen narrow">{children}</div>
       </main>
@@ -61,13 +82,7 @@ export function LoginPage() {
 
   return (
     <Shell>
-      <div className="login-brand">
-        <span className="brand-mark" aria-hidden="true">R</span>
-        <div>
-          <p className="brand-name">Revenue Recovery</p>
-          <p className="brand-sub">Sign in to your account</p>
-        </div>
-      </div>
+      <p className="muted">Sign in with the account you were given for this demo.</p>
       <form
         className="card"
         noValidate
@@ -726,7 +741,7 @@ function NewCaseForm({ onSaved }: { onSaved: () => Promise<void> }) {
       }}
     >
       <h2 className="card-title" id="new-case-title">New case</h2>
-      <Notice tone="warn">Synthetic test data only — do not paste real customer names, phone numbers or conversations.</Notice>
+      <Notice tone="warn"><span data-testid="demo-submit-rule">{DEMO_RULE_SUBMIT}</span></Notice>
       <Field label="Reference" hint="Your own label, for example TEST-001." error={errors.reference}>
         {(id, d) => <input id={id} aria-describedby={d} maxLength={LIMITS.reference + 10} autoComplete="off" value={form.reference} onChange={set('reference')} />}
       </Field>
@@ -755,12 +770,12 @@ function NewCaseForm({ onSaved }: { onSaved: () => Promise<void> }) {
         <button type="button" className={`btn btn-small ${mode === 'SCREENSHOTS' ? 'btn-primary' : 'btn-secondary'}`} aria-pressed={mode === 'SCREENSHOTS'} disabled={busy} onClick={() => setMode('SCREENSHOTS')}>Upload screenshots</button>
       </div>
       {mode === 'TEXT' ? (
-        <Field label="Pasted conversation" hint="Paste a made-up WhatsApp conversation, oldest message first." error={errors.conversation}>
+        <Field label="Pasted conversation" hint="Paste a sample WhatsApp conversation, oldest message first. No real customer chats." error={errors.conversation}>
           {(id, d) => <textarea id={id} aria-describedby={d} rows={8} value={form.conversation} onChange={set('conversation')} />}
         </Field>
       ) : (
         <>
-          <Notice tone="warn">Synthetic screenshots only — no real customer conversations.</Notice>
+          <Notice tone="warn">Sample screenshots only — never a real customer’s conversation.</Notice>
           <ScreenshotPicker shots={shots} onChange={setShots} states={shotStates} locked={busy || assigned.current.size > 0} />
         </>
       )}
@@ -769,6 +784,7 @@ function NewCaseForm({ onSaved }: { onSaved: () => Promise<void> }) {
       {mode === 'SCREENSHOTS' && startOver && (
         <Button block variant="secondary" onClick={startNewCase} disabled={busy}>Start a New Case With These Screenshots</Button>
       )}
+      <p className="muted small submit-reminder">{DEMO_RULE_SHORT}</p>
       <Button type="submit" block disabled={busy || (mode === 'SCREENSHOTS' && startOver)}>
         {busy ? 'Submitting…' : mode === 'SCREENSHOTS' && assigned.current.size > 0 ? 'Retry' : 'Submit Case'}
       </Button>

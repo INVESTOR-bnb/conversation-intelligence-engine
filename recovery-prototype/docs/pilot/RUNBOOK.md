@@ -21,6 +21,14 @@ credential or an approval.
 Analysis runs only where AI spending is enabled. On staging spending stays **off** except inside a
 guarded paid run (below), so "Run analysis" normally answers "AI spending is switched off" — by design.
 
+## What a business sees (demo presentation)
+Businesses and the sign-in page show "Revenue Recovery Engine" with a small DEMO label and
+"Demo workspace · sample conversations only"; the New case form repeats that only sample
+conversations may be submitted. Only your founder login shows "Staging · synthetic data only".
+This is wording only: the restriction itself is unchanged (staging may hold synthetic data only),
+and what each business can see is enforced by the database (tests `20_v0_workflow`,
+`21_new_business_isolation`). Never use the demo for a real customer conversation.
+
 ## Deploying the new screens to the staging site (REQUIRES FOUNDER ACTION)
 Pushes never deploy. GitHub (phone browser) → the repository → **Actions** →
 "Deploy recovery prototype (Cloudflare Pages)" → **Run workflow** → branch
