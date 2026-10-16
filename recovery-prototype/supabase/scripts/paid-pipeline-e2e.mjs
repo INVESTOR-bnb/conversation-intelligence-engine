@@ -261,6 +261,7 @@ const SCENARIO = process.env.PAID_SCENARIO || DEFAULT_SCENARIO;
 if (!Object.hasOwn(SCENARIOS, SCENARIO)) { err(`refused: PAID_SCENARIO must be one of ${Object.keys(SCENARIOS).join(', ')}.`); process.exit(2); }
 
 const results = [];
+let analysisAccepted = false;
 const record = (status, name, detail = '') => { results.push({ status, name }); out(`${status.padEnd(5)} ${name}${detail ? ` — ${detail}` : ''}`); };
 const expectOk = (name, ok, detail) => record(ok ? 'PASS' : 'FAIL', name, detail);
 const refused = (r) => Boolean(r.error) || (Array.isArray(r.data) && r.data.length === 0) || r.data === null;
@@ -423,7 +424,9 @@ async function run() {
   const own = reply && typeof reply === 'object' && JSON.stringify(Object.keys(reply)) === '["outcome","code","analysis_id"]';
   if (res && res.status === 401 && !own) throw new PlatformJwtRejected();
   const analysisId = own && UUID.test(String(reply.analysis_id)) ? String(reply.analysis_id) : null;
-  record(res?.status === 200 && own && reply.outcome === 'COMPLETED' ? 'PASS' : 'WARN', 'the founder call', callError ? `call failed (${callError})`
+  // An analysis that is not COMPLETED (rejected by the contract, failed, not started) is a FAILED run,
+  // however cleanly the money and the settings were handled.
+  record(res?.status === 200 && own && reply.outcome === 'COMPLETED' ? 'PASS' : 'FAIL', 'the founder call completed an analysis', callError ? `call failed (${callError})`
     : `HTTP ${res?.status} ${own ? `${reply.outcome} / ${reply.code}` : '(not the function\'s response)'}`);
   const after = await state();
   expectOk('spending disabled, paid models inactive, limits unchanged, no overrun',
@@ -436,7 +439,11 @@ async function run() {
 
   const a = (await F.c.from('analyses').select('status, model, input_tokens, output_tokens, estimated_cost_usd, error').eq('id', analysisId).maybeSingle()).data;
   expectOk('the analysis was made by the chosen paid models (not the fake)', a?.model === `analyst:${ANALYST}|reviewer:${REVIEWER}`,
-    a?.model?.includes(FAKE_MODEL) ? 'the function still ran the FAKE (the settings change was not picked up): cost 0' : `status ${a?.status}${a?.error ? `, ${String(a.error).slice(0, 80)}` : ''}`);
+    a?.model?.includes(FAKE_MODEL) ? 'the function still ran the FAKE (the settings change was not picked up): cost 0' : `status ${a?.status}`);
+  analysisAccepted = a?.status === 'COMPLETE' || a?.status === 'INSUFFICIENT_EVIDENCE';
+  expectOk('a contract-valid analysis was stored (COMPLETE or INSUFFICIENT_EVIDENCE)', analysisAccepted, `status ${a?.status ?? 'unknown'}`);
+  // The contract's reasons are field paths and rule names only (never conversation or analysis text).
+  if (a?.error) out(`      why it was not accepted: ${String(a.error).slice(0, 2000)}`);
   const l = (await sql('ledger', `select row_to_json(l) as l from private.ai_spend_ledger l where analysis_id = '${analysisId}'`))[0]?.l;
   expectOk(`reserved within the run budget (USD ${BUDGET}) and the database estimate`, l && Number(l.reserved_usd) <= BUDGET && Number(l.reserved_usd) <= est, `reserved USD ${l?.reserved_usd}`);
   expectOk('settled from reported usage (not HELD); actual within the reservation; no overrun',
@@ -465,6 +472,9 @@ try {
   await run();
   const failed = results.filter((x) => x.status === 'FAIL').length;
   out(`== ${results.filter((x) => x.status === 'PASS').length} pass, ${failed} fail, ${results.filter((x) => x.status === 'WARN').length} warn`);
+  out(`AI ANALYSIS ACCEPTANCE: ${analysisAccepted && failed === 0 ? 'PASSED — a contract-valid analysis was produced' : 'FAILED — no contract-valid analysis from this run'}`);
+  const safety = results.filter((x) => /spending disabled|function settings back to fake|no analysis, audit trail|carries nothing from the analysis/.test(x.name));
+  out(`SAFETY AND CLEANUP: ${safety.length > 0 && safety.every((x) => x.status === 'PASS') ? 'PASSED' : 'CHECK THE LINES ABOVE'}`);
   code = failed ? 1 : 0;
 } catch (e) {
   if (e instanceof PlatformJwtRejected) {

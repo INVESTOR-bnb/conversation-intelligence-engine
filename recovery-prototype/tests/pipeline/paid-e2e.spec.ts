@@ -71,6 +71,10 @@ interface Knobs {
   fnMode: string | null;
   /** The scripted provider (Anthropic client or Kimi mock): 'ok' | 'reviewer-500' */
   provider: string;
+  /** What the mocked Kimi analyst writes: the fake's insufficient-evidence answer, a complete analysis, or a complete one with an id defect. */
+  kimiAnalyst: 'fake' | 'complete' | 'duplicate-ids' | 'missing-reference';
+  /** What the mocked Kimi reviewer writes. */
+  kimiReviewer: 'fake' | 'uphold' | 'reject';
 }
 let knobs: Knobs;
 const mgmtLog: string[] = [];
@@ -86,7 +90,7 @@ function reset() {
     fn: { id: 'fn-1', slug: 'analyze-case', name: 'analyze-case', status: 'ACTIVE', version: 4, verify_jwt: true, ezbr_sha256: sha(body) },
     body,
     secrets: new Map([['ALLOW_FAKE_PROVIDER', 'staging-only'], ['ANALYSIS_PROVIDER', 'fake'], ['SUPABASE_URL', 'x'], ['SUPABASE_SECRET_KEYS', 'y']]),
-    fnMode: null, provider: 'ok',
+    fnMode: null, provider: 'ok', kimiAnalyst: 'fake', kimiReviewer: 'fake',
   };
   mgmtLog.length = 0; fnCalls.length = 0; sequence.length = 0; clients.length = 0; kimiSeen.length = 0;
 }
@@ -142,11 +146,53 @@ const kimiMock = createServer((req, res) => { void (async () => {
   if (path === '/v1/tokenizers/estimate-token-count') return send(res, 200, { data: { total_tokens: 1200 } });
   const role = (body.response_format as { json_schema?: { name?: string } } | undefined)?.json_schema?.name === 'rre_reviewer' ? 'REVIEWER' : 'ANALYST';
   if (role === 'REVIEWER' && knobs.provider === 'reviewer-500') return send(res, 500, { error: { message: 'synthetic upstream failure' } });
-  const answer = role === 'ANALYST' ? fakeAnalystAnswer() : fakeReviewAnswer();
+  // The evidence exactly as the model receives it (the <evidence> block of the user message).
+  const user = ((body.messages as { role: string; content: string }[] | undefined) ?? []).find((m) => m.role === 'user')?.content ?? '';
+  const evidence = JSON.parse(/<evidence>\n([\s\S]*?)\n<\/evidence>/.exec(user)?.[1] ?? '{"messages":[]}') as { messages: { message_id: string; text: string }[] };
+  const mid = evidence.messages[0]?.message_id ?? 'none';
+  const answer = role === 'ANALYST'
+    ? (knobs.kimiAnalyst === 'fake' ? fakeAnalystAnswer() : completeCarAnalysis(mid, knobs.kimiAnalyst))
+    : (knobs.kimiReviewer === 'fake' ? fakeReviewAnswer() : carReview(mid, knobs.kimiReviewer));
   return send(res, 200, { id: `synthetic-${role}`, model: body.model, choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(answer) } }],
     usage: { prompt_tokens: 1200, completion_tokens: 900, total_tokens: 2100, prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 1200 } } });
 })(); });
 let KIMI_URL = '';
+
+/** A complete, evidence-grounded analysis of the car-price scenario (quotes copied exactly from it), optionally with one id defect. */
+function completeCarAnalysis(mid: string, variant: string) {
+  const q = (quote: string) => [{ type: 'MESSAGE', message_id: mid, quote }];
+  const a = {
+    analysis_status: 'COMPLETE', classification: 'YELLOW',
+    evidence_assessment: { sufficiency: 'PARTIAL', summary: 'One pasted conversation; the prospect asked for a viewing that was never answered.', missing_evidence: ['Whether the prospect still needs a car'] },
+    observations: [
+      { id: 'O1', actor: 'PROSPECT', behavior: 'Asked for the best price.', evidence: q('What is the best price?') },
+      { id: 'O2', actor: 'PROSPECT', behavior: 'Said they must check with a partner and a bank.', evidence: q('I need to check with my partner and my bank first.') },
+      { id: 'O3', actor: 'PROSPECT', behavior: 'Asked to see the car on Saturday morning.', evidence: q('Could I come on Saturday morning to see it?') },
+      { id: 'O4', actor: 'SELLER', behavior: 'Asked whether the prospect was still interested without answering the Saturday request.', evidence: q('Hello? Are you still interested?') },
+    ],
+    hypotheses: [
+      { id: 'H1', category: 'SELLER_CREATED_RESISTANCE', statement: 'The unanswered viewing request left the prospect without a next step.', basis: 'HYPOTHESIS',
+        supporting_observations: ['O3', 'O4'], contradicting_observations: [], competing_hypotheses: ['H2'], confidence: 'MEDIUM', uncertainty: 'The prospect may have lost interest for other reasons.' },
+      { id: 'H2', category: 'DECISION_FRICTION', statement: 'The decision depends on a partner and a bank.', basis: 'STATED_BY_PROSPECT',
+        supporting_observations: ['O2'], contradicting_observations: [], competing_hypotheses: ['H1'], confidence: 'MEDIUM', uncertainty: 'Their answer is unknown.' },
+    ],
+    unknowns: [{ question: 'Did the partner or bank say no?', why_it_matters: 'A no would make another message unwelcome.' }],
+    recommendation: { pursue: 'PURSUE', strategy: 'Answer the viewing request with a concrete time.', psychological_rationale: 'Removes the friction the seller created.',
+      based_on_hypotheses: ['H1'], next_action: { type: 'SEND_MESSAGE', text: 'Sorry I missed your Saturday question. Would Saturday at 10 suit you to see the car?' } },
+    contact_restrictions: [], reasons_not_to_pursue: [],
+  };
+  if (variant === 'duplicate-ids') a.observations[1].id = 'O1';
+  if (variant === 'missing-reference') a.hypotheses[0].supporting_observations = ['O3', 'O9'];
+  return a;
+}
+function carReview(mid: string, variant: string) {
+  return {
+    challenges: [{ id: 'C1', target: 'HYPOTHESIS', target_id: 'H1', severity: variant === 'reject' ? 'HIGH' : 'MEDIUM', challenge: 'The silence may not be caused by the seller.',
+      evidence: [{ type: 'MESSAGE', message_id: mid, quote: 'Sorry, busy week.' }] }],
+    verdict: variant === 'reject' ? 'REJECT_RECOMMENDATION' : 'UPHOLD_WITH_CONCERNS',
+    verdict_rationale: variant === 'reject' ? 'Interest after a week of silence is not established.' : 'Plausible, with caveats.',
+  };
+}
 /** The function's fetch: api.moonshot.ai goes to the local mock; everything else as is (Supabase is local). */
 const fnFetch: typeof fetch = (i, init) => {
   const u = new URL(i instanceof Request ? i.url : String(i));
@@ -580,3 +626,53 @@ test('--paid-off also removes a leftover Kimi key and deactivates kimi-k3', asyn
   expect(secretsOff()).toBe(true);
   noSecrets(rec.out);
 });
+
+// ---------------------------------------------------------------- Stage 2A-6f: contract acceptance of a real-shaped Kimi analysis
+
+test('Kimi: a complete, evidence-grounded analysis passes the database contract — AI ANALYSIS ACCEPTANCE: PASSED', async () => {
+  knobs.kimiAnalyst = 'complete'; knobs.kimiReviewer = 'uphold';
+  const r = await run([LIMIT_OK, RUN_OK], [], KIMI_INPUTS);
+  expect(r.code, r.out).toBe(0);
+  expect(r.out).toContain('PASS  a contract-valid analysis was stored (COMPLETE or INSUFFICIENT_EVIDENCE)');
+  expect(r.out).toContain('AI ANALYSIS ACCEPTANCE: PASSED');
+  expect(r.out).toContain('SAFETY AND CLEANUP: PASSED');
+  const c = lastCase()!;
+  expect(one(`select status || ':' || (output->'observations'->0->>'id') || ':' || (output->>'contract_version') from public.analyses where case_id = :'c'`, { c })).toBe('COMPLETE:O1:rre-analysis/2');
+  expect(r.out).not.toContain('evidence-grounded'); // the analysis content is never printed
+});
+
+test('Kimi: the review rejects the recommendation — still a contract-valid analysis (no message kept)', async () => {
+  knobs.kimiAnalyst = 'complete'; knobs.kimiReviewer = 'reject';
+  const r = await run([LIMIT_OK, RUN_OK], [], KIMI_INPUTS);
+  expect(r.code, r.out).toBe(0);
+  expect(r.out).toContain('COMPLETED / RECOMMENDATION_REJECTED_BY_REVIEW');
+  expect(r.out).toContain('AI ANALYSIS ACCEPTANCE: PASSED');
+  const c = lastCase()!;
+  expect(one(`select status || ':' || coalesce(ai_proposed_message, 'none') from public.analyses where case_id = :'c'`, { c })).toBe('COMPLETE:none');
+});
+
+for (const [variant, reason] of [
+  ['duplicate-ids', 'observation ids must be unique and look like O1, O2, ...'],
+  ['missing-reference', 'hypotheses[0] refers to an observation that does not exist'],
+] as const) {
+  test(`Kimi: an analysis with ${variant} is rejected by the database contract — reported as a FAILED run, with cleanup and access still verified`, async () => {
+    knobs.kimiAnalyst = variant; knobs.kimiReviewer = 'uphold';
+    const r = await run([LIMIT_OK, RUN_OK], [], KIMI_INPUTS);
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain('FAIL  the founder call completed an analysis — HTTP 200 REJECTED / CONTRACT_REJECTED');
+    expect(r.out).toContain('FAIL  a contract-valid analysis was stored (COMPLETE or INSUFFICIENT_EVIDENCE) — status ERROR');
+    expect(r.out).toContain(`why it was not accepted: REJECTED by analysis contract rre-analysis/1: ${reason}`);
+    expect(r.out).toContain('AI ANALYSIS ACCEPTANCE: FAILED — no contract-valid analysis from this run');
+    expect(r.out).toContain('SAFETY AND CLEANUP: PASSED');
+    // Money: the two calls were billed and settled from reported usage; nothing left on.
+    expect(r.out).toContain('PASS  settled from reported usage (not HELD); actual within the reservation; no overrun');
+    expect(paidState()).toBe(OFF);
+    expect(secretsOff()).toBe(true);
+    // Nothing of the rejected output is kept, and businesses still see nothing.
+    const c = lastCase()!;
+    expect(one(`select status || ':' || (output is null)::text from public.analyses where case_id = :'c'`, { c })).toBe('ERROR:true');
+    expect(r.out).toContain('PASS  client A (case owner): no analysis, audit trail or spending information');
+    expect(r.out).toContain('PASS  client B: no analysis, audit trail or spending information');
+    noSecrets(r.out);
+  });
+}
