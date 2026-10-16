@@ -22,6 +22,7 @@ export interface Profile {
   role: Role;
   businessName?: string;
   businessId?: string;
+  currency?: string;
 }
 
 type Status = 'loading' | 'signedOut' | 'signedIn';
@@ -119,6 +120,7 @@ export function AuthProvider({ supabase, children }: { supabase: SupabaseClient;
         role: role as Role,
         businessName: (data as { business_name?: string }).business_name,
         businessId: (data as { business_id?: string }).business_id,
+        currency: (data as { currency?: string }).currency,
       });
     },
     [supabase],

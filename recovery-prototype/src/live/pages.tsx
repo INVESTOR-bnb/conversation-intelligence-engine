@@ -11,6 +11,7 @@ import { navigate, safeNext } from './router';
 import { DRAFT_KEY, FounderScreenshots, releaseShots, resultMessage, ResumeDraft, ScreenshotPicker } from './screenshotUi';
 import { completeScreenshotCase, fetchStatus, type ShotState } from './screenshotUpload';
 import { SHOT_MESSAGES, summarizeStatus, type ProcessedShot } from './screenshots';
+import { ClientCasePage, FounderCaseTimeline, FounderDecision, FounderRunAnalysis } from './workflowUi';
 
 export const MIN_PASSWORD_LENGTH = 10;
 
@@ -288,7 +289,7 @@ export function FounderWorkspace() {
       </Card>
       <CreateBusinessForm onCreated={load} />
       <LinkClientForm businesses={businesses ?? []} onLinked={load} />
-      <Notice>Use synthetic businesses, test accounts and made-up conversations only. Analysis and recommendations arrive in later Stage 2A steps.</Notice>
+      <Notice>Use synthetic businesses, test accounts and made-up conversations only until the pilot data-handling terms are agreed.</Notice>
       <Button block variant="secondary" onClick={() => { window.location.href = '/demo'; }}>Open Stage-1 prototype (mock data)</Button>
     </Shell>
   );
@@ -414,9 +415,11 @@ interface FounderCaseDetail {
   created_at: string; queued_at: string | null; conversation_source: 'TEXT' | 'SCREENSHOTS'; businesses: { name: string; currency: string } | null;
 }
 
-/** Read-only founder view of one case. All text is rendered as plain text (React escapes it; never HTML). */
+/** Founder view of one case: the evidence, the analysis, the decision and what happened next. All text is rendered as plain text (React escapes it; never HTML). */
 export function FounderCasePage({ caseId }: { caseId: string }) {
   const { supabase } = useAuth();
+  const [reload, setReload] = useState(0);
+  const refresh = useCallback(() => setReload((n) => n + 1), []);
   const [row, setRow] = useState<FounderCaseDetail | null | undefined>(undefined);
   const [conversation, setConversation] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -440,7 +443,7 @@ export function FounderCasePage({ caseId }: { caseId: string }) {
     return () => {
       active = false;
     };
-  }, [supabase, caseId]);
+  }, [supabase, caseId, reload]);
 
   const back = () => navigate('/app/founder');
   return (
@@ -476,7 +479,10 @@ export function FounderCasePage({ caseId }: { caseId: string }) {
               {conversation === null ? <EmptyState title="No pasted conversation." /> : <pre className="message-card prospect" data-testid="case-conversation">{conversation}</pre>}
             </Card>
           )}
-          <FounderAnalysis caseId={row.id} evidenceVersion={row.evidence_version} />
+          <FounderRunAnalysis caseId={row.id} workflowState={row.workflow_state} onDone={refresh} />
+          <FounderAnalysis key={`analysis-${reload}`} caseId={row.id} evidenceVersion={row.evidence_version} />
+          {row.workflow_state === 'AWAITING_ADMIN_REVIEW' && <FounderDecision key={`decision-${reload}`} caseId={row.id} evidenceVersion={row.evidence_version} onDone={refresh} />}
+          <FounderCaseTimeline key={`timeline-${reload}`} caseId={row.id} currency={row.businesses?.currency ?? 'NGN'} />
         </>
       )}
     </Shell>
@@ -554,6 +560,9 @@ export function ClientWorkspace() {
               {r.status === 'DRAFT' && shotDrafts[r.id] && (
                 <Button small variant="secondary" onClick={() => setResuming(resuming === r.id ? null : r.id)}>{resuming === r.id ? 'Close' : 'Continue'}</Button>
               )}
+              {r.status !== 'DRAFT' && (
+                <Button small variant={r.status === 'ACTION_REQUIRED' ? 'primary' : 'secondary'} onClick={() => navigate(`/app/client/case/${r.id}`)}>Open</Button>
+              )}
               {r.status === 'DRAFT' && !shotDrafts[r.id] && (
                 <Button small onClick={() => void submitDraft(r.id)} disabled={submitting !== null}>{submitting === r.id ? 'Submitting…' : 'Submit'}</Button>
               )}
@@ -567,6 +576,15 @@ export function ClientWorkspace() {
           onDone={async () => { setResuming(null); await load(); }} />
       )}
       <NewCaseForm onSaved={load} />
+    </Shell>
+  );
+}
+
+/** The business's view of one case (client-safe projection only). */
+export function ClientCaseRoute({ caseId }: { caseId: string }) {
+  return (
+    <Shell>
+      <ClientCasePage caseId={caseId} />
     </Shell>
   );
 }

@@ -141,6 +141,12 @@ export function founderCaseIdFromPath(path: string): string | null {
   return m && UUID.test(m[1]) ? m[1].toLowerCase() : null;
 }
 
+/** The case ID in /app/client/case/<uuid>, or null. */
+export function clientCaseIdFromPath(path: string): string | null {
+  const m = /^\/app\/client\/case\/([^/]+)$/.exec(path);
+  return m && UUID.test(m[1]) ? m[1].toLowerCase() : null;
+}
+
 /** A new request ID for client_create_case (lets network retries return the same case). */
 export function newRequestId(): string {
   return crypto.randomUUID();

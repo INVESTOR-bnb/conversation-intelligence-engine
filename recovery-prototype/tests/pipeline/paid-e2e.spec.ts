@@ -346,6 +346,7 @@ const refusals: [string, () => Record<string, string | undefined> | void, string
   ['the deployed function is the old fake-only code', () => { knobs.body = ezbr(oldSources()); }, 'not the reviewed Anthropic-capable version'],
   ['a key-shaped string in the deployed code', () => { knobs.body = ezbr(`${functionSources()}\nconst k = 'sk-ant-api03-${'D'.repeat(40)}';`); }, 'the deployed function is not the reviewed version'],
   ['no paid provider stated', () => ({ PAID_PROVIDER: undefined }), 'PAID_PROVIDER must be exactly one of anthropic, kimi'],
+  ['an unknown synthetic scenario', () => ({ PAID_SCENARIO: 'real-customer-chat' }), 'PAID_SCENARIO must be one of car-price, academy-price, too-little, declined'],
   ['an unknown paid provider', () => ({ PAID_PROVIDER: 'openrouter' }), 'PAID_PROVIDER must be exactly one of anthropic, kimi'],
   ['Kimi: a key of the wrong shape (an Anthropic key)', () => ({ ...KIMI_INPUTS, KIMI_API_KEY: PROVIDER_KEY }), 'not shaped like a Kimi API key'],
   ['Kimi: no key', () => ({ ...KIMI_INPUTS, KIMI_API_KEY: undefined }), 'missing environment variable KIMI_API_KEY'],
@@ -532,6 +533,16 @@ test('approved Kimi run: kimi-k3 for both calls through the mock Moonshot API, e
   expect(r.out).toContain('PASS  client A (case owner): no analysis, audit trail or spending information');
   expect(r.out).toContain('PASS  client B: no analysis, audit trail or spending information');
   expect(r.out).toContain('PASS  anonymous: no analysis, audit trail or spending information');
+});
+
+test('Kimi run on another synthetic scenario (PAID_SCENARIO=too-little): that conversation is the one analysed', async () => {
+  const r = await run([LIMIT_OK, RUN_OK], [], { ...KIMI_INPUTS, PAID_SCENARIO: 'too-little' });
+  expect(r.code, r.out).toBe(0);
+  expect(r.out).toContain('scenario too-little: Almost nothing was said');
+  const c = lastCase()!;
+  expect(one(`select (position('Hello, how can we help you today?' in body) > 0)::text from public.case_messages where case_id = :'c' and kind = 'PASTED_CONVERSATION'`, { c })).toBe('true');
+  expect(paidState()).toBe(OFF);
+  expect(secretsOff()).toBe(true);
 });
 
 test('Kimi window: the provider fails on the reviewer — no retry, the reservation is HELD and reported, everything switched off', async () => {

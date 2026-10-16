@@ -5,9 +5,9 @@ import { App as Stage1App } from '../App';
 import { StoreProvider } from '../state/store';
 import { useAuth, type Role } from './auth';
 import { looksLikeAuthCallback } from './authCallback';
-import { founderCaseIdFromPath } from './cases';
+import { clientCaseIdFromPath, founderCaseIdFromPath } from './cases';
 import {
-  AccountPending, AuthCallbackPage, ClientWorkspace, FounderCasePage, FounderWorkspace, Loading, LoginPage, NotAuthorized, NotFound, SetPasswordPage,
+  AccountPending, AuthCallbackPage, ClientCaseRoute, ClientWorkspace, FounderCasePage, FounderWorkspace, Loading, LoginPage, NotAuthorized, NotFound, SetPasswordPage,
 } from './pages';
 import { navigate, usePathname } from './router';
 
@@ -45,6 +45,8 @@ export function LiveApp() {
 
   const founderCaseId = founderCaseIdFromPath(path);
   if (founderCaseId) return <Protected roles={['FOUNDER']}><FounderCasePage caseId={founderCaseId} /></Protected>;
+  const clientCaseId = clientCaseIdFromPath(path);
+  if (clientCaseId) return <Protected roles={['CLIENT']}><ClientCaseRoute caseId={clientCaseId} /></Protected>;
 
   switch (path) {
     case '/':

@@ -53,6 +53,7 @@
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 import { createClient } from '@supabase/supabase-js';
 import { deployedProblems, kimiDeployedProblems } from './function-source-guard.mjs';
+import { DEFAULT_SCENARIO, SCENARIOS, scenarioText } from './synthetic-scenarios.mjs';
 import { accessToken, answerReader, providerKeyProblem, publishableKeyProblem, stagingUrlProblem, trimEdges } from './live-guards.mjs';
 
 const REF = 'aqwdwswpmbnzmkvyuqil';
@@ -255,6 +256,9 @@ if (!Number.isFinite(BUDGET) || BUDGET <= 0 || BUDGET > RUN_BUDGET_MAX_USD) {
   err(`refused: the run budget must be above 0 and at most USD ${RUN_BUDGET_MAX_USD}.`); process.exit(2);
 }
 const MODELS = [...new Set([ANALYST, REVIEWER])];
+// Which invented conversation to analyse (synthetic-scenarios.mjs); default car-price.
+const SCENARIO = process.env.PAID_SCENARIO || DEFAULT_SCENARIO;
+if (!Object.hasOwn(SCENARIOS, SCENARIO)) { err(`refused: PAID_SCENARIO must be one of ${Object.keys(SCENARIOS).join(', ')}.`); process.exit(2); }
 
 const results = [];
 const record = (status, name, detail = '') => { results.push({ status, name }); out(`${status.padEnd(5)} ${name}${detail ? ` — ${detail}` : ''}`); };
@@ -311,20 +315,6 @@ function decodeBody(bytes) {
   return null;
 }
 
-/** A synthetic sales conversation (invented business and people; no real numbers or names). */
-function syntheticConversation(stamp) {
-  return [
-    `[02/10/2026, 10:02] Synthetic Prospect ${stamp}: Hello, I saw the synthetic 2019 hatchback on your site. Is it still for sale?`,
-    '[02/10/2026, 10:15] Synthetic Autos A: Yes it is! Great car, one owner, full service history.',
-    '[02/10/2026, 10:17] Synthetic Prospect: Good. What is the best price? The listing says 9,500.',
-    '[02/10/2026, 13:40] Synthetic Autos A: 9,500 is already a very good price. Lots of people are asking about it.',
-    '[02/10/2026, 13:42] Synthetic Prospect: I understand. I need to check with my partner and my bank first.',
-    '[04/10/2026, 09:05] Synthetic Autos A: Any news? Someone else wants to see it this weekend.',
-    '[06/10/2026, 18:30] Synthetic Prospect: Sorry, busy week. Could I come on Saturday morning to see it?',
-    '[09/10/2026, 08:50] Synthetic Autos A: Hello? Are you still interested?',
-  ].join('\n');
-}
-
 async function run() {
   // ---- 1. read-only audit
   out('== Read-only audit (Management API, scoped token)');
@@ -364,7 +354,7 @@ async function run() {
 
   const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
   const ref = `E2E-PAID-${stamp}`;
-  const text = syntheticConversation(stamp);
+  const text = scenarioText(SCENARIO, stamp);
   const bytes = Buffer.byteLength(text, 'utf8');
   const est = Number((await sql('estimate', `select (private.ai_estimate_usd(${bytes}, 1, 0, a, r, c) ->> 'usd')::numeric as usd
       from private.ai_model_prices a, private.ai_model_prices r, private.ai_spend_config c
@@ -383,7 +373,7 @@ async function run() {
   const caseId = String(mk.data);
   const sub = await A.c.rpc('client_submit_case', { p_case_id: caseId });
   if (sub.error) throw new Stop(`could not submit the synthetic case: ${sub.error.message}`);
-  record('PASS', `synthetic case ${ref} created by client A and SUBMITTED (${bytes} bytes, synthetic text only)`);
+  record('PASS', `synthetic case ${ref} created by client A and SUBMITTED (scenario ${SCENARIO}: ${SCENARIOS[SCENARIO].title}; ${bytes} bytes, synthetic text only)`);
 
   // ---- 2. confirmations
   out('');

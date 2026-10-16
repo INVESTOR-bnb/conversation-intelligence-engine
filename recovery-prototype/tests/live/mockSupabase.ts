@@ -5,6 +5,7 @@
 // and the onboarding functions apply the database's checks and error texts.
 
 import type { BrowserContext, Route } from '@playwright/test';
+import { analysisRow, reviewedOutput } from './analysisFixtures';
 
 export const MOCK_URL = 'https://mock-project-ref.supabase.co';
 export const MOCK_KEY = 'sb_publishable_TEST_ONLY_not_a_real_key';
@@ -65,7 +66,36 @@ export class MockSupabase {
   failUpload = new Map<number, 'server' | 'lost'>();
   /** Loses the response of the next client_finalize_screenshots (after it ran). */
   loseFinalizeResponse = false;
+  // ---- V0 workflow (same rules as the database functions; see supabase/migrations/*_stage2a1_functions.sql)
+  /** RECOVERY_SENT / PROSPECT_RESPONSE messages (the pasted conversation comes from the case). */
+  messages: { id: string; case_id: string; kind: string; body: string; attempt: number | null; sent_exactly: boolean | null; created_at: string }[] = [];
+  /** client_recommendations, by case. */
+  recommendations = new Map<string, { classification: string; deal_situation: string; next_action: string; approved_message: string | null; published_at: string; approval_type: string }>();
+  /** outcomes, by case. */
+  outcomes = new Map<string, { state: string; deal_value: number | null; amount_paid: number | null; payment_date: string | null; note: string | null; recorded_by_role: string; created_at: string }>();
+  /** Client-visible history labels, by case (audit_log.client_label). */
+  history = new Map<string, { at: string; label: string }[]>();
+  /** What the analyze-case Edge Function does: 'complete' writes a reviewed analysis; otherwise the code it refuses with. */
+  analyzeMode: 'complete' | 'SPENDING_DISABLED' | 'network' = 'complete';
+  /** Bearer tokens the Edge Function received (to prove the founder's own session is used). */
+  functionCalls: string[] = [];
   private n = 0;
+
+  /** Same projection as public.client_list_cases(): recommendation fields only while action is required; RED never carries a message. */
+  clientRow(c: MockCase) {
+    const r = this.recommendations.get(c.id);
+    const o = this.outcomes.get(c.id);
+    const action = c.workflow_state === 'CLIENT_ACTION_REQUIRED';
+    const sent = this.messages.filter((m) => m.case_id === c.id && m.kind === 'RECOVERY_SENT');
+    return {
+      id: c.id, reference: c.reference, product_service: c.product_service, status: clientStatus(c.workflow_state),
+      classification: action ? r?.classification ?? null : null, deal_situation: action ? r?.deal_situation ?? null : null, next_action: action ? r?.next_action ?? null : null,
+      approved_message: action && r?.classification !== 'RED' ? r?.approved_message ?? null : null,
+      recovery_attempts: sent.length, last_sent_message: sent.at(-1)?.body ?? null, responses_added: this.messages.filter((m) => m.case_id === c.id && m.kind === 'PROSPECT_RESPONSE').length,
+      won_deal_value: o?.state === 'WON' ? o.deal_value : null, won_amount_paid: o?.state === 'WON' ? o.amount_paid : null, won_payment_date: o?.state === 'WON' ? o.payment_date : null,
+      closed_at: o?.created_at ?? null, updated_at: c.created_at,
+    };
+  }
 
   user(id: string) {
     return Object.values(USERS).find((u) => u.id === id)!;
@@ -183,8 +213,33 @@ export class MockSupabase {
     }
     if (p === '/rest/v1/case_messages') {
       if (!isFounder) return json(200, []);
-      const rows = this.cases.filter((c) => filterMatches(url, 'case_id', c.id)).map((c) => ({ id: messageId(c.id), case_id: c.id, kind: 'PASTED_CONVERSATION', body: c.conversation }));
+      const rows = [
+        ...this.cases.map((c) => ({ id: messageId(c.id), case_id: c.id, kind: 'PASTED_CONVERSATION', body: c.conversation, attempt: null, sent_exactly: null, created_at: c.created_at })),
+        ...this.messages,
+      ].filter((m) => filterMatches(url, 'case_id', m.case_id) && filterMatches(url, 'kind', m.kind));
       return json(200, rows);
+    }
+    if (p === '/rest/v1/client_recommendations' || p === '/rest/v1/outcomes') {
+      if (req.method() !== 'GET') return json(403, { code: '42501', message: 'permission denied' });
+      if (!isFounder) return json(200, []);
+      const src = p === '/rest/v1/outcomes' ? this.outcomes : this.recommendations;
+      return json(200, [...src].filter(([caseId]) => filterMatches(url, 'case_id', caseId)).map(([, v]) => v));
+    }
+    // ---- the analyze-case Edge Function (founder JWT only; the platform rejects anonymous calls)
+    if (p === '/functions/v1/analyze-case') {
+      this.functionCalls.push(bearer);
+      const reply = (status: number, outcome: string, code: string, analysis_id: string | null = null) => json(status, { outcome, code, analysis_id });
+      if (!isFounder) return reply(403, 'NOT_STARTED', 'FORBIDDEN');
+      const c = this.cases.find((x) => x.id === body.case_id);
+      if (!c) return reply(404, 'NOT_STARTED', 'NOT_FOUND');
+      if (!['SUBMITTED', 'PROSPECT_REPLIED', 'REANALYZING'].includes(c.workflow_state)) return reply(409, 'NOT_STARTED', 'INVALID_STATE');
+      if (this.analyzeMode === 'network') return route.abort('failed');
+      if (this.analyzeMode !== 'complete') return reply(503, 'NOT_STARTED', this.analyzeMode);
+      const version = this.analyses.filter((a) => a.case_id === c.id).length + 1;
+      const row = analysisRow(c.id, { version, evidence_version: c.evidence_version, output: reviewedOutput(messageId(c.id)), ai_classification: 'YELLOW', model: 'analyst:kimi-k3|reviewer:kimi-k3' });
+      this.analyses.push(row);
+      c.workflow_state = 'AWAITING_ADMIN_REVIEW';
+      return reply(200, 'COMPLETED', 'OK', String(row.id));
     }
     // Founder-only intelligence (RLS): clients and members get no rows; nobody can write through the API.
     if (p === '/rest/v1/analyses' || p === '/rest/v1/contact_restrictions') {
@@ -198,10 +253,81 @@ export class MockSupabase {
     }
     if (p === '/rest/v1/rpc/client_list_cases') {
       if (!myBusiness) return json(200, []);
-      return json(200, this.cases.filter((c) => c.business_id === myBusiness).map((c) => ({
-        id: c.id, reference: c.reference, product_service: c.product_service, status: clientStatus(c.workflow_state),
-        classification: null, deal_situation: null, next_action: null, approved_message: null,
-      })));
+      return json(200, this.cases.filter((c) => c.business_id === myBusiness).map((c) => this.clientRow(c)));
+    }
+    if (p === '/rest/v1/rpc/client_get_case') {
+      const c = myBusiness ? this.cases.find((x) => x.id === body.p_case_id && x.business_id === myBusiness) : undefined;
+      if (!c) return json(404, { code: 'P0002', message: 'NOT_FOUND: case not found' });
+      return json(200, { ...this.clientRow(c), history: this.history.get(c.id) ?? [] });
+    }
+    // ---- client follow-up functions (same checks and error texts as the database)
+    if (['/rest/v1/rpc/client_record_sent', '/rest/v1/rpc/client_add_response', '/rest/v1/rpc/client_record_outcome', '/rest/v1/rpc/client_report_opt_out'].includes(p)) {
+      const c = myBusiness ? this.cases.find((x) => x.id === body.p_case_id && x.business_id === myBusiness) : undefined;
+      if (!c) return json(404, { code: 'P0002', message: 'NOT_FOUND: case not found' });
+      const fail = (message: string) => json(400, { code: 'P0001', message });
+      const label = (l: string) => this.history.set(c.id, [...(this.history.get(c.id) ?? []), { at: new Date().toISOString(), label: l }]);
+      const restricted = this.restrictions.some((r) => r.case_id === c.id && r.status === 'ACTIVE');
+      const rec = this.recommendations.get(c.id);
+      if (p.endsWith('client_record_sent')) {
+        if (c.workflow_state !== 'CLIENT_ACTION_REQUIRED') return fail('INVALID_STATE: no recommendation is awaiting action');
+        if (!rec || rec.classification === 'RED' || !rec.approved_message) return fail('INVALID_STATE: there is no approved message to send');
+        if (restricted) return fail('CONTACT_RESTRICTED: contact with this prospect is restricted');
+        const actual = typeof body.p_actual_text === 'string' && body.p_actual_text.trim() ? body.p_actual_text.trim() : null;
+        const attempt = this.messages.filter((m) => m.case_id === c.id && m.kind === 'RECOVERY_SENT').length + 1;
+        this.messages.push({ id: `m${++this.n}`, case_id: c.id, kind: 'RECOVERY_SENT', body: actual ?? rec.approved_message, attempt, sent_exactly: actual === null || actual === rec.approved_message, created_at: new Date().toISOString() });
+        Object.assign(c, { workflow_state: 'WAITING_FOR_PROSPECT', evidence_version: c.evidence_version + 1 });
+        label(`Message sent (attempt ${attempt})`);
+      } else if (p.endsWith('client_add_response')) {
+        if (c.workflow_state !== 'WAITING_FOR_PROSPECT') return fail('INVALID_STATE: responses can be added only while waiting for the prospect');
+        const text = String(body.p_text ?? '').trim();
+        if (!text || text.length > 5000) return fail('VALIDATION: response must be 1 to 5000 characters');
+        this.messages.push({ id: `m${++this.n}`, case_id: c.id, kind: 'PROSPECT_RESPONSE', body: text, attempt: null, sent_exactly: null, created_at: new Date().toISOString() });
+        Object.assign(c, { workflow_state: 'PROSPECT_REPLIED', evidence_version: c.evidence_version + 1 });
+        label('Prospect response added — under review');
+      } else if (p.endsWith('client_record_outcome')) {
+        if (!['CLIENT_ACTION_REQUIRED', 'WAITING_FOR_PROSPECT'].includes(c.workflow_state)) return fail('INVALID_STATE: an outcome can be recorded only after a recommendation');
+        const st = String(body.p_state);
+        if (!['WON', 'LOST', 'PAUSED', 'DISQUALIFIED'].includes(st)) return fail('VALIDATION: invalid outcome');
+        if (st === 'WON' && (!(Number(body.p_amount_paid) > 0) || !body.p_payment_date)) return fail('VALIDATION: a won deal requires the amount paid and payment date');
+        const won = st === 'WON';
+        this.outcomes.set(c.id, { state: st, deal_value: won ? (body.p_deal_value ?? null) : null, amount_paid: won ? body.p_amount_paid : null, payment_date: won ? body.p_payment_date : null,
+          note: body.p_note ?? null, recorded_by_role: 'CLIENT', created_at: new Date().toISOString() });
+        c.workflow_state = st;
+        label(won ? 'Deal won — recovered' : st === 'LOST' ? 'Closed — lost' : st === 'PAUSED' ? 'Case paused' : 'Disqualified');
+      } else {
+        if (['WON', 'LOST', 'PAUSED', 'DISQUALIFIED'].includes(c.workflow_state)) return fail('INVALID_STATE: case is closed');
+        this.restrictions.push({ id: `r${++this.n}`, case_id: c.id, kind: 'EXPLICIT_OPT_OUT', source: 'CLIENT', status: 'ACTIVE', note: body.p_note ?? null, created_at: new Date().toISOString() });
+        if (['AWAITING_ADMIN_REVIEW', 'CLIENT_ACTION_REQUIRED', 'WAITING_FOR_PROSPECT'].includes(c.workflow_state)) c.workflow_state = 'REANALYZING';
+      }
+      return route.fulfill({ status: 204, headers: cors });
+    }
+    // ---- founder decision functions
+    if (p === '/rest/v1/rpc/founder_approve' || p === '/rest/v1/rpc/founder_request_reanalysis') {
+      if (!isFounder) return forbidden();
+      const c = this.cases.find((x) => x.id === body.p_case_id);
+      if (!c) return json(404, { code: 'P0002', message: 'NOT_FOUND: case not found' });
+      const fail = (message: string) => json(400, { code: 'P0001', message });
+      if (c.workflow_state !== 'AWAITING_ADMIN_REVIEW') return fail(p.endsWith('reanalysis') ? 'INVALID_STATE: reanalysis can be requested only during review' : 'INVALID_STATE: case is not awaiting review');
+      if (p.endsWith('reanalysis')) { Object.assign(c, { workflow_state: 'REANALYZING' }); return route.fulfill({ status: 204, headers: cors }); }
+      const a = this.analyses.find((x) => x.id === body.p_analysis_id && x.case_id === c.id);
+      if (!a) return json(404, { code: 'P0002', message: 'NOT_FOUND: analysis not found for this case' });
+      const latest = Math.max(...this.analyses.filter((x) => x.case_id === c.id && x.status !== 'ERROR').map((x) => x.version));
+      if (!['COMPLETE', 'INSUFFICIENT_EVIDENCE'].includes(String(a.status)) || a.version !== latest || a.evidence_version !== c.evidence_version || body.p_expected_evidence_version !== c.evidence_version) {
+        return fail('STALE_ANALYSIS: evidence or analysis changed; review the latest analysis');
+      }
+      const msg = typeof body.p_approved_message === 'string' && body.p_approved_message.trim() ? body.p_approved_message.trim() : null;
+      const cls = body.p_classification;
+      if (!cls) return fail('VALIDATION: classification required');
+      if (cls === 'RED' && msg) return fail('VALIDATION: a RED decision never carries a message');
+      if (cls !== 'RED' && !msg) return fail('VALIDATION: an approved message is required for GREEN and YELLOW');
+      if (cls !== 'RED' && this.restrictions.some((r) => r.case_id === c.id && r.status === 'ACTIVE')) return fail('CONTACT_RESTRICTED: contact is restricted; only a RED decision is possible');
+      if (body.p_approval_type === 'UNCHANGED' && (cls !== a.ai_classification || msg !== a.ai_proposed_message)) return fail('VALIDATION: UNCHANGED approval must match the analysis proposal');
+      if (body.p_approval_type === 'MARKED_RED' && cls !== 'RED') return fail('VALIDATION: MARKED_RED requires RED');
+      this.recommendations.set(c.id, { classification: cls, deal_situation: String(body.p_deal_situation).trim(), next_action: String(body.p_next_action).trim(), approved_message: msg,
+        published_at: new Date().toISOString(), approval_type: body.p_approval_type });
+      c.workflow_state = 'CLIENT_ACTION_REQUIRED';
+      this.history.set(c.id, [...(this.history.get(c.id) ?? []), { at: new Date().toISOString(), label: 'Recommendation ready' }]);
+      return json(200, `a${++this.n}`);
     }
     if (p === '/rest/v1/rpc/client_create_case') {
       if (!myBusiness) return json(403, { code: '42501', message: 'FORBIDDEN: client access required' });
