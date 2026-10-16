@@ -355,7 +355,8 @@ async function run() {
 
   const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
   const ref = `E2E-PAID-${stamp}`;
-  const text = scenarioText(SCENARIO, stamp);
+  // The seller in the conversation is client A's own business, the business that submits the case.
+  const text = scenarioText(SCENARIO, stamp, A.who?.business_name);
   const bytes = Buffer.byteLength(text, 'utf8');
   const est = Number((await sql('estimate', `select (private.ai_estimate_usd(${bytes}, 1, 0, a, r, c) ->> 'usd')::numeric as usd
       from private.ai_model_prices a, private.ai_model_prices r, private.ai_spend_config c
@@ -374,7 +375,7 @@ async function run() {
   const caseId = String(mk.data);
   const sub = await A.c.rpc('client_submit_case', { p_case_id: caseId });
   if (sub.error) throw new Stop(`could not submit the synthetic case: ${sub.error.message}`);
-  record('PASS', `synthetic case ${ref} created by client A and SUBMITTED (scenario ${SCENARIO}: ${SCENARIOS[SCENARIO].title}; ${bytes} bytes, synthetic text only)`);
+  record('PASS', `synthetic case ${ref} created by client A and SUBMITTED (scenario ${SCENARIO}: ${SCENARIOS[SCENARIO].title}; seller named as client A's business; ${bytes} bytes, synthetic text only)`);
 
   // ---- 2. confirmations
   out('');

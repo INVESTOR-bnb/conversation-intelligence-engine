@@ -13,10 +13,10 @@ credential or an approval.
 | You open a case and read the conversation | case page | TESTED OFFLINE; backend VERIFIED ON STAGING |
 | You press **Run analysis** (one analysis plus independent review; result in plain language) | case page → Analysis | TESTED OFFLINE — needs the new frontend deployed |
 | You read the private report: evidence, hypotheses, uncertainty, the reviewer's challenges | case page | TESTED OFFLINE; backend VERIFIED ON STAGING (fake provider) |
-| You approve, edit or mark RED, or request a re-analysis; a preview shows exactly what the business will get | case page → Your decision | TESTED OFFLINE |
-| The business sees only the approved message: Copy / Open in WhatsApp, then "I sent it" | `/app/client` → Open | TESTED OFFLINE |
-| The business adds the prospect's reply, records the outcome, or reports an opt-out | business case page | TESTED OFFLINE |
-| You see what was sent, the reply and the outcome | case page → After your decision | TESTED OFFLINE |
+| You approve, edit or mark RED, or request a re-analysis; a preview shows exactly what the business will get | case page → Your decision | TESTED OFFLINE (screens at 390px + real-database test `20_v0_workflow`) |
+| The business sees only the approved message: Copy / Open in WhatsApp, then "I sent it" | `/app/client` → Open | TESTED OFFLINE (screens + real database) |
+| The business adds the prospect's reply, records the outcome, or reports an opt-out | business case page | TESTED OFFLINE (screens + real database) |
+| You see what was sent, the reply and the outcome | case page → After your decision | TESTED OFFLINE (screens + real database) |
 
 Analysis runs only where AI spending is enabled. On staging spending stays **off** except inside a
 guarded paid run (below), so "Run analysis" normally answers "AI spending is switched off" — by design.
@@ -56,7 +56,10 @@ cd /workspaces/conversation-intelligence-engine/recovery-prototype && git checko
    [06/10/2026, 11:30] Synthetic Academy B: Full payment is required before resumption.
    [09/10/2026, 10:00] Synthetic Academy B: Hello, registration closes soon. Should I reserve your seat?
    ```
-   Submit.
+   Submit. The seller in this paste is "Synthetic Academy B". If your test business has another
+   name (the staging test business is "Synthetic Autos A"), replace "Synthetic Academy B" with that
+   name before submitting, so the case and the conversation name the same business. A mismatch is
+   cosmetic (the case still belongs only to the business that submitted it) but confuses a demo.
 2. Sign in as **founder** → open the case → Run analysis → review the evidence, the competing
    explanations and the reviewer's challenge (the unanswered instalment question is the friction to look for).
 3. Approve or edit the message → Release.

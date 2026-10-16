@@ -591,6 +591,20 @@ test('Kimi run on another synthetic scenario (PAID_SCENARIO=too-little): that co
   expect(secretsOff()).toBe(true);
 });
 
+test('academy scenario submitted by client A: the seller in the stored conversation is client A\'s own business, never another business', async () => {
+  const r = await run([LIMIT_OK, RUN_OK], [], { ...KIMI_INPUTS, PAID_SCENARIO: 'academy-price' });
+  expect(r.code, r.out).toBe(0);
+  expect(r.out).toContain('seller named as client A\'s business');
+  const c = lastCase()!;
+  const owner = one(`select b.name from public.cases k join public.businesses b on b.id = k.business_id where k.id = :'c'`, { c });
+  expect(owner).toBe('Synthetic Autos A');
+  const body = (q: string) => one(`select (position(:'q' in body) > 0)::text from public.case_messages where case_id = :'c' and kind = 'PASTED_CONVERSATION'`, { c, q });
+  expect(body(`${owner}: The fee is 250,000.`)).toBe('true');
+  expect(body('Synthetic Academy B')).toBe('false');
+  expect(paidState()).toBe(OFF);
+  expect(secretsOff()).toBe(true);
+});
+
 test('Kimi window: the provider fails on the reviewer — no retry, the reservation is HELD and reported, everything switched off', async () => {
   knobs.provider = 'reviewer-500';
   const r = await run([LIMIT_OK, RUN_OK], [], KIMI_INPUTS);
