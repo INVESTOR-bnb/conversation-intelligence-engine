@@ -30,7 +30,7 @@ jobs:
   deploy:
     # Only the development branch may be deployed.
     if: github.ref == 'refs/heads/claude/revenue-recovery-engine-stage-1-8xg8vf'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: Playwright 1.56.1 cannot install Chromium on ubuntu-latest (26.04)
     timeout-minutes: 25
     defaults:
       run:
