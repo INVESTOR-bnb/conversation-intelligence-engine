@@ -73,8 +73,8 @@ test('nothing on the workspace can send a message', async ({ page }) => {
   await expect(a.getByTestId('proposed-message')).toBeVisible();
   await expect(page.getByRole('button', { name: /send|approve|publish|copy/i })).toHaveCount(0);
   await expect(page.getByRole('link', { name: /send|whatsapp/i })).toHaveCount(0);
-  // Only reads happen: no RPC or write is issued by opening the analysis.
-  expect(mock.requests.filter((r) => r.includes('/rest/v1/rpc/') && !r.includes('/rpc/whoami'))).toEqual([]);
+  // Only reads happen: the only RPCs are whoami and the read-only spending summary (a STABLE function).
+  expect(mock.requests.filter((r) => r.includes('/rest/v1/rpc/') && !r.includes('/rpc/whoami') && !r.includes('/rpc/founder_ai_spend_summary'))).toEqual([]);
   expect(mock.requests.filter((r) => /^(POST|PATCH|PUT|DELETE) \/rest\/v1\/(analyses|contact_restrictions|approvals)/.test(r))).toEqual([]);
 });
 
@@ -242,4 +242,41 @@ test('a fake-provider pipeline test is labelled as not an analysis (Stage 2A-5d-
   await page.reload();
   await expect(page.getByTestId('founder-analysis').getByTestId('analysis-state')).toBeVisible();
   await expect(page.getByTestId('fake-provider')).toHaveCount(0);
+});
+
+const FAKE = 'analyst:FAKE-PROVIDER-NOT-AI|reviewer:FAKE-PROVIDER-NOT-AI';
+const errorRow = (error: string) => analysisRow(CASE, { status: 'ERROR', output: null, ai_classification: null, ai_proposed_message: null, error, model: FAKE });
+
+test('a COMPLETE analysis the fake provider produced keeps its fake-provider warning', async ({ page }) => {
+  mock.analyses = [analysisRow(CASE, { output: richOutput(messageId(CASE)), model: FAKE })];
+  const a = await openCase(page);
+  await expect(a.getByTestId('analysis-state')).toHaveAttribute('data-state', 'READY');
+  await expect(a.getByTestId('fake-provider')).toContainText('Pipeline test output from the fake provider — no AI read this case.');
+});
+
+test('each pre-dispatch spending refusal is "Analysis not run", not a failure, and never fake-provider output', async ({ page }) => {
+  const codes = ['SPENDING_DISABLED', 'BUDGET_EXCEEDED', 'RATE_LIMITED', 'MODEL_NOT_PRICED', 'RESERVATION_TOO_LARGE'];
+  mock.analyses = [errorRow(`PIPELINE_ERROR: ${codes[0]}`)];
+  let a = await openCase(page);
+  for (const code of codes) {
+    mock.analyses = [errorRow(`PIPELINE_ERROR: ${code}`)];
+    await page.reload();
+    a = page.getByTestId('founder-analysis');
+    await expect(a.getByTestId('analysis-state'), code).toHaveAttribute('data-state', 'NOT_RUN');
+    await expect(a.getByRole('heading', { name: 'Analysis not run' }), code).toBeVisible();
+    await expect(a, code).toContainText('No provider was called and no AI analysis was produced.');
+    await expect(a.getByTestId('analysis-error'), code).toHaveText(`PIPELINE_ERROR: ${code}`);
+    await expect(a.getByTestId('fake-provider'), code).toHaveCount(0);
+  }
+});
+
+test('a real pipeline failure stays "Analysis failed"; an ERROR row is never labelled fake-provider output', async ({ page }) => {
+  for (const error of ['PIPELINE_ERROR: PROVIDER_TIMEOUT_ANALYST', 'PIPELINE_ERROR: SPENDING_DISABLED_ABANDONED', 'PIPELINE_ERROR: INTERNAL_ERROR']) {
+    mock.analyses = [errorRow(error)];
+    if (error.endsWith('ANALYST')) await openCase(page); else await page.reload();
+    const a = page.getByTestId('founder-analysis');
+    await expect(a.getByTestId('analysis-state'), error).toHaveAttribute('data-state', 'FAILED');
+    await expect(a.getByRole('heading', { name: 'Analysis failed' }), error).toBeVisible();
+    await expect(a.getByTestId('fake-provider'), error).toHaveCount(0);
+  }
 });

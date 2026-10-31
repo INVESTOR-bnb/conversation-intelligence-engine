@@ -170,19 +170,95 @@ test('the database refusal is shown plainly: a stale analysis cannot be approved
   expect(mock.recommendations.size).toBe(0);
 });
 
-test('running an analysis while spending is off, or offline: a clear message, nothing changes', async ({ page }) => {
+// ---------------------------------------------------------------- run analysis: the spending gate
+
+const FAKE_MODEL = 'analyst:FAKE-PROVIDER-NOT-AI|reviewer:FAKE-PROVIDER-NOT-AI';
+const runCard = (page: Page) => page.getByTestId('run-analysis');
+
+test('spending switched off: no Run analysis action, the switched-off explanation instead, nothing called (390px)', async ({ page }) => {
+  mock.spendSummary = 'off';
+  await login(page, 'founder');
+  await page.goto(`/app/founder/case/${CASE}`);
+  await expect(runCard(page).getByTestId('run-analysis-gate'))
+    .toHaveText('Analysis is currently switched off. No analysis will run until a guarded founder-approved run is started.');
+  await expect(runCard(page)).toHaveAttribute('data-gate', 'disabled');
+  await expect(page.getByRole('button', { name: 'Run analysis' })).toHaveCount(0);
+  expect(mock.functionCalls).toHaveLength(0);
+  expect(mock.analyses).toHaveLength(0);
+  await noHorizontalScroll(page);
+});
+
+test('spending switched on: an eligible case offers Run analysis; a case that is not analysable does not', async ({ page }) => {
+  mock.spendSummary = 'on';
+  await login(page, 'founder');
+  await page.goto(`/app/founder/case/${CASE}`);
+  await expect(runCard(page)).toHaveAttribute('data-gate', 'enabled');
+  await expect(page.getByRole('button', { name: 'Run analysis' })).toBeVisible();
+  await expect(runCard(page).getByTestId('run-analysis-gate')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Run analysis' }).click();
+  // The confirmation makes no claim about which provider runs (that depends on the server's configuration).
+  await expect(runCard(page)).not.toContainText(/fake/i);
+  await expect(runCard(page)).toContainText('The server checks the spending limits first and refuses the run if it is not authorised.');
+  await noHorizontalScroll(page);
+
+  awaitingReview();
+  await page.reload();
+  await expect(page.getByTestId('founder-decision')).toBeVisible();
+  await expect(runCard(page)).toHaveCount(0);
+});
+
+test('spending status still loading, or unreadable: fails closed with no active Run analysis action', async ({ page }) => {
+  mock.spendSummary = 'hang';
+  await login(page, 'founder');
+  await page.goto(`/app/founder/case/${CASE}`);
+  await expect(runCard(page).getByTestId('run-analysis-gate')).toHaveText('Checking whether analysis is switched on…');
+  await expect(page.getByRole('button', { name: 'Run analysis' })).toHaveCount(0);
+
+  mock.spendSummary = 'error';
+  await page.reload();
+  await expect(runCard(page).getByTestId('run-analysis-gate'))
+    .toHaveText('Could not confirm that analysis is authorised, so it cannot be started here. Reload the page to check again.');
+  await expect(runCard(page)).toHaveAttribute('data-gate', 'unavailable');
+  await expect(page.getByRole('button', { name: 'Run analysis' })).toHaveCount(0);
+  expect(mock.functionCalls).toHaveLength(0);
+});
+
+test('a run the server refuses for spending (as the real backend: an ERROR row is written) shows "Analysis not run", never a fake-provider label', async ({ page }) => {
+  mock.spendSummary = 'on'; // e.g. switched off between page load and the tap: the database still refuses
   mock.analyzeMode = 'SPENDING_DISABLED';
   await login(page, 'founder');
   await page.goto(`/app/founder/case/${CASE}`);
   await page.getByRole('button', { name: 'Run analysis' }).click();
+  mock.spendSummary = 'off';
   await page.getByRole('button', { name: 'Run analysis' }).last().click();
-  await expect(page.getByTestId('run-analysis-result')).toContainText('AI spending is switched off, so no analysis was started.');
-  expect(mock.analyses).toHaveLength(0);
+  await expect(page.getByTestId('run-analysis-result'))
+    .toHaveText('Analysis not run: AI spending is switched off. No provider was called and no AI analysis was produced.');
+  // the backend recorded the started run as ERROR with the configured (fake) model name
+  expect(mock.analyses).toHaveLength(1);
+  expect(mock.analyses[0]).toMatchObject({ status: 'ERROR', error: 'PIPELINE_ERROR: SPENDING_DISABLED', model: FAKE_MODEL });
   expect(caseState()).toBe('SUBMITTED');
+  const a = page.getByTestId('founder-analysis');
+  await expect(a.getByTestId('analysis-state')).toHaveAttribute('data-state', 'NOT_RUN');
+  await expect(a.getByRole('heading', { name: 'Analysis not run' })).toBeVisible();
+  await expect(a).toContainText('No provider was called and no AI analysis was produced.');
+  await expect(a.getByRole('heading', { name: 'Analysis failed' })).toHaveCount(0);
+  await expect(page.getByTestId('fake-provider')).toHaveCount(0);
+  await expect(page.locator('body')).not.toContainText(/fake provider/i);
+  // the re-check after the run sees spending off: no button is offered again
+  await expect(runCard(page).getByTestId('run-analysis-gate')).toContainText('Analysis is currently switched off.');
+  await expect(page.getByRole('button', { name: 'Run analysis' })).toHaveCount(0);
+  await noHorizontalScroll(page);
+});
+
+test('the analysis service unreachable: a clear message, nothing changes', async ({ page }) => {
   mock.analyzeMode = 'network';
+  await login(page, 'founder');
+  await page.goto(`/app/founder/case/${CASE}`);
   await page.getByRole('button', { name: 'Run analysis' }).click();
   await page.getByRole('button', { name: 'Run analysis' }).last().click();
   await expect(page.getByTestId('run-analysis-result')).toContainText('Could not reach the analysis service');
+  expect(mock.analyses).toHaveLength(0);
+  expect(caseState()).toBe('SUBMITTED');
 });
 
 test('request re-analysis from the decision card', async ({ page }) => {

@@ -161,7 +161,7 @@ export function FounderAnalysis({ caseId, evidenceVersion }: { caseId: string; e
               {latest.prompt_version ? ` · prompt ${latest.prompt_version}` : ''}
             </p>
           )}
-          {(state === 'REJECTED' || state === 'FAILED' || (state === 'STALE' && latest?.status === 'ERROR')) && latest?.error && (
+          {(state === 'REJECTED' || state === 'NOT_RUN' || state === 'FAILED' || (state === 'STALE' && latest?.status === 'ERROR')) && latest?.error && (
             <pre className="message-card faded" data-testid="analysis-error">{latest.error}</pre>
           )}
           {excluded.length > 0 && (

@@ -77,6 +77,11 @@ export class MockSupabase {
   history = new Map<string, { at: string; label: string }[]>();
   /** What the analyze-case Edge Function does: 'complete' writes a reviewed analysis; otherwise the code it refuses with. */
   analyzeMode: 'complete' | 'SPENDING_DISABLED' | 'network' = 'complete';
+  /**
+   * What public.founder_ai_spend_summary() answers: enabled true/false, a server error, or never
+   * (still loading). Staging's real default is OFF; 'on' here so the existing run-analysis tests run.
+   */
+  spendSummary: 'on' | 'off' | 'error' | 'hang' = 'on';
   /** Bearer tokens the Edge Function received (to prove the founder's own session is used). */
   functionCalls: string[] = [];
   private n = 0;
@@ -234,7 +239,16 @@ export class MockSupabase {
       if (!c) return reply(404, 'NOT_STARTED', 'NOT_FOUND');
       if (!['SUBMITTED', 'PROSPECT_REPLIED', 'REANALYZING'].includes(c.workflow_state)) return reply(409, 'NOT_STARTED', 'INVALID_STATE');
       if (this.analyzeMode === 'network') return route.abort('failed');
-      if (this.analyzeMode !== 'complete') return reply(503, 'NOT_STARTED', this.analyzeMode);
+      if (this.analyzeMode === 'SPENDING_DISABLED') {
+        // As the real pipeline: founder_start_analysis has already written the analysis row; the
+        // reservation is refused before any provider dispatch and the run is recorded as ERROR with
+        // the CONFIGURED (fake) model name, and the case returns to its prior state.
+        const version = this.analyses.filter((a) => a.case_id === c.id).length + 1;
+        const row = analysisRow(c.id, { version, status: 'ERROR', evidence_version: c.evidence_version, output: null, ai_classification: null,
+          ai_proposed_message: null, error: 'PIPELINE_ERROR: SPENDING_DISABLED', model: 'analyst:FAKE-PROVIDER-NOT-AI|reviewer:FAKE-PROVIDER-NOT-AI' });
+        this.analyses.push(row);
+        return reply(200, 'FAILED', 'SPENDING_DISABLED', String(row.id));
+      }
       const version = this.analyses.filter((a) => a.case_id === c.id).length + 1;
       const row = analysisRow(c.id, { version, evidence_version: c.evidence_version, output: reviewedOutput(messageId(c.id)), ai_classification: 'YELLOW', model: 'analyst:kimi-k3|reviewer:kimi-k3' });
       this.analyses.push(row);
@@ -250,6 +264,12 @@ export class MockSupabase {
         .sort((a, b) => ('version' in a ? Number(b.version) - Number(a.version) : String(a.created_at).localeCompare(String(b.created_at))))
         .map(({ case_id: _c, ...r }) => r);
       return json(200, rows);
+    }
+    if (p === '/rest/v1/rpc/founder_ai_spend_summary') {
+      if (!isFounder) return forbidden();
+      if (this.spendSummary === 'hang') return; // never answered: the page stays "checking"
+      if (this.spendSummary === 'error') return json(500, { code: 'XX000', message: 'internal error' });
+      return json(200, { enabled: this.spendSummary === 'on', budget_usd: 20, stop_at_usd: 18, max_reservation_usd: 1, committed_usd: 0 });
     }
     if (p === '/rest/v1/rpc/client_list_cases') {
       if (!myBusiness) return json(200, []);

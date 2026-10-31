@@ -172,7 +172,22 @@ export interface AnalysisRow {
 }
 export interface RestrictionRow { id: string; kind: string; source: string; status: string; note: string | null; created_at: string }
 
-export type AnalysisState = 'NONE' | 'IN_PROGRESS' | 'READY' | 'INSUFFICIENT' | 'STALE' | 'REJECTED' | 'FAILED';
+export type AnalysisState = 'NONE' | 'IN_PROGRESS' | 'READY' | 'INSUFFICIENT' | 'STALE' | 'REJECTED' | 'NOT_RUN' | 'FAILED';
+
+/**
+ * Spending refusals raised by the database reservation (internal_reserve_ai_spend) BEFORE any
+ * provider dispatch. The pipeline still records the started analysis as ERROR with
+ * "PIPELINE_ERROR: <code>", but no provider was called and nothing was analysed.
+ */
+export const PRE_DISPATCH_REFUSALS = ['SPENDING_DISABLED', 'BUDGET_EXCEEDED', 'RATE_LIMITED', 'MODEL_NOT_PRICED', 'RESERVATION_TOO_LARGE'] as const;
+export const isPreDispatchRefusal = (code: string) => (PRE_DISPATCH_REFUSALS as readonly string[]).includes(code);
+
+/** The refusal code of an ERROR analysis that was refused before dispatch, else null. */
+export function preDispatchRefusal(row: AnalysisRow | null): string | null {
+  if (row?.status !== 'ERROR') return null;
+  const m = /^PIPELINE_ERROR: ([A-Z_]+)$/.exec(row.error ?? '');
+  return m && isPreDispatchRefusal(m[1]) ? m[1] : null;
+}
 
 /**
  * State of the latest analysis for a case. `analyses` is every analysis of the
@@ -187,6 +202,7 @@ export function analysisState(analyses: AnalysisRow[], caseEvidenceVersion: numb
     const e = latest.error ?? '';
     if (e.startsWith('REJECTED')) return { state: 'REJECTED', latest };
     if (e.startsWith('STALE')) return { state: 'STALE', latest };
+    if (preDispatchRefusal(latest)) return { state: 'NOT_RUN', latest };
     return { state: 'FAILED', latest };
   }
   if (latest.evidence_version !== caseEvidenceVersion) return { state: 'STALE', latest };
@@ -200,15 +216,18 @@ export const STATE_TEXT: Record<AnalysisState, { title: string; body: string; to
   INSUFFICIENT: { title: 'Insufficient evidence', body: 'The analysis found too little evidence for findings. Only what is missing is shown; no hypotheses or recommendation were made.', tone: 'warn' },
   STALE: { title: 'Stale — evidence changed', body: 'The evidence changed after this analysis (for example a screenshot was deleted or a reply was added). It cannot be approved. Request a re-analysis.', tone: 'warn' },
   REJECTED: { title: 'Analysis rejected', body: 'The analysis did not pass the analysis contract (for example a quote that is not in the evidence) and was discarded. No findings are kept.', tone: 'warn' },
+  NOT_RUN: { title: 'Analysis not run', body: 'No provider was called and no AI analysis was produced.', tone: 'info' },
   FAILED: { title: 'Analysis failed', body: 'The analysis did not complete. No findings are kept.', tone: 'warn' },
 };
 
 /**
- * Stage 2A-5d-4b: analyses written by the pipeline's FAKE provider (no AI; a pipeline test on
- * staging). The model column says so; the workspace labels them so they are never mistaken for analyses.
+ * Stage 2A-5d-4b: an analysis the pipeline's FAKE provider actually completed (no AI; a pipeline
+ * test on staging), labelled so it is never mistaken for an analysis. Only a completed analysis
+ * proves the fake ran: an ERROR row stores the CONFIGURED model even when no provider was called
+ * (for example a spending refusal), so its model column proves nothing.
  */
 export function isFakeProviderAnalysis(row: AnalysisRow | null): boolean {
-  return !!row?.model && row.model.includes('FAKE-PROVIDER');
+  return (row?.status === 'COMPLETE' || row?.status === 'INSUFFICIENT_EVIDENCE') && !!row.model && row.model.includes('FAKE-PROVIDER');
 }
 
 /** Findings are shown only for an analysis that passed the contract and is not in progress. */

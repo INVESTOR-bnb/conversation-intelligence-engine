@@ -12,21 +12,42 @@ import { clientStatusLabel } from './cases';
 import { navigate } from './router';
 import {
   actionErrorMessage, analysisRunMessage, approvalType, canRunAnalysis, CLIENT_TEXT_DEFAULTS, DECISION_LIMITS, OUTCOME_LABELS, OUTCOME_STATES,
-  validateDecision, validateOutcome, whatsappLink, type Decision, type DecisionErrors, type OutcomeErrors, type OutcomeInput, type OutcomeState,
+  SPEND_GATE_TEXT, spendGate, validateDecision, validateOutcome, whatsappLink, type Decision, type DecisionErrors, type OutcomeErrors, type OutcomeInput, type OutcomeState, type SpendGate,
 } from './workflow';
 
 const today = () => new Date().toISOString().slice(0, 10);
 
 // ---------------------------------------------------------------- founder: run the analysis
 
-/** Starts ONE analysis through the analyze-case Edge Function, with the founder's own session. */
+/**
+ * Starts ONE analysis through the analyze-case Edge Function, with the founder's own session.
+ * The button is offered only when the case can be analysed AND founder_ai_spend_summary() confirms
+ * spending is enabled; while that is loading, unreadable or off, no active button is shown.
+ * The database enforces the same switch on every run; this only avoids offering a refused run.
+ */
 export function FounderRunAnalysis({ caseId, workflowState, onDone }: { caseId: string; workflowState: string; onDone: () => void }) {
   const { supabase } = useAuth();
   const [confirming, setConfirming] = useState(false);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
+  const [gate, setGate] = useState<SpendGate>('loading');
+  const analysable = canRunAnalysis(workflowState);
 
-  if (!canRunAnalysis(workflowState) && !result) return null;
+  const checkGate = useCallback(async () => {
+    setGate('loading');
+    try {
+      const r = await supabase.rpc('founder_ai_spend_summary');
+      setGate(spendGate({ data: r.data, error: r.error }));
+    } catch {
+      setGate('unavailable');
+    }
+  }, [supabase]);
+
+  useEffect(() => {
+    if (analysable) void checkGate();
+  }, [analysable, checkGate]);
+
+  if (!analysable && !result) return null;
 
   const run = async () => {
     setConfirming(false);
@@ -45,18 +66,22 @@ export function FounderRunAnalysis({ caseId, workflowState, onDone }: { caseId: 
     setResult(body?.outcome && body.code ? analysisRunMessage(body.outcome, body.code)
       : { tone: 'warn', text: 'Could not reach the analysis service. Check your connection; if this persists, the case state shows whether anything started.' });
     onDone();
+    void checkGate();
   };
 
   return (
     <Card title="Analysis">
-      <div data-testid="run-analysis">
+      <div data-testid="run-analysis" data-gate={analysable ? gate : 'not-analysable'}>
         {result && <Notice tone={result.tone}><span data-testid="run-analysis-result">{result.text}</span></Notice>}
-        {canRunAnalysis(workflowState) && !running && !confirming && (
+        {analysable && gate !== 'enabled' && !running && (
+          <p className="muted" role="status" data-testid="run-analysis-gate">{SPEND_GATE_TEXT[gate]}</p>
+        )}
+        {analysable && gate === 'enabled' && !running && !confirming && (
           <Button block onClick={() => setConfirming(true)}>Run analysis</Button>
         )}
-        {confirming && (
+        {analysable && gate === 'enabled' && confirming && (
           <ConfirmBox title="Run one analysis of this case?"
-            body={<p className="muted small">The conversation is sent to the configured AI model for one analysis and one independent review. On staging the AI provider is normally the free fake; a paid provider is enabled only for a founder-approved run, and each analysis is capped at USD 1. Nothing is sent to the prospect.</p>}
+            body={<p className="muted small">The conversation is sent for one analysis and one independent review. The server checks the spending limits first and refuses the run if it is not authorised. Nothing is sent to the prospect.</p>}
             confirmLabel="Run analysis" onConfirm={() => void run()} onCancel={() => setConfirming(false)} />
         )}
         {running && <p className="muted" role="status" data-testid="analysis-running">Analysing… this can take up to two minutes. Keep this page open.</p>}

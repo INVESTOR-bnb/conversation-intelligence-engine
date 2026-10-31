@@ -4,6 +4,7 @@
 // checks only give a clear message before the request is sent.
 
 import type { Classification } from '../domain/types';
+import { isPreDispatchRefusal } from './analysis';
 import { caseErrorMessage } from './cases';
 
 // ---------------------------------------------------------------- running an analysis (analyze-case)
@@ -11,6 +12,26 @@ import { caseErrorMessage } from './cases';
 /** States in which the founder may start an analysis (founder_start_analysis accepts exactly these). */
 export const ANALYSABLE_STATES = ['SUBMITTED', 'PROSPECT_REPLIED', 'REANALYZING'] as const;
 export const canRunAnalysis = (state: string) => (ANALYSABLE_STATES as readonly string[]).includes(state);
+
+/**
+ * Whether the founder may be offered "Run analysis", from public.founder_ai_spend_summary().
+ * Only an explicit `enabled: true` opens it; loading, an error or anything unexpected keeps it
+ * closed (the database enforces the switch either way; this only avoids offering a refused run).
+ */
+export type SpendGate = 'loading' | 'enabled' | 'disabled' | 'unavailable';
+
+export function spendGate(result: { data: unknown; error: unknown } | null): SpendGate {
+  if (!result) return 'loading';
+  if (result.error || !result.data || typeof result.data !== 'object' || Array.isArray(result.data)) return 'unavailable';
+  const enabled = (result.data as { enabled?: unknown }).enabled;
+  return enabled === true ? 'enabled' : enabled === false ? 'disabled' : 'unavailable';
+}
+
+export const SPEND_GATE_TEXT: Record<Exclude<SpendGate, 'enabled'>, string> = {
+  loading: 'Checking whether analysis is switched on…',
+  disabled: 'Analysis is currently switched off. No analysis will run until a guarded founder-approved run is started.',
+  unavailable: 'Could not confirm that analysis is authorised, so it cannot be started here. Reload the page to check again.',
+};
 
 /** Plain-language result of one analyze-case call ({outcome, code} from the Edge Function). */
 export function analysisRunMessage(outcome: string, code: string): { tone: 'info' | 'warn'; text: string } {
@@ -20,22 +41,25 @@ export function analysisRunMessage(outcome: string, code: string): { tone: 'info
   if (outcome === 'COMPLETED' && code === 'INSUFFICIENT_EVIDENCE') return { tone: 'warn', text: 'Analysis complete: there is not enough evidence for findings. See what is missing below.' };
   if (outcome === 'COMPLETED') return { tone: 'info', text: 'Analysis complete. Review it below before any decision.' };
   const known: Record<string, string> = {
-    SPENDING_DISABLED: 'AI spending is switched off, so no analysis was started. (Paid analysis is enabled only for a founder-approved run.)',
-    BUDGET_EXCEEDED: 'The AI budget limit is reached. No analysis was started.',
-    RESERVATION_TOO_LARGE: 'This conversation is too long for the per-analysis cost limit. No analysis was started.',
-    MODEL_NOT_PRICED: 'The AI model is not enabled for analysis. No analysis was started.',
+    SPENDING_DISABLED: 'AI spending is switched off.',
+    BUDGET_EXCEEDED: 'The AI budget limit is reached.',
+    RESERVATION_TOO_LARGE: 'This conversation is too long for the per-analysis cost limit.',
+    MODEL_NOT_PRICED: 'The AI model is not enabled for analysis.',
     PROVIDER_NOT_CONFIGURED: 'The analysis service is not configured. No analysis was started.',
     MODEL_PRICE_NOT_CONFIGURED: 'The deployed analysis service has no price for this model. No analysis was started.',
     PAID_PROVIDER_TEXT_ONLY: 'The AI model can only analyse pasted text, not screenshots. No analysis was started.',
     CONTACT_RESTRICTED: 'Contact with this prospect is restricted. No analysis was started.',
     INSUFFICIENT_EVIDENCE: 'There is no usable evidence in this case. No analysis was started.',
     INVALID_STATE: 'This case cannot be analysed in its current state. Reload the page.',
-    RATE_LIMITED: 'Too many analyses were started recently. Try again later.',
+    RATE_LIMITED: 'Too many analyses were started recently; try again later.',
     ORIGIN_NOT_ALLOWED: 'The analysis service does not accept requests from this site.',
     FORBIDDEN: 'Only the founder can start an analysis.',
     TIMEOUT: 'The AI did not answer in time. The analysis failed and its cost is held for reconciliation.',
     CONTRACT_REJECTED: 'The AI output did not pass the evidence contract (for example a quote that is not in the conversation). Nothing was kept.',
   };
+  if (outcome === 'FAILED' && isPreDispatchRefusal(code)) {
+    return { tone: 'warn', text: `Analysis not run: ${known[code]} No provider was called and no AI analysis was produced.` };
+  }
   if (outcome === 'LOCK_HELD') return { tone: 'warn', text: 'An analysis of this case is already running. Wait, then reload.' };
   const text = known[code] ?? known[code.replace(/_(ANALYST|REVIEWER)$/, '')];
   if (text) return { tone: 'warn', text };
