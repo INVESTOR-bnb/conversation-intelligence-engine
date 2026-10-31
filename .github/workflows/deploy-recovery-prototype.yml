@@ -12,9 +12,14 @@
 #                                  Kimi settings → spending ON (USD 3 allowance, USD 1 cap) → case → readiness
 #   paid-deactivate                spending OFF (the Kimi key is kept)
 #   paid-deactivate-and-remove-key spending OFF and the paid provider settings deleted
-# The paid job runs in the protected environment "staging-paid", whose secrets are
-# SUPABASE_ACCESS_TOKEN (sbp_…) and KIMI_API_KEY; values reach steps only as environment
-# variables, never on a command line, and are never printed.
+# A paid target also needs expected_sha: the full 40-character hash of the branch commit to run.
+# Job "paid-gate" (no environment, no secret) refuses unless the run is a manual dispatch of this
+# repository's authorised branch at exactly expected_sha, and the environment "staging-paid" is
+# protected (owner as required reviewer, no admin bypass, only this branch). Only then can job
+# "paid-staging" start; it waits for the owner's approval and then receives the environment's
+# secrets SUPABASE_ACCESS_TOKEN (scoped sbp_… token) and KIMI_API_KEY, as environment variables
+# of the two steps that need them, never on a command line, never printed.
+# The paid jobs use no third-party action: git and the runner's own Node only.
 # Deploys as the Pages project's PRODUCTION branch ("main"):
 # https://revenue-recovery-v0.pages.dev
 #
@@ -38,19 +43,23 @@ on:
         required: true
         default: frontend
         options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key]
+      expected_sha:
+        description: Paid targets only — the full 40-character commit hash this run must execute
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
-
-concurrency:
-  group: cloudflare-pages-revenue-recovery-v0
-  cancel-in-progress: false
 
 jobs:
   deploy:
     # Only the development branch may be deployed.
     if: github.ref == 'refs/heads/claude/revenue-recovery-engine-stage-1-8xg8vf' && (inputs.target == 'frontend' || inputs.target == '')
     runs-on: ubuntu-24.04 # pinned: Playwright 1.56.1 cannot install Chromium on ubuntu-latest (26.04)
+    concurrency:
+      group: cloudflare-pages-revenue-recovery-v0
+      cancel-in-progress: false
     timeout-minutes: 25
     defaults:
       run:
@@ -148,25 +157,97 @@ jobs:
           --branch=main
           --commit-hash="$GITHUB_SHA"
 
-  paid-staging:
-    if: github.ref == 'refs/heads/claude/revenue-recovery-engine-stage-1-8xg8vf' && startsWith(inputs.target, 'paid-')
+  # ------------------------------------------------------------------ paid staging
+  # Shared by both paid jobs: fetch ONLY the authorised branch from the public repository with
+  # plain git (no third-party action, no credential, nothing persisted) and check out exactly
+  # expected_sha. Node: the runner image's own Node 22 (no setup action).
+
+  paid-gate:
+    if: >-
+      github.repository == 'INVESTOR-bnb/conversation-intelligence-engine'
+      && github.event_name == 'workflow_dispatch'
+      && github.ref == 'refs/heads/claude/revenue-recovery-engine-stage-1-8xg8vf'
+      && startsWith(inputs.target, 'paid-')
     runs-on: ubuntu-24.04
-    environment: staging-paid
-    timeout-minutes: 30
+    timeout-minutes: 15
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: recovery-prototype
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0 # the deploy script checks the branch contains the reviewed stages
+      - name: Check out exactly expected_sha of the authorised branch (git only, no credential)
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          BRANCH: claude/revenue-recovery-engine-stage-1-8xg8vf
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::expected_sha must be a full 40-character commit hash"; exit 1; }
+          git init -q .
+          git remote add origin "https://github.com/INVESTOR-bnb/conversation-intelligence-engine.git"
+          git fetch -q --no-tags origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+          git checkout -q -B "$BRANCH" "$EXPECTED_SHA"
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: recovery-prototype/package-lock.json
+      - name: Use the runner's Node 22
+        working-directory: .
+        run: |
+          dir="$(ls -d /opt/hostedtoolcache/node/22.*/x64 2>/dev/null | sort -V | tail -1)"
+          [ -n "$dir" ] || { echo "::error::Node 22 is not available on this runner image"; exit 1; }
+          echo "$dir/bin" >> "$GITHUB_PATH"
+
+      - name: Gate (run, commit and environment protection; no secret exists in this job)
+        env:
+          TARGET: ${{ inputs.target }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node supabase/scripts/paid-staging-gate.mjs
+
+      - name: Offline checks (no secret exists in this job; install scripts disabled)
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts
+          npm run typecheck
+          npx playwright test --config playwright.unit.config.ts tests/unit/stage2a6d.spec.ts tests/unit/paidStagingWorkflow.spec.ts tests/unit/paidStagingGate.spec.ts
+
+  paid-staging:
+    needs: paid-gate
+    if: >-
+      github.repository == 'INVESTOR-bnb/conversation-intelligence-engine'
+      && github.event_name == 'workflow_dispatch'
+      && github.ref == 'refs/heads/claude/revenue-recovery-engine-stage-1-8xg8vf'
+      && startsWith(inputs.target, 'paid-')
+      && github.sha == inputs.expected_sha
+      && needs.paid-gate.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: staging-paid
+    # One paid-staging operation at a time; one that has started is never cancelled.
+    concurrency:
+      group: paid-staging-supabase-aqwdwswpmbnzmkvyuqil
+      cancel-in-progress: false
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: recovery-prototype
+    steps:
+      - name: Check out exactly expected_sha of the authorised branch (git only, no credential)
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          BRANCH: claude/revenue-recovery-engine-stage-1-8xg8vf
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] && [ "$EXPECTED_SHA" = "$GITHUB_SHA" ] || { echo "::error::expected_sha mismatch"; exit 1; }
+          git init -q .
+          git remote add origin "https://github.com/INVESTOR-bnb/conversation-intelligence-engine.git"
+          git fetch -q --no-tags origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+          git checkout -q -B "$BRANCH" "$EXPECTED_SHA"
+
+      - name: Use the runner's Node 22
+        working-directory: .
+        run: |
+          dir="$(ls -d /opt/hostedtoolcache/node/22.*/x64 2>/dev/null | sort -V | tail -1)"
+          [ -n "$dir" ] || { echo "::error::Node 22 is not available on this runner image"; exit 1; }
+          echo "$dir/bin" >> "$GITHUB_PATH"
 
       # Names only: says which required secret is missing, never a value.
       - name: Check required secrets (names only)
@@ -175,19 +256,10 @@ jobs:
           HAS_SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN != '' }}
           HAS_KIMI_API_KEY: ${{ secrets.KIMI_API_KEY != '' }}
         run: |
-          ACTION="${TARGET#paid-}"
           fail=0
           [ "$HAS_SUPABASE_ACCESS_TOKEN" = "true" ] || { echo "::error::Missing secret SUPABASE_ACCESS_TOKEN in environment staging-paid"; fail=1; }
-          if [ "$ACTION" = "activate" ] && [ "$HAS_KIMI_API_KEY" != "true" ]; then echo "::error::Missing secret KIMI_API_KEY in environment staging-paid"; fail=1; fi
-          [ "$fail" = 0 ] && echo "required secrets present for $ACTION (values not shown)"
+          if [ "$TARGET" = "paid-activate" ] && [ "$HAS_KIMI_API_KEY" != "true" ]; then echo "::error::Missing secret KIMI_API_KEY in environment staging-paid"; fail=1; fi
           exit $fail
-
-      - name: Install dependencies
-        run: npm ci --no-audit --no-fund
-
-      - name: Offline tests (activate only)
-        if: inputs.target == 'paid-activate'
-        run: npm run typecheck && npm run test:unit
 
       # Code only: the deploy script writes NO provider setting in its default mode.
       - name: Deploy analyze-case code (provider settings untouched)
@@ -198,9 +270,17 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: bash supabase/scripts/deploy-analyze-case-2a6d.sh
 
-      - name: Run the chosen action
+      - name: Run the chosen paid-staging action
         env:
           TARGET: ${{ inputs.target }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-        run: node supabase/scripts/paid-staging.mjs "${TARGET#paid-}"
+        run: |
+          case "$TARGET" in
+            paid-readiness) action=readiness ;;
+            paid-activate) action=activate ;;
+            paid-deactivate) action=deactivate ;;
+            paid-deactivate-and-remove-key) action=deactivate-and-remove-key ;;
+            *) echo "::error::unknown target"; exit 1 ;;
+          esac
+          node supabase/scripts/paid-staging.mjs "$action"

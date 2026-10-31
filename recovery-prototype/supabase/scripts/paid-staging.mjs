@@ -268,16 +268,23 @@ async function prepareCase() {
   const text = scenarioText(scenario, stamp, biz.business_name);
   if (!text || text.includes('$rre_text$')) throw new Stop('internal: the synthetic conversation cannot be quoted');
   const key = crypto.randomUUID();
+  // Serialised and re-checked inside the statement: two concurrent runs never both create a case.
   await change('casecreate', `do $rre$
 declare v_case uuid;
 begin
+  perform pg_advisory_xact_lock(hashtext('rre-dash-paid-case'));
+  if exists (select 1 from public.cases c where c.reference like '${CASE_PREFIX}%'
+               and c.workflow_state in (${ANALYSABLE.map((x) => `'${x}'`).join(', ')})
+               and not exists (select 1 from public.analyses a where a.case_id = c.id)) then
+    return;
+  end if;
   perform set_config('request.jwt.claims', json_build_object('sub', '${biz.member}', 'role', 'authenticated')::text, true);
   execute 'set local role authenticated';
   v_case := public.client_create_case('${key}'::uuid, '${ref}', '${SCENARIOS[scenario].title.replace(/'/g, '')}', 'Other', 'TEXT', $rre_text$${text}$rre_text$);
   perform public.client_submit_case(v_case);
   execute 'reset role';
 end $rre$;`);
-  const made = await read('case', caseSql(ref));
+  const made = await read('case', caseSql(CASE_PREFIX));
   if (!made) throw new Stop('the synthetic case was not found after creating it');
   return made;
 }

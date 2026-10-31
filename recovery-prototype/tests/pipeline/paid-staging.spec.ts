@@ -7,7 +7,8 @@
 import { expect, test } from '@playwright/test';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -43,6 +44,8 @@ const knobs = {
   fn: { status: 'ACTIVE', verify_jwt: true, version: 42, updated_at: 1 } as Record<string, unknown>,
   body: CURRENT_BODY,
   frontendJs: FRONTEND_JS,
+  /** Management API calls answered 403 (a token without that permission): SQL tags or "METHOD /route". */
+  deny: new Set<string>(),
 };
 const mgmtLog: string[] = [];
 const fnRequests: { auth: boolean }[] = [];
@@ -51,6 +54,7 @@ function reset() {
   knobs.fn = { status: 'ACTIVE', verify_jwt: true, version: 42, updated_at: 1 };
   knobs.body = CURRENT_BODY;
   knobs.frontendJs = FRONTEND_JS;
+  knobs.deny = new Set();
   mgmtLog.length = 0;
   fnRequests.length = 0;
 }
@@ -69,6 +73,7 @@ const mgmt = createServer((req, res) => { void (async () => {
     const query = (JSON.parse(raw) as { query: string }).query;
     const tag = /^\/\* rre:([a-z]+) \*\//.exec(query)?.[1] ?? 'untagged';
     mgmtLog.push(tag);
+    if (knobs.deny.has(tag)) return send(res, 403, { message: 'Forbidden', missing_permissions: ['database_write'] });
     const body = query.replace(/^\/\*[^*]*\*\/\s*/, '');
     try {
       if (/^do \$rre\$/.test(body)) { sql(body); return send(res, 201, []); }
@@ -77,6 +82,7 @@ const mgmt = createServer((req, res) => { void (async () => {
     } catch (e) { return send(res, 400, { message: (e as Error).message }); }
   }
   mgmtLog.push(`${req.method} ${route}`);
+  if (knobs.deny.has(`${req.method} ${route}`)) return send(res, 403, { message: 'Forbidden', missing_permissions: ['secrets_write'] });
   if (route === '/functions/analyze-case' && req.method === 'GET') return send(res, 200, knobs.fn);
   if (route === '/functions/analyze-case/body' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/octet-stream' }); res.end(knobs.body); return; }
   if (route === '/secrets' && req.method === 'GET') return send(res, 200, [...knobs.secrets].map(([name, value]) => ({ name, value: sha(value) })));
@@ -147,7 +153,14 @@ function run(cmd: string, over: Record<string, string | undefined> = {}): Promis
   child.stderr.on('data', (d) => { out += d; });
   return new Promise((r) => child.on('exit', (code) => r({ code, out })));
 }
-const noSecrets = (out: string) => { for (const s of [PAT, KIMI_KEY]) expect(out, 'a credential was printed').not.toContain(s); };
+/** Neither secret, nor its SHA-256 fingerprint, nor any 12-character slice of it, appears. */
+const noSecrets = (out: string) => {
+  for (const s of [PAT, KIMI_KEY]) {
+    expect(out, 'a credential was printed').not.toContain(s);
+    expect(out, 'a credential fingerprint was printed').not.toContain(sha(s));
+    for (let i = 0; i + 12 <= s.length; i++) expect(out, 'part of a credential was printed').not.toContain(s.slice(i, i + 12));
+  }
+};
 const noCredentialedFunctionCall = () => expect(fnRequests.every((r) => !r.auth)).toBe(true);
 
 // ---------------------------------------------------------------- activation
@@ -230,6 +243,45 @@ test('activate refuses a deployed function that is not the reviewed Kimi-capable
     expect(r.out).toContain(want);
     expect(mgmtLog).toEqual([]);
   }
+});
+
+test('two activations started at the same time: one consistent final state, exactly one synthetic case, each change atomic', async () => {
+  expect(committed()).toBeLessThanOrEqual(2);
+  sql(`update public.cases set workflow_state = 'AWAITING_ADMIN_REVIEW' where reference like 'DASH-PAID-%' and workflow_state = 'SUBMITTED'`);
+  const before = dashCases();
+  const [a, b] = await Promise.all([run('activate'), run('activate')]);
+  expect([a.code, b.code], `${a.out}\n${b.out}`).toEqual([0, 0]);
+  expect(state()).toBe('true 3.00/3.00/1.00 kimi:true limits:10/3/10');
+  expect(dashCases()).toBe(before + 1);
+  expect(mgmtLog.filter((t) => t === 'activate')).toHaveLength(2);
+  noSecrets(a.out + b.out);
+});
+
+test('a token without a required permission fails closed: nothing changed, no broader access requested', async () => {
+  for (const denied of ['POST /secrets', 'activate']) {
+    reset();
+    restoreDb();
+    knobs.deny.add(denied);
+    const r = await run('activate');
+    expect(r.code, denied).toBe(1);
+    expect(r.out).toMatch(/lacks a permission for (POST \/secrets|POST \/database\/query)/);
+    expect(state(), denied).toBe(OFF_STATE);
+    expect(r.out).not.toMatch(/all_access|scope|login|authorize/i);
+    noSecrets(r.out);
+  }
+});
+
+test('secrets never reach the GitHub step summary either', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rre-summary-'));
+  try {
+    const file = join(dir, 'summary.md');
+    const r = await run('activate', { GITHUB_STEP_SUMMARY: file });
+    expect(r.code, r.out).toBe(0);
+    const summary = readFileSync(file, 'utf8');
+    expect(summary).toContain('RESULT: ACTIVATE PASSED');
+    noSecrets(summary);
+    noSecrets(r.out);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ---------------------------------------------------------------- the activation statement itself (atomic, exact key)

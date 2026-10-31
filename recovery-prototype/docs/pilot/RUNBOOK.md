@@ -36,11 +36,13 @@ Pushes never deploy. GitHub (phone browser) → the repository → **Actions** �
 
 ## Paid analysis from the dashboard (durable Kimi configuration)
 Configured once by the "Deploy recovery prototype" GitHub Actions workflow, target `paid-activate`
-(job `paid-staging`, protected environment `staging-paid`, secrets `SUPABASE_ACCESS_TOKEN` and
-`KIMI_API_KEY`). It deploys the `analyze-case` code without touching its settings, sets the Kimi
-settings, switches spending on with a USD 3 allowance and the USD 1 per-analysis cap (one atomic
-database change keyed on `id = true`), prepares a synthetic case `DASH-PAID-…`, then runs a
-readiness check. It never calls Kimi and never starts an analysis.
+with `expected_sha` = the full commit hash to run (setup, token permissions and security:
+`PAID-STAGING-WORKFLOW.md`). A gate job checks the run and the `staging-paid` environment's
+protection first; the paid job then waits for your approval. It deploys the `analyze-case` code
+without touching its settings, sets the Kimi settings, switches spending on with a USD 3
+allowance and the USD 1 per-analysis cap (one atomic database change keyed on `id = true`),
+prepares a synthetic case `DASH-PAID-…`, then runs a readiness check. It never calls Kimi and
+never starts an analysis.
 - **Each analysis:** open an eligible case → **Run paid analysis** → confirm. Nothing else.
 - **Check without changing anything:** target `paid-readiness`.
 - **Switch paid analysis off:** target `paid-deactivate` (the key is kept); `paid-deactivate-and-remove-key` also deletes the paid settings.
@@ -50,7 +52,7 @@ readiness check. It never calls Kimi and never starts an analysis.
 ## If something goes wrong
 | Symptom | Do this |
 |---|---|
-| Paid analysis must stop now | GitHub → Actions → "Deploy recovery prototype" → Run workflow → target `paid-deactivate` |
+| Paid analysis must stop now | GitHub → Actions → "Deploy recovery prototype" → Run workflow → target `paid-deactivate`, expected_sha = latest commit → approve |
 | "HELD" in a paid-run result | Tell me the analysis id; I give you the one-line reconciliation SQL |
 | "Run paid analysis" says the service is unreachable | Reload the page: the case state shows whether anything started |
 | A business sees something it shouldn't | Stop sharing the link and tell me. Access is enforced by the database, tested 51/51 on staging |
