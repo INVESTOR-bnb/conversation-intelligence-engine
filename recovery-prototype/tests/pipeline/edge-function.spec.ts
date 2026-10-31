@@ -111,6 +111,19 @@ test('founder: the run completes through the contract; the stored record is unmi
   expect(caseState(c)).toBe('AWAITING_ADMIN_REVIEW');
 });
 
+test('double submission: two simultaneous runs of one case start ONE analysis, ONE reservation and ONE dispatch per role; the other is refused', async () => {
+  const c = textCase();
+  const [a, b] = await Promise.all([call({ token: founder(), body: caseBody(c) }), call({ token: founder(), body: caseBody(c) })]);
+  const results = [a, b].map((r) => `${r.status} ${r.body.outcome} ${r.body.code}`).sort();
+  expect(results).toEqual(['200 COMPLETED OK', '409 NOT_STARTED INVALID_STATE']);
+  expect(analysesOf(c)).toBe(1);
+  const winner = [a, b].find((r) => r.body.outcome === 'COMPLETED')!.body.analysis_id;
+  expect(Number(one(`select count(*) from private.ai_spend_ledger where case_id = :'c'`, { c }))).toBe(1);
+  expect(one(`select (analyst_dispatched_at is not null and reviewer_dispatched_at is not null)::text from private.ai_spend_ledger where analysis_id = :'a'`, { a: winner })).toBe('true');
+  expect(fake.requests.filter((x) => x.path.endsWith('/internal_ai_dispatch'))).toHaveLength(2); // analyst + reviewer of the one run
+  expect(fake.requests.filter((x) => x.path.endsWith('/internal_reserve_ai_spend'))).toHaveLength(1);
+});
+
 test('the service credential is used only for the spending calls and the completion, in order', async () => {
   const c = textCase();
   const r = await call({ token: founder(), body: caseBody(c) });

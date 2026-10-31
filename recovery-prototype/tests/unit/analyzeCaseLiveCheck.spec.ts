@@ -164,161 +164,25 @@ test('the live check never signs out globally, never enables spending, never cal
   expect(src).not.toMatch(/ai_spend_config|enabled\s*=\s*true|update\s|anthropic\.com|api\.openai/i);
 });
 
-// ---------------------------------------------------------------- deploy script (temporary clone, fake npx)
+// ---------------------------------------------------------------- deploy script: retired
 
-const TOKEN = `sbp_${'0123456789abcdef'.repeat(2)}0123456789`;
-
-/**
- * The last commit whose function code this script may deploy (Stage 2A-6a; the functions as of
- * Stage 2A-5d-3b). From Stage 2A-6b the function code carries the Anthropic adapter, which this
- * fake-only deploy script refuses: deploying it needs its own, separately approved stage.
- */
-const DEPLOYABLE_COMMIT = '2c0c70dbc28cb11cd1e39e3f6681bb889376daf3';
-
-function deployEnv(opts: { failOn?: string; branch?: string; dirty?: boolean } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'ac-deploy-'));
-  const clone = join(dir, 'clone');
-  const r = spawnSync('git', ['clone', '-q', '--branch', BRANCH, REPO, clone], { encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(r.stderr);
-  // The branch as pushed at the deployable commit: a local bare origin holding exactly that.
-  spawnSync('git', ['-C', clone, 'reset', '-q', '--hard', DEPLOYABLE_COMMIT]);
-  spawnSync('git', ['clone', '-q', '--bare', clone, `${clone}.git`]);
-  spawnSync('git', ['-C', clone, 'remote', 'set-url', 'origin', `${clone}.git`]);
-  const app = join(clone, 'recovery-prototype');
-  if (opts.branch) spawnSync('git', ['-C', clone, 'checkout', '-q', '-b', opts.branch]);
-  if (opts.dirty) writeFileSync(join(app, 'supabase', 'functions', 'stray.ts'), '// local change\n');
-  const bin = join(dir, 'bin');
-  const log = join(dir, 'npx.jsonl');
-  spawnSync('mkdir', ['-p', bin]);
-  // A fake npx: records its arguments, whether a token was in its environment (never the token itself),
-  // and what the throwaway project directory contained; makes no connection.
-  writeFileSync(join(bin, 'npx'), `#!/usr/bin/env node
-const fs = require('fs'), path = require('path');
-const args = process.argv.slice(2);
-const wd = args.includes('--workdir') ? args[args.indexOf('--workdir') + 1] : process.cwd();
-const cfg = path.join(wd, 'supabase', 'config.toml');
-if (args.includes('init')) { fs.mkdirSync(path.join(process.cwd(), 'supabase'), { recursive: true }); fs.writeFileSync(path.join(process.cwd(), 'supabase', 'config.toml'), 'project_id = "x"\\n'); }
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, tokenInEnv: process.env.SUPABASE_ACCESS_TOKEN === ${JSON.stringify(TOKEN)},
-  hasFunction: fs.existsSync(path.join(wd, 'supabase', 'functions', 'analyze-case', 'index.ts')) && fs.existsSync(path.join(wd, 'supabase', 'functions', '_shared', 'edge', 'handler.ts')),
-  verifyJwtOn: fs.existsSync(cfg) && /\\[functions\\.analyze-case\\]\\nverify_jwt = true\\n/.test(fs.readFileSync(cfg, 'utf8')), workdir: wd }) + '\\n');
-process.exit(${JSON.stringify(opts.failOn ?? '')} && args.includes(${JSON.stringify(opts.failOn ?? '')}) ? 1 : 0);
-`);
-  chmodSync(join(bin, 'npx'), 0o755);
-  const calls = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
-  const deploy = (input: string) => {
-    const res = spawnSync('bash', [DEPLOY], { cwd: app, input, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, timeout: 60_000 });
-    return { code: res.status, out: `${res.stdout}${res.stderr}` };
-  };
-  return { app, clone, calls, deploy, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
-
-test('deploy: exactly analyze-case to the staging ref, JWT check on, fake provider settings, token only in the environment', () => {
-  const d = deployEnv();
+// deploy-analyze-case-staging.sh deployed the fake-only code and always set ANALYSIS_PROVIDER=fake:
+// run today it would silently replace a configured paid (Kimi) provider. It is retired and
+// refuses before doing anything (deploy-analyze-case-2a6d.sh replaces it; see stage2a6d.spec.ts).
+test('the retired deploy script refuses, calls nothing and never writes the fake provider', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ac-retired-'));
   try {
-    const { code, out } = d.deploy(`${REF}\n${TOKEN}\n`);
-    expect(code, out).toBe(0);
-    const calls = d.calls();
-    const cmd = calls.map((c: { args: string[] }) => c.args.filter((a, i, all) => all[i - 1] !== '--workdir').join(' '));
-    expect(cmd).toEqual([
-      '--yes supabase@2.117.0 init',
-      `--yes supabase@2.117.0 functions deploy analyze-case --use-api --project-ref ${REF} --workdir`,
-      `--yes supabase@2.117.0 secrets set ANALYSIS_PROVIDER=fake ALLOW_FAKE_PROVIDER=staging-only --project-ref ${REF} --workdir`,
-      `--yes supabase@2.117.0 functions list --project-ref ${REF} --workdir`,
-    ]);
-    const deployCall = calls[1];
-    expect(deployCall.hasFunction).toBe(true);
-    expect(deployCall.verifyJwtOn).toBe(true);
-    expect(calls.slice(1).every((c: { tokenInEnv: boolean }) => c.tokenInEnv)).toBe(true);
-    expect(JSON.stringify(calls)).not.toContain(TOKEN);
-    expect(JSON.stringify(calls)).not.toMatch(/no-verify-jwt|--prune|ANTHROPIC|ALLOW_FAKE_PROVIDER=(?!staging-only)/);
-    expect(out).not.toContain(TOKEN);
-    expect(existsSync(deployCall.workdir)).toBe(false); // the throwaway directory is removed
-    expect(spawnSync('git', ['-C', d.clone, 'status', '--porcelain'], { encoding: 'utf8' }).stdout).toBe(''); // the checkout is untouched
-  } finally { d.cleanup(); }
-});
-
-for (const [name, input, opts, expectMsg] of [
-  ['a mistyped project reference', `aqwdwswpmbnzmkvyuqi\n${TOKEN}\n`, {}, 'the project reference was not confirmed'],
-  ['another project reference', `abcdefghijklmnopqrst\n${TOKEN}\n`, {}, 'the project reference was not confirmed'],
-  ['a secret key instead of an access token', `${REF}\n${SECRET}\n`, {}, 'not a Supabase personal access token'],
-  ['an empty token', `${REF}\n\n`, {}, 'not a Supabase personal access token'],
-  ['uncommitted changes', `${REF}\n${TOKEN}\n`, { dirty: true }, 'uncommitted or untracked changes'],
-  ['another branch', `${REF}\n${TOKEN}\n`, { branch: 'other-branch' }, `not on ${BRANCH}`],
-] as [string, string, { dirty?: boolean; branch?: string }, string][]) {
-  test(`deploy refuses ${name}: nothing is deployed`, () => {
-    const d = deployEnv(opts);
-    try {
-      const { code, out } = d.deploy(input);
-      expect(code).toBe(2);
-      expect(out).toContain('REFUSED (nothing deployed)');
-      expect(out).toContain(expectMsg);
-      expect(d.calls()).toEqual([]);
-      expect(out).not.toContain(SECRET);
-      expect(out).not.toContain(TOKEN);
-    } finally { d.cleanup(); }
-  });
-}
-
-test('deploy: a failed deployment sets no settings', () => {
-  const d = deployEnv({ failOn: 'deploy' });
-  try {
-    const { code, out } = d.deploy(`${REF}\n${TOKEN}\n`);
-    expect(code).toBe(1);
-    expect(out).toContain('DEPLOY FAILED');
-    expect(d.calls().some((c: { args: string[] }) => c.args.includes('secrets'))).toBe(false);
-  } finally { d.cleanup(); }
-});
-
-test('deploy script: no --no-verify-jwt, no --prune, no deploy without a function name, staging ref only', () => {
-  const src = readFileSync(DEPLOY, 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
-  expect(src).not.toMatch(/--no-verify-jwt|--prune|verify_jwt = false/);
-  expect(src).toMatch(/^REF=aqwdwswpmbnzmkvyuqil$/m);
-  expect(src.match(/--project-ref/g)).toHaveLength(1); // only inside cli(), always "$REF"
-  expect(src).toContain('cli functions deploy "$FN" --use-api');
-});
-
-test('deploy refuses function code that imports an AI-provider SDK (even when committed and pushed)', () => {
-  const d = deployEnv();
-  try {
-    const bare = `${d.clone}.git`;
-    const g = (...a: string[]) => spawnSync('git', ['-C', d.clone, ...a], { encoding: 'utf8' });
-    spawnSync('git', ['clone', '-q', '--bare', d.clone, bare]);
-    g('remote', 'set-url', 'origin', bare);
-    writeFileSync(join(d.app, 'supabase', 'functions', '_shared', 'provider.ts'), "import Anthropic from '@anthropic-ai/sdk';\nexport default Anthropic;\n");
-    g('add', '-A');
-    g('-c', 'user.name=t', '-c', 'user.email=t@synthetic.invalid', 'commit', '-q', '-m', 'synthetic provider');
-    g('push', '-q', 'origin', `HEAD:${BRANCH}`);
-    const { code, out } = d.deploy(`${REF}\n${TOKEN}\n`);
-    expect(code).toBe(2);
-    expect(out).toContain('contains an AI-provider SDK, endpoint or key');
-    expect(d.calls()).toEqual([]);
-  } finally { d.cleanup(); }
-});
-
-test('deploy refuses the Stage 2A-6b function code (the Anthropic adapter), committed and pushed', () => {
-  const d = deployEnv();
-  try {
-    const g = (...a: string[]) => spawnSync('git', ['-C', d.clone, ...a], { encoding: 'utf8' });
-    const target = join(d.app, 'supabase', 'functions');
-    rmSync(target, { recursive: true, force: true });
-    cpSync(fileURLToPath(new URL('../../supabase/functions', import.meta.url)), target, { recursive: true });
-    g('add', '-A');
-    g('-c', 'user.name=t', '-c', 'user.email=t@synthetic.invalid', 'commit', '-q', '-m', 'the working tree functions');
-    g('push', '-q', 'origin', `HEAD:${BRANCH}`);
-    const { code, out } = d.deploy(`${REF}\n${TOKEN}\n`);
-    expect(code).toBe(2);
-    expect(out).toContain('contains an AI-provider SDK, endpoint or key');
-    expect(d.calls()).toEqual([]);
-  } finally { d.cleanup(); }
-});
-
-test('deploy refuses a checkout without Stage 2A-5d-3b (the spending controls)', () => {
-  const d = deployEnv();
-  try {
-    spawnSync('git', ['-C', d.clone, 'reset', '-q', '--hard', 'f835563']); // Stage 2A-5d-4b, before 2A-5d-3b
-    const { code, out } = d.deploy(`${REF}\n${TOKEN}\n`);
-    expect(code).toBe(2);
-    expect(out).toContain('does not contain Stage 2A-5d-3b');
-    expect(d.calls()).toEqual([]);
-  } finally { d.cleanup(); }
+    const bin = join(dir, 'bin');
+    const log = join(dir, 'npx.log');
+    spawnSync('mkdir', ['-p', bin]);
+    writeFileSync(join(bin, 'npx'), `#!/usr/bin/env node\nrequire('fs').appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(' ') + '\\n');\n`);
+    chmodSync(join(bin, 'npx'), 0o755);
+    const res = spawnSync('bash', [DEPLOY], { cwd: fileURLToPath(new URL('../..', import.meta.url)), input: `${REF}\nsbp_${'0'.repeat(32)}\n`, encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, timeout: 30_000 });
+    expect(res.status).toBe(2);
+    expect(`${res.stdout}${res.stderr}`).toContain('REFUSED (nothing deployed): deploy-analyze-case-staging.sh is retired');
+    expect(existsSync(log)).toBe(false);
+    const src = readFileSync(DEPLOY, 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+    expect(src).not.toMatch(/secrets set|functions deploy|ANALYSIS_PROVIDER=/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

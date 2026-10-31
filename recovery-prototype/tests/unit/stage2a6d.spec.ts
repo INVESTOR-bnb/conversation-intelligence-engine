@@ -139,29 +139,67 @@ process.exit(${JSON.stringify(opts.failOn ?? '')} && args.includes(${JSON.string
 `);
   chmodSync(join(bin, 'npx'), 0o755);
   const calls = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
-  const deploy = (input: string, ...args: string[]) => {
+  const deploy = (input: string, ...args: string[]) => deployWith({}, input, ...args);
+  const deployWith = (env: Record<string, string>, input: string, ...args: string[]) => {
     const res = spawnSync('bash', ['supabase/scripts/deploy-analyze-case-2a6d.sh', ...args], { cwd: app, input, encoding: 'utf8',
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, timeout: 60_000 });
+      env: { ...process.env, RRE_NONINTERACTIVE: '', CONFIRM_PROJECT_REF: '', SUPABASE_ACCESS_TOKEN: '', GITHUB_SHA: '', PATH: `${bin}:${process.env.PATH}`, ...env }, timeout: 60_000 });
     return { code: res.status, out: `${res.stdout}${res.stderr}` };
   };
-  return { app, calls, deploy, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  const head = () => spawnSync('git', ['-C', app, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  return { app, calls, deploy, deployWith, head, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 const OK = `${REF}\n${TOKEN}\n`;
 type Call = { args: string[]; tokenInEnv: boolean; anthropicCode: boolean; fakeCode: boolean; verifyJwtOn: boolean };
 const cli = (c: Call) => c.args.slice(2).filter((a) => a !== '--project-ref' && a !== REF && a !== '--workdir' && !a.startsWith('/')).join(' ');
 
-test('deploy: the Anthropic-capable code, analyze-case only, JWT check on, settings set to the fake provider only', () => {
+const KIMI_SETTINGS = [{ name: 'ANALYSIS_PROVIDER', value: 'digest' }, { name: 'ALLOW_PAID_PROVIDER', value: 'digest' }, { name: 'KIMI_API_KEY', value: 'digest' }];
+
+test('deploy (no option): this branch\'s code, analyze-case only, JWT check on, and NO setting written', () => {
   const d = deployEnv();
   try {
     const { code, out } = d.deploy(OK);
     expect(code, out).toBe(0);
     const calls = d.calls() as Call[];
-    expect(calls.map(cli)).toEqual(['init', 'secrets list -o json', 'functions deploy analyze-case --use-api', 'secrets set ANALYSIS_PROVIDER=fake ALLOW_FAKE_PROVIDER=staging-only']);
+    expect(calls.map(cli)).toEqual(['init', 'secrets list -o json', 'functions deploy analyze-case --use-api']);
     const dep = calls[2];
     expect(dep.anthropicCode && dep.fakeCode && dep.verifyJwtOn && dep.tokenInEnv).toBe(true);
     expect(calls.slice(1).every((c) => c.tokenInEnv && c.args.includes(REF))).toBe(true);
+    expect(out).toContain('Provider settings untouched');
     expect(out).not.toContain(TOKEN);
-    expect(JSON.stringify(calls)).not.toMatch(/no-verify-jwt|--prune|ANTHROPIC|ALLOW_PAID|anthropic\b/);
+    expect(JSON.stringify(calls)).not.toMatch(/no-verify-jwt|--prune|ANTHROPIC|ALLOW_PAID|anthropic\b|secrets set/);
+  } finally { d.cleanup(); }
+});
+
+test('regression: an ordinary deploy with Kimi configured keeps Kimi — it never writes the fake provider', () => {
+  const d = deployEnv({ secrets: KIMI_SETTINGS });
+  try {
+    const { code, out } = d.deploy(OK);
+    expect(code, out).toBe(0);
+    const calls = d.calls() as Call[];
+    expect(calls.map(cli)).toEqual(['init', 'secrets list -o json', 'functions deploy analyze-case --use-api']);
+    expect(JSON.stringify(calls)).not.toMatch(/ANALYSIS_PROVIDER=fake|ALLOW_FAKE_PROVIDER|secrets set|secrets unset/);
+    expect(out).toContain('Provider settings untouched (2 paid setting(s) present; values not shown)');
+  } finally { d.cleanup(); }
+});
+
+test('deploy --set-fake: the fake provider is set only when asked explicitly', () => {
+  const d = deployEnv();
+  try {
+    const { code, out } = d.deploy(OK, '--set-fake');
+    expect(code, out).toBe(0);
+    expect((d.calls() as Call[]).map(cli)).toEqual(['init', 'secrets list -o json', 'functions deploy analyze-case --use-api',
+      'secrets set ANALYSIS_PROVIDER=fake ALLOW_FAKE_PROVIDER=staging-only']);
+    expect(out).toContain('fake provider set');
+  } finally { d.cleanup(); }
+});
+
+test('deploy with no provider configured: deployed, and the script says the function refuses every call (fail closed)', () => {
+  const d = deployEnv({ secrets: [] });
+  try {
+    const { code, out } = d.deploy(OK);
+    expect(code, out).toBe(0);
+    expect((d.calls() as Call[]).map(cli)).toEqual(['init', 'secrets list -o json', 'functions deploy analyze-case --use-api']);
+    expect(out).toContain('no ANALYSIS_PROVIDER is set, so the function refuses every call (503 PROVIDER_NOT_CONFIGURED)');
   } finally { d.cleanup(); }
 });
 
@@ -178,19 +216,40 @@ test('rollback: redeploys the previous fake-only code (9ee3767) with the fake se
   } finally { d.cleanup(); }
 });
 
-test('deploy and rollback refuse while a paid-provider setting is present (nothing deployed)', () => {
+test('--set-fake and --rollback refuse while a paid-provider setting is present (nothing deployed, Kimi kept)', () => {
   for (const name of ['ANTHROPIC_API_KEY', 'KIMI_API_KEY', 'ALLOW_PAID_PROVIDER', 'ANALYST_MODEL', 'REVIEWER_MODEL', 'ANTHROPIC_BASE_URL']) {
-    for (const args of [[], ['--rollback']]) {
+    for (const args of [['--set-fake'], ['--rollback']]) {
       const d = deployEnv({ secrets: [{ name: 'ANALYSIS_PROVIDER', value: 'x' }, { name, value: 'digest' }] });
       try {
         const { code, out } = d.deploy(OK, ...args);
         expect(code, `${name} ${args}`).toBe(2);
-        expect(out).toContain('a paid-provider setting is present');
-        expect(out).toContain('paid-pipeline-e2e.sh --paid-off');
+        expect(out).toContain('The fake provider is never set over a paid configuration');
         expect((d.calls() as Call[]).map(cli)).toEqual(['init', 'secrets list -o json']);
       } finally { d.cleanup(); }
     }
   }
+});
+
+test('non-interactive mode (GitHub Actions): the reference and token from the environment, the exact workflow commit; token never printed', () => {
+  const d = deployEnv({ secrets: KIMI_SETTINGS });
+  try {
+    const env = { RRE_NONINTERACTIVE: '1', CONFIRM_PROJECT_REF: REF, SUPABASE_ACCESS_TOKEN: TOKEN, GITHUB_SHA: d.head() };
+    const ok = d.deployWith(env, '');
+    expect(ok.code, ok.out).toBe(0);
+    expect((d.calls() as Call[]).map(cli)).toEqual(['init', 'secrets list -o json', 'functions deploy analyze-case --use-api']);
+    expect(ok.out).not.toContain(TOKEN);
+    for (const [over, want] of [
+      [{ GITHUB_SHA: '0'.repeat(40) }, 'not the commit this workflow run was started for'],
+      [{ GITHUB_SHA: '' }, 'not the commit this workflow run was started for'],
+      [{ CONFIRM_PROJECT_REF: 'productionref0000000000' }, 'the project reference was not confirmed'],
+      [{ SUPABASE_ACCESS_TOKEN: 'not-a-token' }, 'not a Supabase personal access token'],
+    ] as [Record<string, string>, string][]) {
+      const r = d.deployWith({ ...env, ...over }, '');
+      expect(r.code, want).toBe(2);
+      expect(r.out).toContain(want);
+      expect(r.out).not.toContain(TOKEN);
+    }
+  } finally { d.cleanup(); }
 });
 
 test('deploy refuses unreadable settings, a wrong reference, a malformed token, and code failing the source guard', () => {
@@ -225,12 +284,13 @@ test('deploy refuses the wrong branch, a dirty checkout, an unpushed commit, a c
     .toMatchObject({ code: 2, out: expect.stringContaining('differs from the pushed branch') });
   expect(run({ at: '2c0c70dbc28cb11cd1e39e3f6681bb889376daf3' }, () => {})).toMatchObject({ code: 2, out: expect.stringContaining('does not contain Stage 2A-6c') });
   expect(run({}, () => {}, ['--prune'])).toMatchObject({ code: 2, out: expect.stringContaining('unknown option') });
+  expect(run({}, () => {}, ['--set-fake', '--rollback'])).toMatchObject({ code: 2, out: expect.stringContaining('only one option at a time') });
 });
 
 test('a failed deployment sets no settings', () => {
   const d = deployEnv({ failOn: 'deploy' });
   try {
-    const { code, out } = d.deploy(OK);
+    const { code, out } = d.deploy(OK, '--set-fake');
     expect(code).toBe(1);
     expect(out).toContain('DEPLOY FAILED');
     expect((d.calls() as Call[]).some((c) => c.args.includes('set'))).toBe(false);

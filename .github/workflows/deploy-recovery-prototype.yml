@@ -2,6 +2,19 @@
 # MANUAL ONLY: started from Actions → "Deploy recovery prototype" → Run workflow,
 # with "Use workflow from" = claude/revenue-recovery-engine-stage-1-8xg8vf.
 # Pushes never deploy. Runs from any other branch are skipped.
+#
+# Input "target" (default: frontend, exactly the Cloudflare deploy below). The other targets
+# run ONLY the "paid-staging" job (Supabase STAGING, durable Kimi configuration for direct
+# founder-dashboard analyses; it never calls Kimi and never starts an analysis):
+#   paid-readiness                 read-only check (deployed function, Kimi settings by name/digest,
+#                                  spending, eligible synthetic case, founder/business access, live site)
+#   paid-activate                  offline tests → deploy analyze-case CODE (settings untouched) →
+#                                  Kimi settings → spending ON (USD 3 allowance, USD 1 cap) → case → readiness
+#   paid-deactivate                spending OFF (the Kimi key is kept)
+#   paid-deactivate-and-remove-key spending OFF and the paid provider settings deleted
+# The paid job runs in the protected environment "staging-paid", whose secrets are
+# SUPABASE_ACCESS_TOKEN (sbp_…) and KIMI_API_KEY; values reach steps only as environment
+# variables, never on a command line, and are never printed.
 # Deploys as the Pages project's PRODUCTION branch ("main"):
 # https://revenue-recovery-v0.pages.dev
 #
@@ -18,6 +31,13 @@ name: Deploy recovery prototype (Cloudflare Pages)
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: What to run (frontend = deploy the site; paid-* = Supabase staging paid configuration)
+        type: choice
+        required: true
+        default: frontend
+        options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key]
 
 permissions:
   contents: read
@@ -29,7 +49,7 @@ concurrency:
 jobs:
   deploy:
     # Only the development branch may be deployed.
-    if: github.ref == 'refs/heads/claude/revenue-recovery-engine-stage-1-8xg8vf'
+    if: github.ref == 'refs/heads/claude/revenue-recovery-engine-stage-1-8xg8vf' && (inputs.target == 'frontend' || inputs.target == '')
     runs-on: ubuntu-24.04 # pinned: Playwright 1.56.1 cannot install Chromium on ubuntu-latest (26.04)
     timeout-minutes: 25
     defaults:
@@ -127,3 +147,60 @@ jobs:
           --project-name="$CF_PAGES_PROJECT"
           --branch=main
           --commit-hash="$GITHUB_SHA"
+
+  paid-staging:
+    if: github.ref == 'refs/heads/claude/revenue-recovery-engine-stage-1-8xg8vf' && startsWith(inputs.target, 'paid-')
+    runs-on: ubuntu-24.04
+    environment: staging-paid
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: recovery-prototype
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the deploy script checks the branch contains the reviewed stages
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: recovery-prototype/package-lock.json
+
+      # Names only: says which required secret is missing, never a value.
+      - name: Check required secrets (names only)
+        env:
+          TARGET: ${{ inputs.target }}
+          HAS_SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN != '' }}
+          HAS_KIMI_API_KEY: ${{ secrets.KIMI_API_KEY != '' }}
+        run: |
+          ACTION="${TARGET#paid-}"
+          fail=0
+          [ "$HAS_SUPABASE_ACCESS_TOKEN" = "true" ] || { echo "::error::Missing secret SUPABASE_ACCESS_TOKEN in environment staging-paid"; fail=1; }
+          if [ "$ACTION" = "activate" ] && [ "$HAS_KIMI_API_KEY" != "true" ]; then echo "::error::Missing secret KIMI_API_KEY in environment staging-paid"; fail=1; fi
+          [ "$fail" = 0 ] && echo "required secrets present for $ACTION (values not shown)"
+          exit $fail
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Offline tests (activate only)
+        if: inputs.target == 'paid-activate'
+        run: npm run typecheck && npm run test:unit
+
+      # Code only: the deploy script writes NO provider setting in its default mode.
+      - name: Deploy analyze-case code (provider settings untouched)
+        if: inputs.target == 'paid-activate'
+        env:
+          RRE_NONINTERACTIVE: '1'
+          CONFIRM_PROJECT_REF: aqwdwswpmbnzmkvyuqil
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: bash supabase/scripts/deploy-analyze-case-2a6d.sh
+
+      - name: Run the chosen action
+        env:
+          TARGET: ${{ inputs.target }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+        run: node supabase/scripts/paid-staging.mjs "${TARGET#paid-}"

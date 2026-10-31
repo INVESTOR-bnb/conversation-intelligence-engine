@@ -6,6 +6,7 @@ const realFetch = globalThis.fetch;
 const routes = {
   'aqwdwswpmbnzmkvyuqil.supabase.co': (u) => (u.pathname.startsWith('/functions/v1/') ? process.env.ROUTE_FUNCTIONS : process.env.ROUTE_SUPABASE),
   'api.supabase.com': () => process.env.ROUTE_MGMT,
+  'revenue-recovery-v0.pages.dev': () => process.env.ROUTE_PAGES,
 };
 
 globalThis.fetch = async (input, init) => {

@@ -11,15 +11,15 @@ credential or an approval.
 | Business submits a stalled conversation (text or screenshots) | `/app/client` → New case | TESTED OFFLINE; backend VERIFIED ON STAGING |
 | You see all submitted cases | `/app/founder` | TESTED OFFLINE; backend VERIFIED ON STAGING |
 | You open a case and read the conversation | case page | TESTED OFFLINE; backend VERIFIED ON STAGING |
-| You press **Run analysis** (one analysis plus independent review; result in plain language) | case page → Analysis | TESTED OFFLINE — needs the new frontend deployed |
+| You press **Run paid analysis** (one analysis plus independent review, capped at USD 1; offered only while paid analysis is switched on) | case page → Analysis | TESTED OFFLINE; deployed |
 | You read the private report: evidence, hypotheses, uncertainty, the reviewer's challenges | case page | TESTED OFFLINE; backend VERIFIED ON STAGING (fake provider) |
 | You approve, edit or mark RED, or request a re-analysis; a preview shows exactly what the business will get | case page → Your decision | TESTED OFFLINE (screens at 390px + real-database test `20_v0_workflow`) |
 | The business sees only the approved message: Copy / Open in WhatsApp, then "I sent it" | `/app/client` → Open | TESTED OFFLINE (screens + real database) |
 | The business adds the prospect's reply, records the outcome, or reports an opt-out | business case page | TESTED OFFLINE (screens + real database) |
 | You see what was sent, the reply and the outcome | case page → After your decision | TESTED OFFLINE (screens + real database) |
 
-Analysis runs only where AI spending is enabled. On staging spending stays **off** except inside a
-guarded paid run (below), so "Run analysis" normally answers "AI spending is switched off" — by design.
+Analysis runs only while AI spending is enabled. When it is off, the button is replaced by
+"Analysis is currently switched off…" — by design.
 
 ## What a business sees (demo presentation)
 Businesses and the sign-in page show "Revenue Recovery Engine" with a small DEMO label and
@@ -34,22 +34,25 @@ Pushes never deploy. GitHub (phone browser) → the repository → **Actions** �
 "Deploy recovery prototype (Cloudflare Pages)" → **Run workflow** → branch
 `claude/revenue-recovery-engine-stage-1-8xg8vf` → Run. Takes about 3 minutes.
 
-## One guarded paid Kimi analysis (REQUIRES FOUNDER ACTION)
-Codespace terminal, one line:
-```
-cd /workspaces/conversation-intelligence-engine/recovery-prototype && git checkout claude/revenue-recovery-engine-stage-1-8xg8vf && git pull --ff-only && bash supabase/scripts/paid-pipeline-e2e.sh
-```
-- **Another synthetic situation:** start the line's last command with `PAID_SCENARIO=academy-price ` (or `too-little`, `declined`).
-- **Before you run it:** a new scoped Supabase token and a rotated Kimi key (see `PRIVACY-AND-PILOT-READINESS.md` and `../stage-2a/KIMI-FIRST-PAID-RUN.md`).
-- **Cost:** at most about USD 0.37 reserved per run. Spending is switched off again automatically.
-- **Judging the output:** `KIMI-QUALITY-EVALUATION.md`.
+## Paid analysis from the dashboard (durable Kimi configuration)
+Configured once by the "Deploy recovery prototype" GitHub Actions workflow, target `paid-activate`
+(job `paid-staging`, protected environment `staging-paid`, secrets `SUPABASE_ACCESS_TOKEN` and
+`KIMI_API_KEY`). It deploys the `analyze-case` code without touching its settings, sets the Kimi
+settings, switches spending on with a USD 3 allowance and the USD 1 per-analysis cap (one atomic
+database change keyed on `id = true`), prepares a synthetic case `DASH-PAID-…`, then runs a
+readiness check. It never calls Kimi and never starts an analysis.
+- **Each analysis:** open an eligible case → **Run paid analysis** → confirm. Nothing else.
+- **Check without changing anything:** target `paid-readiness`.
+- **Switch paid analysis off:** target `paid-deactivate` (the key is kept); `paid-deactivate-and-remove-key` also deletes the paid settings.
+- **Deploying function code** (`deploy-analyze-case-2a6d.sh` with no option) never changes the provider; the fake provider is set only with `--set-fake`, which refuses while Kimi is configured. `deploy-analyze-case-staging.sh` is retired.
+- The guarded Codespace script (`paid-pipeline-e2e.sh`) refuses while Kimi is configured; its `--paid-off` switches everything off.
 
 ## If something goes wrong
 | Symptom | Do this |
 |---|---|
-| A paid run was interrupted and spending may be on | Same Codespace line, but end it with `paid-pipeline-e2e.sh --paid-off` |
+| Paid analysis must stop now | GitHub → Actions → "Deploy recovery prototype" → Run workflow → target `paid-deactivate` |
 | "HELD" in a paid-run result | Tell me the analysis id; I give you the one-line reconciliation SQL |
-| "Run analysis" says the service is unreachable | Reload the page: the case state shows whether anything started |
+| "Run paid analysis" says the service is unreachable | Reload the page: the case state shows whether anything started |
 | A business sees something it shouldn't | Stop sharing the link and tell me. Access is enforced by the database, tested 51/51 on staging |
 
 ## Demo: a Nigerian training academy (synthetic — every name, fee and reply is invented)
@@ -68,7 +71,7 @@ cd /workspaces/conversation-intelligence-engine/recovery-prototype && git checko
    name (the staging test business is "Synthetic Autos A"), replace "Synthetic Academy B" with that
    name before submitting, so the case and the conversation name the same business. A mismatch is
    cosmetic (the case still belongs only to the business that submitted it) but confuses a demo.
-2. Sign in as **founder** → open the case → Run analysis → review the evidence, the competing
+2. Sign in as **founder** → open the case → Run paid analysis → review the evidence, the competing
    explanations and the reviewer's challenge (the unanswered instalment question is the friction to look for).
 3. Approve or edit the message → Release.
 4. Back as the business → Open the case → only the approved message is shown → "I sent it".
