@@ -44,9 +44,9 @@ test('V0 loop: run analysis → approve (edited) → business sends → prospect
   // 1. Founder runs the analysis from the case page, with their own session.
   await login(page, 'founder');
   await page.goto(`/app/founder/case/${CASE}`);
-  await page.getByRole('button', { name: 'Run analysis' }).click();
-  await expect(page.getByText('Run one analysis of this case?')).toBeVisible();
-  await page.getByRole('button', { name: 'Run analysis' }).last().click();
+  await page.getByRole('button', { name: 'Run paid analysis' }).click();
+  await expect(page.getByText('Run one paid analysis of this case?')).toBeVisible();
+  await page.getByRole('button', { name: 'Run paid analysis' }).last().click();
   await expect(page.getByTestId('run-analysis-result')).toHaveText('Analysis complete. Review it below before any decision.');
   expect(mock.functionCalls).toHaveLength(1);
   expect(mock.tokens.get(mock.functionCalls[0])).toBe(USERS.founder.id);
@@ -100,7 +100,7 @@ test('V0 loop: run analysis → approve (edited) → business sends → prospect
   await page.goto(`/app/founder/case/${CASE}`);
   await expect(page.getByTestId('timeline-sent')).toContainText('Hello again');
   await expect(page.getByTestId('timeline-reply')).toContainText('Saturday works. See you at 10.');
-  await expect(page.getByRole('button', { name: 'Run analysis' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Run paid analysis' })).toBeVisible();
 });
 
 test('an unchanged approval is recorded as UNCHANGED', async ({ page }) => {
@@ -182,7 +182,7 @@ test('spending switched off: no Run analysis action, the switched-off explanatio
   await expect(runCard(page).getByTestId('run-analysis-gate'))
     .toHaveText('Analysis is currently switched off. No analysis will run until a guarded founder-approved run is started.');
   await expect(runCard(page)).toHaveAttribute('data-gate', 'disabled');
-  await expect(page.getByRole('button', { name: 'Run analysis' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Run paid analysis' })).toHaveCount(0);
   expect(mock.functionCalls).toHaveLength(0);
   expect(mock.analyses).toHaveLength(0);
   await noHorizontalScroll(page);
@@ -193,12 +193,16 @@ test('spending switched on: an eligible case offers Run analysis; a case that is
   await login(page, 'founder');
   await page.goto(`/app/founder/case/${CASE}`);
   await expect(runCard(page)).toHaveAttribute('data-gate', 'enabled');
-  await expect(page.getByRole('button', { name: 'Run analysis' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Run paid analysis' })).toBeVisible();
   await expect(runCard(page).getByTestId('run-analysis-gate')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Run analysis' }).click();
-  // The confirmation makes no claim about which provider runs (that depends on the server's configuration).
+  await page.getByRole('button', { name: 'Run paid analysis' }).click();
+  // The confirmation states the paid call, the $1 cap, the server's refusal and that nothing reaches the prospect.
+  await expect(runCard(page).getByTestId('paid-confirm-text')).toHaveText('This will run one paid AI analysis and one independent AI review. '
+    + 'The total permitted cost is capped at $1. The server will refuse the run if any spending or safety check fails. Nothing will be sent to the prospect.');
   await expect(runCard(page)).not.toContainText(/fake/i);
-  await expect(runCard(page)).toContainText('The server checks the spending limits first and refuses the run if it is not authorised.');
+  await expect(runCard(page).getByRole('button', { name: 'Run paid analysis' })).toBeVisible();
+  await expect(runCard(page).getByRole('button', { name: 'Cancel' })).toBeVisible();
+  expect(mock.functionCalls).toHaveLength(0); // opening the confirmation calls nothing
   await noHorizontalScroll(page);
 
   awaitingReview();
@@ -207,19 +211,31 @@ test('spending switched on: an eligible case offers Run analysis; a case that is
   await expect(runCard(page)).toHaveCount(0);
 });
 
+test('double submission: two fast taps on the confirmation start exactly one analysis', async ({ page }) => {
+  await login(page, 'founder');
+  await page.goto(`/app/founder/case/${CASE}`);
+  await page.getByRole('button', { name: 'Run paid analysis' }).click();
+  await runCard(page).getByRole('button', { name: 'Run paid analysis' }).dblclick();
+  await expect(page.getByTestId('run-analysis-result')).toHaveText('Analysis complete. Review it below before any decision.');
+  expect(mock.functionCalls).toHaveLength(1);
+  expect(mock.analyses).toHaveLength(1);
+  // the case is no longer analysable: no paid action is offered again
+  await expect(page.getByRole('button', { name: 'Run paid analysis' })).toHaveCount(0);
+});
+
 test('spending status still loading, or unreadable: fails closed with no active Run analysis action', async ({ page }) => {
   mock.spendSummary = 'hang';
   await login(page, 'founder');
   await page.goto(`/app/founder/case/${CASE}`);
   await expect(runCard(page).getByTestId('run-analysis-gate')).toHaveText('Checking whether analysis is switched on…');
-  await expect(page.getByRole('button', { name: 'Run analysis' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Run paid analysis' })).toHaveCount(0);
 
   mock.spendSummary = 'error';
   await page.reload();
   await expect(runCard(page).getByTestId('run-analysis-gate'))
     .toHaveText('Could not confirm that analysis is authorised, so it cannot be started here. Reload the page to check again.');
   await expect(runCard(page)).toHaveAttribute('data-gate', 'unavailable');
-  await expect(page.getByRole('button', { name: 'Run analysis' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Run paid analysis' })).toHaveCount(0);
   expect(mock.functionCalls).toHaveLength(0);
 });
 
@@ -228,9 +244,9 @@ test('a run the server refuses for spending (as the real backend: an ERROR row i
   mock.analyzeMode = 'SPENDING_DISABLED';
   await login(page, 'founder');
   await page.goto(`/app/founder/case/${CASE}`);
-  await page.getByRole('button', { name: 'Run analysis' }).click();
+  await page.getByRole('button', { name: 'Run paid analysis' }).click();
   mock.spendSummary = 'off';
-  await page.getByRole('button', { name: 'Run analysis' }).last().click();
+  await page.getByRole('button', { name: 'Run paid analysis' }).last().click();
   await expect(page.getByTestId('run-analysis-result'))
     .toHaveText('Analysis not run: AI spending is switched off. No provider was called and no AI analysis was produced.');
   // the backend recorded the started run as ERROR with the configured (fake) model name
@@ -246,7 +262,7 @@ test('a run the server refuses for spending (as the real backend: an ERROR row i
   await expect(page.locator('body')).not.toContainText(/fake provider/i);
   // the re-check after the run sees spending off: no button is offered again
   await expect(runCard(page).getByTestId('run-analysis-gate')).toContainText('Analysis is currently switched off.');
-  await expect(page.getByRole('button', { name: 'Run analysis' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Run paid analysis' })).toHaveCount(0);
   await noHorizontalScroll(page);
 });
 
@@ -254,8 +270,8 @@ test('the analysis service unreachable: a clear message, nothing changes', async
   mock.analyzeMode = 'network';
   await login(page, 'founder');
   await page.goto(`/app/founder/case/${CASE}`);
-  await page.getByRole('button', { name: 'Run analysis' }).click();
-  await page.getByRole('button', { name: 'Run analysis' }).last().click();
+  await page.getByRole('button', { name: 'Run paid analysis' }).click();
+  await page.getByRole('button', { name: 'Run paid analysis' }).last().click();
   await expect(page.getByTestId('run-analysis-result')).toContainText('Could not reach the analysis service');
   expect(mock.analyses).toHaveLength(0);
   expect(caseState()).toBe('SUBMITTED');
@@ -266,7 +282,7 @@ test('request re-analysis from the decision card', async ({ page }) => {
   await login(page, 'founder');
   await page.goto(`/app/founder/case/${CASE}`);
   await page.getByTestId('founder-decision').getByRole('button', { name: 'Request re-analysis' }).click();
-  await expect(page.getByRole('button', { name: 'Run analysis' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Run paid analysis' })).toBeVisible();
   expect(caseState()).toBe('REANALYZING');
 });
 

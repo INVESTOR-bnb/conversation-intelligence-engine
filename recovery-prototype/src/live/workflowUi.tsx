@@ -3,7 +3,7 @@
 // Founder: run analysis → decide (approve / edit / RED) → follow the case. Business: read the
 // approved message only → send it themselves → record replies and the outcome.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Card, ClassificationBadge, ConfirmBox, CopyButton, EmptyState, ErrorBanner, Field, formatDate, formatMoney, Notice, ScreenHeader } from '../components/ui';
 import type { Classification } from '../domain/types';
 import { analysisState, parseAnalysisOutput, proposedMessage, type AnalysisRow, type AnalysisState, type RestrictionRow } from './analysis';
@@ -31,6 +31,7 @@ export function FounderRunAnalysis({ caseId, workflowState, onDone }: { caseId: 
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<{ tone: 'info' | 'warn'; text: string } | null>(null);
   const [gate, setGate] = useState<SpendGate>('loading');
+  const inFlight = useRef(false); // a second tap before the first request returns sends nothing
   const analysable = canRunAnalysis(workflowState);
 
   const checkGate = useCallback(async () => {
@@ -50,6 +51,8 @@ export function FounderRunAnalysis({ caseId, workflowState, onDone }: { caseId: 
   if (!analysable && !result) return null;
 
   const run = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setConfirming(false);
     setRunning(true);
     setResult(null);
@@ -63,6 +66,7 @@ export function FounderRunAnalysis({ caseId, workflowState, onDone }: { caseId: 
       }
     }
     setRunning(false);
+    inFlight.current = false;
     setResult(body?.outcome && body.code ? analysisRunMessage(body.outcome, body.code)
       : { tone: 'warn', text: 'Could not reach the analysis service. Check your connection; if this persists, the case state shows whether anything started.' });
     onDone();
@@ -77,12 +81,12 @@ export function FounderRunAnalysis({ caseId, workflowState, onDone }: { caseId: 
           <p className="muted" role="status" data-testid="run-analysis-gate">{SPEND_GATE_TEXT[gate]}</p>
         )}
         {analysable && gate === 'enabled' && !running && !confirming && (
-          <Button block onClick={() => setConfirming(true)}>Run analysis</Button>
+          <Button block onClick={() => setConfirming(true)}>Run paid analysis</Button>
         )}
         {analysable && gate === 'enabled' && confirming && (
-          <ConfirmBox title="Run one analysis of this case?"
-            body={<p className="muted small">The conversation is sent for one analysis and one independent review. The server checks the spending limits first and refuses the run if it is not authorised. Nothing is sent to the prospect.</p>}
-            confirmLabel="Run analysis" onConfirm={() => void run()} onCancel={() => setConfirming(false)} />
+          <ConfirmBox title="Run one paid analysis of this case?"
+            body={<p className="muted small" data-testid="paid-confirm-text">This will run one paid AI analysis and one independent AI review. The total permitted cost is capped at $1. The server will refuse the run if any spending or safety check fails. Nothing will be sent to the prospect.</p>}
+            confirmLabel="Run paid analysis" onConfirm={() => void run()} onCancel={() => setConfirming(false)} />
         )}
         {running && <p className="muted" role="status" data-testid="analysis-running">Analysing… this can take up to two minutes. Keep this page open.</p>}
       </div>
