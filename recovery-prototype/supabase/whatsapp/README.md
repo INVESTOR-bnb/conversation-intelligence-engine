@@ -82,3 +82,31 @@ Nigerian Business-app number and a consenting test contact: steps A–G of the c
 4. Founder review of live evidence and costs. 5. App Review (Tech Provider) before any third-party business.
 6. Pilot with 1–3 consenting businesses, small spending limits, global switch under founder control.
 7. Only then: plan a separate, reviewed cutover into the prototype (new migrations, deploy, CSP), with rollback.
+
+## Status — 4 Nov 2026 (after the approved five steps)
+| Step | Result |
+|---|---|
+| 1. History-import sequencing | DONE, SIMULATED PASS: authorization and verified mapping saved before history is requested; immediate and out-of-order batches; no analysis until history is complete and settled (10 min); late history added as labelled evidence, case back to re-analysis, outdated approval unusable |
+| 2. Independent private preview | TOOLING DONE (workflow job `wa-preview`, tested offline); deployment BLOCKED on a new Supabase project and the `wa-preview` environment |
+| 3. Historical-chat access, live | BLOCKED (Meta app, number, consent) |
+| 4. One complete live cycle | BLOCKED (3 + spending approval) |
+| 5. Budget | proposed below; nothing spent |
+
+### Deploy the preview (once the inputs exist)
+Actions → "Deploy recovery prototype" → Run workflow → branch `claude/whatsapp-integration`, target
+`wa-preview-deploy`, `expected_sha` = the branch's latest commit → approve. Then add yourself as a user
+in the PREVIEW Supabase project (Authentication → Add user) and run target `wa-preview-founder` with
+your email. Check any time with `wa-preview-readiness`.
+
+### Inputs needed (GitHub → Settings → Environments → `wa-preview`; never in chat)
+- Protection: required reviewer `INVESTOR-bnb`; deployment branch `claude/whatsapp-integration` only.
+- Variables: `WA_PREVIEW_PROJECT_REF` (the new project's 20-letter reference), `WA_PREVIEW_PUBLISHABLE_KEY`
+  (its `sb_publishable_…` key; public), `WA_PREVIEW_PAGES_PROJECT` = `rre-whatsapp-preview`, `WA_APP_ID`, `WA_ES_CONFIG_ID`.
+- Secrets: `WA_PREVIEW_SUPABASE_ACCESS_TOKEN` (scoped to the NEW project only: Database, Edge Functions,
+  Edge Function Secrets read-write; 30 days), `WA_APP_SECRET`, `WA_VERIFY_TOKEN` (any random 24+ characters;
+  the same value goes into the Meta webhook settings).
+- The Cloudflare token already used by the site deploy creates the separate Pages project.
+
+### Partner fallback (only if Meta refuses direct onboarding of the Nigerian number)
+360dialog lists coexistence; reported price ≈ EUR 49 (≈ USD 49–59) per number per month plus Meta's
+message fees (third-party reports, not a quote). Not needed unless the direct route is refused.
