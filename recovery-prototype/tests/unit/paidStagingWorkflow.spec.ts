@@ -8,9 +8,10 @@ import { fileURLToPath } from 'node:url';
 const FILE = readFileSync(fileURLToPath(new URL('../../../.github/workflows/deploy-recovery-prototype.yml', import.meta.url)), 'utf8');
 const section = (from: string, to?: string) => FILE.slice(FILE.indexOf(from), to ? FILE.indexOf(to) : undefined);
 const FRONTEND = section('\n  deploy:\n', '\n  # ------------------------------------------------------------------ paid staging');
-const PAID = section('\n  # ------------------------------------------------------------------ paid staging');
+const WA_MARK = '\n  # ------------------------------------------------------------------ whatsapp preview (isolated)';
+const PAID = section('\n  # ------------------------------------------------------------------ paid staging', WA_MARK);
 const GATE = section('\n  paid-gate:\n', '\n  paid-staging:\n');
-const JOB = section('\n  paid-staging:\n');
+const JOB = section('\n  paid-staging:\n', WA_MARK);
 const noComments = (t: string) => t.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
 
 /** Every shell command in a section (single-line `run:` and `run: |` blocks). */
@@ -35,7 +36,7 @@ test('manual only: no push, pull request, fork, schedule or other trigger; read-
   expect(FILE).toMatch(/^permissions:\n {2}contents: read$/m);
   expect(FILE).not.toMatch(/:\s*write\b/);
   for (const job of [GATE, JOB]) expect(job).toMatch(/\n {4}permissions:\n {6}contents: read\n/);
-  expect(FILE).toContain('options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key]');
+  expect(FILE).toContain('options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]');
   expect(FILE).toMatch(/expected_sha:\n {8}description: [^\n]+\n {8}type: string\n/);
 });
 

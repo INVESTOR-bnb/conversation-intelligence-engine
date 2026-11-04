@@ -20,6 +20,10 @@
 # secrets SUPABASE_ACCESS_TOKEN (scoped sbp_… token) and KIMI_API_KEY, as environment variables
 # of the two steps that need them, never on a command line, never printed.
 # The paid jobs use no third-party action: git and the runner's own Node only.
+#
+# wa-preview-* targets (branch claude/whatsapp-integration only, exact expected_sha, environment
+# wa-preview): the ISOLATED WhatsApp preview — a separate Supabase project and a separate Cloudflare
+# Pages project. They refuse the prototype's project and site; see recovery-prototype/supabase/whatsapp/README.md.
 # Deploys as the Pages project's PRODUCTION branch ("main"):
 # https://revenue-recovery-v0.pages.dev
 #
@@ -42,9 +46,14 @@ on:
         type: choice
         required: true
         default: frontend
-        options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key]
+        options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]
       expected_sha:
         description: Paid targets only — the full 40-character commit hash this run must execute
+        type: string
+        required: false
+        default: ''
+      founder_email:
+        description: wa-preview-founder only — the email of a user already added to the PREVIEW Supabase project
         type: string
         required: false
         default: ''
@@ -284,3 +293,121 @@ jobs:
             *) echo "::error::unknown target"; exit 1 ;;
           esac
           node supabase/scripts/paid-staging.mjs "$action"
+
+  # ------------------------------------------------------------------ whatsapp preview (isolated)
+  wa-preview:
+    if: >-
+      github.repository == 'INVESTOR-bnb/conversation-intelligence-engine'
+      && github.event_name == 'workflow_dispatch'
+      && github.ref == 'refs/heads/claude/whatsapp-integration'
+      && startsWith(inputs.target, 'wa-preview-')
+      && github.sha == inputs.expected_sha
+    runs-on: ubuntu-24.04
+    environment: wa-preview
+    concurrency:
+      group: wa-preview
+      cancel-in-progress: false
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: recovery-prototype
+    env:
+      WA_PREVIEW_PROJECT_REF: ${{ vars.WA_PREVIEW_PROJECT_REF }}
+      WA_PREVIEW_PAGES_PROJECT: ${{ vars.WA_PREVIEW_PAGES_PROJECT }}
+    steps:
+      - name: Check out exactly expected_sha of the WhatsApp branch (git only, no credential)
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          BRANCH: claude/whatsapp-integration
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] && [ "$EXPECTED_SHA" = "$GITHUB_SHA" ] || { echo "::error::expected_sha mismatch"; exit 1; }
+          git init -q .
+          git remote add origin "https://github.com/INVESTOR-bnb/conversation-intelligence-engine.git"
+          git fetch -q --no-tags origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+          git checkout -q -B "$BRANCH" "$EXPECTED_SHA"
+
+      - name: Isolation guard (never the prototype's project or site)
+        run: |
+          [[ "$WA_PREVIEW_PROJECT_REF" =~ ^[a-z]{20}$ ]] || { echo "::error::variable WA_PREVIEW_PROJECT_REF is not set"; exit 1; }
+          [ "$WA_PREVIEW_PROJECT_REF" != "aqwdwswpmbnzmkvyuqil" ] || { echo "::error::refused: that is the prototype's Supabase project"; exit 1; }
+          [[ "$WA_PREVIEW_PAGES_PROJECT" =~ ^[a-z0-9-]{3,58}$ ]] || { echo "::error::variable WA_PREVIEW_PAGES_PROJECT is not set"; exit 1; }
+          [ "$WA_PREVIEW_PAGES_PROJECT" != "revenue-recovery-v0" ] || { echo "::error::refused: that is the prototype's Pages project"; exit 1; }
+
+      - name: Use the runner's Node 22
+        working-directory: .
+        run: |
+          dir="$(ls -d /opt/hostedtoolcache/node/22.*/x64 2>/dev/null | sort -V | tail -1)"
+          [ -n "$dir" ] || { echo "::error::Node 22 is not available on this runner image"; exit 1; }
+          echo "$dir/bin" >> "$GITHUB_PATH"
+
+      - name: Install and offline checks (deploy only)
+        if: inputs.target == 'wa-preview-deploy'
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts
+          npm run typecheck
+          npx playwright test --config playwright.unit.config.ts tests/unit/waTest.spec.ts tests/unit/whatsappHelpers.spec.ts tests/unit/waPreviewDeploy.spec.ts
+
+      - name: Supabase preview project (schema, settings, worker schedule)
+        if: inputs.target == 'wa-preview-deploy'
+        env:
+          WA_PREVIEW_SUPABASE_ACCESS_TOKEN: ${{ secrets.WA_PREVIEW_SUPABASE_ACCESS_TOKEN }}
+          WA_APP_ID: ${{ vars.WA_APP_ID }}
+          WA_APP_SECRET: ${{ secrets.WA_APP_SECRET }}
+          WA_VERIFY_TOKEN: ${{ secrets.WA_VERIFY_TOKEN }}
+          WA_ALLOWED_ORIGIN: https://${{ vars.WA_PREVIEW_PAGES_PROJECT }}.pages.dev
+        run: node supabase/scripts/wa-preview-deploy.mjs setup
+
+      - name: Deploy the whatsapp and analyze-case functions to the preview project
+        if: inputs.target == 'wa-preview-deploy'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.WA_PREVIEW_SUPABASE_ACCESS_TOKEN }}
+        run: |
+          work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+          (cd "$work" && npx --yes supabase@2.117.0 init </dev/null >/dev/null)
+          mkdir -p "$work/supabase/functions"
+          cp -R supabase/functions/whatsapp supabase/functions/analyze-case supabase/functions/_shared "$work/supabase/functions/"
+          printf '\n[functions.whatsapp]\nverify_jwt = false\n\n[functions.analyze-case]\nverify_jwt = true\n' >> "$work/supabase/config.toml"
+          for fn in whatsapp analyze-case; do
+            npx --yes supabase@2.117.0 functions deploy "$fn" --use-api --project-ref "$WA_PREVIEW_PROJECT_REF" --workdir "$work"
+          done
+
+      - name: Build and deploy the preview site (separate Pages project)
+        if: inputs.target == 'wa-preview-deploy'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VITE_SUPABASE_URL: https://${{ vars.WA_PREVIEW_PROJECT_REF }}.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.WA_PREVIEW_PUBLISHABLE_KEY }}
+          VITE_WHATSAPP_PREVIEW: '1'
+          VITE_WA_APP_ID: ${{ vars.WA_APP_ID }}
+          VITE_WA_ES_CONFIG_ID: ${{ vars.WA_ES_CONFIG_ID }}
+        run: |
+          case "$VITE_SUPABASE_PUBLISHABLE_KEY" in sb_publishable_*) ;; *) echo "::error::variable WA_PREVIEW_PUBLISHABLE_KEY must be the preview project's publishable key"; exit 1 ;; esac
+          npx vite build --outDir dist-wa --emptyOutDir
+          grep -q "connect.facebook.net" dist-wa/_headers
+          if grep -rqE 'sb_secret_[A-Za-z0-9]' dist-wa; then echo "::error::A secret key was found in the build output"; exit 1; fi
+          npx --yes wrangler@4.141.0 pages project create "$WA_PREVIEW_PAGES_PROJECT" --production-branch main >/dev/null 2>&1 || true
+          npx --yes wrangler@4.141.0 pages deploy dist-wa --project-name="$WA_PREVIEW_PAGES_PROJECT" --branch=main --commit-hash="$GITHUB_SHA"
+
+      - name: Make an existing preview user the founder
+        if: inputs.target == 'wa-preview-founder'
+        env:
+          WA_PREVIEW_SUPABASE_ACCESS_TOKEN: ${{ secrets.WA_PREVIEW_SUPABASE_ACCESS_TOKEN }}
+          FOUNDER_EMAIL: ${{ inputs.founder_email }}
+        run: node supabase/scripts/wa-preview-deploy.mjs founder
+
+      - name: Readiness (schema, switches off, settings, schedule, webhook handshake, site)
+        if: inputs.target == 'wa-preview-deploy' || inputs.target == 'wa-preview-readiness'
+        env:
+          WA_PREVIEW_SUPABASE_ACCESS_TOKEN: ${{ secrets.WA_PREVIEW_SUPABASE_ACCESS_TOKEN }}
+          WA_VERIFY_TOKEN: ${{ secrets.WA_VERIFY_TOKEN }}
+        run: |
+          ok=0; node supabase/scripts/wa-preview-deploy.mjs readiness || ok=1
+          code="$(curl -s -o /dev/null -w '%{http_code}' --get --data-urlencode 'hub.mode=subscribe' --data-urlencode "hub.verify_token=$WA_VERIFY_TOKEN" --data-urlencode 'hub.challenge=4242' \
+            "https://$WA_PREVIEW_PROJECT_REF.supabase.co/functions/v1/whatsapp/webhook")"
+          echo "webhook handshake HTTP $code"; [ "$code" = 200 ] || ok=1
+          curl -sf "https://$WA_PREVIEW_PAGES_PROJECT.pages.dev/" -o /dev/null && echo "preview site reachable" || ok=1
+          exit $ok
