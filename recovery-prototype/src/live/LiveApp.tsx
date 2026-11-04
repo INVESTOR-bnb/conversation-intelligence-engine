@@ -10,6 +10,12 @@ import {
   AccountPending, AuthCallbackPage, ClientCaseRoute, ClientWorkspace, FounderCasePage, FounderWorkspace, Loading, LoginPage, NotAuthorized, NotFound, SetPasswordPage,
 } from './pages';
 import { navigate, usePathname } from './router';
+import { whatsappPreviewEnabled } from './whatsapp';
+import { ClientWhatsAppPage, FounderWhatsAppPage } from './whatsappUi';
+import { Shell } from './pages';
+
+/** WhatsApp integration preview: only when built for the isolated environment (never the prototype's project). */
+const WA_PREVIEW = whatsappPreviewEnabled(import.meta.env);
 
 function Redirect({ to }: { to: string }) {
   useEffect(() => navigate(to, { replace: true }), [to]);
@@ -63,6 +69,10 @@ export function LiveApp() {
       return <Protected roles={['FOUNDER']}><FounderWorkspace /></Protected>;
     case '/app/client':
       return <Protected roles={['CLIENT']}><ClientWorkspace /></Protected>;
+    case '/app/client/whatsapp':
+      return WA_PREVIEW ? <Protected roles={['CLIENT']}><Shell><ClientWhatsAppPage /></Shell></Protected> : <NotFound />;
+    case '/app/founder/whatsapp':
+      return WA_PREVIEW ? <Protected roles={['FOUNDER']}><Shell><FounderWhatsAppPage /></Shell></Protected> : <NotFound />;
     case '/demo':
       // Stage-1 prototype (browser-local mock data) — founder only in live mode.
       return (

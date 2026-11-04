@@ -13,10 +13,14 @@ import { DRAFT_KEY, FounderScreenshots, releaseShots, resultMessage, ResumeDraft
 import { completeScreenshotCase, fetchStatus, type ShotState } from './screenshotUpload';
 import { SHOT_MESSAGES, summarizeStatus, type ProcessedShot } from './screenshots';
 import { ClientCasePage, FounderCaseTimeline, FounderDecision, FounderRunAnalysis } from './workflowUi';
+import { whatsappPreviewEnabled } from './whatsapp';
+
+/** The WhatsApp preview link appears only in the isolated preview build. */
+const WA_PREVIEW = whatsappPreviewEnabled(import.meta.env);
 
 export const MIN_PASSWORD_LENGTH = 10;
 
-function Shell({ children }: { children: ReactNode }) {
+export function Shell({ children }: { children: ReactNode }) {
   const { status, profile, session, signOut } = useAuth();
   const signOutButton = status === 'signedIn' && (
     <button type="button" className="demobar-more" onClick={async () => { await signOut(); navigate('/login', { replace: true }); }}>
@@ -263,6 +267,7 @@ export function FounderWorkspace() {
   return (
     <Shell>
       <ScreenHeader title="Founder workspace" subtitle={profile?.email ?? undefined} />
+      {WA_PREVIEW && <Button block variant="secondary" onClick={() => navigate('/app/founder/whatsapp')}>WhatsApp diagnostics (preview)</Button>}
       <ErrorBanner message={error} />
       <div className="stats">
         <div className="stat"><span className="stat-num" data-testid="founder-business-count">{businesses ? businesses.length : '…'}</span><span className="stat-label">Businesses</span></div>
@@ -561,6 +566,11 @@ export function ClientWorkspace() {
   return (
     <Shell>
       <ScreenHeader title="Your cases" subtitle={profile?.businessName} />
+      {WA_PREVIEW && (
+        <Card title="WhatsApp (preview)">
+          <Button block variant="secondary" onClick={() => navigate('/app/client/whatsapp')}>Connect or manage WhatsApp</Button>
+        </Card>
+      )}
       <ErrorBanner message={error} />
       {rows === null && !error && <p className="muted" role="status">Loading…</p>}
       {rows && rows.length === 0 && <EmptyState title="No cases yet." />}

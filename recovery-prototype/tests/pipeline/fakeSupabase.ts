@@ -26,6 +26,9 @@ const RPCS: Record<string, 'uuid' | 'jsonb' | 'void'> = {
   client_create_case: 'uuid', client_submit_case: 'void', client_get_case: 'jsonb', founder_ai_spend_summary: 'jsonb',
 };
 
+/** Lets a spec serve additional RPCs (e.g. the isolated WhatsApp bundle it installs); existing specs are unaffected. */
+export function registerRpc(name: string, returns: 'uuid' | 'jsonb' | 'void') { RPCS[name] = returns; }
+
 export interface RequestRecord { method: string; path: string; cred: string; query?: string }
 
 export class FakeSupabase {
