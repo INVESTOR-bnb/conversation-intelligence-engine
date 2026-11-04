@@ -46,7 +46,7 @@ on:
         type: choice
         required: true
         default: frontend
-        options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]
+        options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, wa-preview-preflight, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]
       expected_sha:
         description: Paid targets only — the full 40-character commit hash this run must execute
         type: string
@@ -295,6 +295,9 @@ jobs:
           node supabase/scripts/paid-staging.mjs "$action"
 
   # ------------------------------------------------------------------ whatsapp preview (isolated)
+  # Targets: wa-preview-preflight (Cloudflare check + separate Pages project, Supabase token probe if
+  # configured; writes no Supabase data), wa-preview-deploy (resumable), wa-preview-founder,
+  # wa-preview-readiness (infrastructure and founder account reported separately).
   wa-preview:
     if: >-
       github.repository == 'INVESTOR-bnb/conversation-intelligence-engine'
@@ -314,8 +317,9 @@ jobs:
       run:
         working-directory: recovery-prototype
     env:
+      TARGET: ${{ inputs.target }}
       WA_PREVIEW_PROJECT_REF: ${{ vars.WA_PREVIEW_PROJECT_REF }}
-      WA_PREVIEW_PAGES_PROJECT: ${{ vars.WA_PREVIEW_PAGES_PROJECT }}
+      WA_PREVIEW_PAGES_PROJECT: ${{ vars.WA_PREVIEW_PAGES_PROJECT || 'rre-whatsapp-preview' }}
     steps:
       - name: Check out exactly expected_sha of the WhatsApp branch (git only, no credential)
         working-directory: .
@@ -330,11 +334,15 @@ jobs:
           git checkout -q -B "$BRANCH" "$EXPECTED_SHA"
 
       - name: Isolation guard (never the prototype's project or site)
+        id: guard
         run: |
-          [[ "$WA_PREVIEW_PROJECT_REF" =~ ^[a-z]{20}$ ]] || { echo "::error::variable WA_PREVIEW_PROJECT_REF is not set"; exit 1; }
-          [ "$WA_PREVIEW_PROJECT_REF" != "aqwdwswpmbnzmkvyuqil" ] || { echo "::error::refused: that is the prototype's Supabase project"; exit 1; }
-          [[ "$WA_PREVIEW_PAGES_PROJECT" =~ ^[a-z0-9-]{3,58}$ ]] || { echo "::error::variable WA_PREVIEW_PAGES_PROJECT is not set"; exit 1; }
+          case "$TARGET" in wa-preview-preflight|wa-preview-deploy|wa-preview-founder|wa-preview-readiness) ;; *) echo "::error::unknown target"; exit 1 ;; esac
+          [[ "$WA_PREVIEW_PAGES_PROJECT" =~ ^[a-z0-9-]{3,58}$ ]] || { echo "::error::WA_PREVIEW_PAGES_PROJECT is not a Pages project name"; exit 1; }
           [ "$WA_PREVIEW_PAGES_PROJECT" != "revenue-recovery-v0" ] || { echo "::error::refused: that is the prototype's Pages project"; exit 1; }
+          if [ "$TARGET" != "wa-preview-preflight" ] || [ -n "$WA_PREVIEW_PROJECT_REF" ]; then
+            [[ "$WA_PREVIEW_PROJECT_REF" =~ ^[a-z]{20}$ ]] || { echo "::error::variable WA_PREVIEW_PROJECT_REF is not set"; exit 1; }
+            [ "$WA_PREVIEW_PROJECT_REF" != "aqwdwswpmbnzmkvyuqil" ] || { echo "::error::refused: that is the prototype's Supabase project"; exit 1; }
+          fi
 
       - name: Use the runner's Node 22
         working-directory: .
@@ -350,14 +358,47 @@ jobs:
           npm run typecheck
           npx playwright test --config playwright.unit.config.ts tests/unit/waTest.spec.ts tests/unit/whatsappHelpers.spec.ts tests/unit/waPreviewDeploy.spec.ts
 
-      - name: Supabase preview project (schema, settings, worker schedule)
+      - name: Cloudflare credentials and the separate Pages project (created if absent; free)
+        id: pages
+        if: inputs.target != 'wa-preview-founder'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          mode=create; [ "$TARGET" = "wa-preview-readiness" ] && mode=check
+          node supabase/scripts/wa-preview-pages.mjs "$mode"
+
+      - name: Placeholder page (preflight, only while the site has never been deployed)
+        if: inputs.target == 'wa-preview-preflight' && steps.pages.outputs.has_deployment != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          site="$(mktemp -d)"; trap 'rm -rf "$site"' EXIT
+          printf '%s\n' '<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex"><title>RRE WhatsApp preview</title>' \
+            '<p>RRE WhatsApp preview (isolated). Not configured yet: no data, no sign-in, nothing is sent.</p>' > "$site/index.html"
+          printf '/*\n  X-Robots-Tag: noindex\n  X-Frame-Options: DENY\n' > "$site/_headers"
+          npx --yes wrangler@4.141.0 pages deploy "$site" --project-name="$WA_PREVIEW_PAGES_PROJECT" --branch=main --commit-hash="$GITHUB_SHA"
+
+      - name: Supabase token and project probe (read-only)
+        if: inputs.target == 'wa-preview-preflight' || inputs.target == 'wa-preview-deploy'
+        env:
+          WA_PREVIEW_SUPABASE_ACCESS_TOKEN: ${{ secrets.WA_PREVIEW_SUPABASE_ACCESS_TOKEN }}
+        run: |
+          if [ "$TARGET" = "wa-preview-preflight" ] && { [ -z "$WA_PREVIEW_PROJECT_REF" ] || [ -z "$WA_PREVIEW_SUPABASE_ACCESS_TOKEN" ]; }; then
+            echo "NOT READY  Supabase preview project: variable WA_PREVIEW_PROJECT_REF and/or secret WA_PREVIEW_SUPABASE_ACCESS_TOKEN not set in environment wa-preview"
+            exit 0
+          fi
+          node supabase/scripts/wa-preview-deploy.mjs preflight
+
+      - name: Supabase preview project (schema, settings, worker schedule; resumable)
         if: inputs.target == 'wa-preview-deploy'
         env:
           WA_PREVIEW_SUPABASE_ACCESS_TOKEN: ${{ secrets.WA_PREVIEW_SUPABASE_ACCESS_TOKEN }}
           WA_APP_ID: ${{ vars.WA_APP_ID }}
           WA_APP_SECRET: ${{ secrets.WA_APP_SECRET }}
           WA_VERIFY_TOKEN: ${{ secrets.WA_VERIFY_TOKEN }}
-          WA_ALLOWED_ORIGIN: https://${{ vars.WA_PREVIEW_PAGES_PROJECT }}.pages.dev
+          WA_ALLOWED_ORIGIN: ${{ steps.pages.outputs.origin }}
         run: node supabase/scripts/wa-preview-deploy.mjs setup
 
       - name: Deploy the whatsapp and analyze-case functions to the preview project
@@ -389,7 +430,6 @@ jobs:
           npx vite build --outDir dist-wa --emptyOutDir
           grep -q "connect.facebook.net" dist-wa/_headers
           if grep -rqE 'sb_secret_[A-Za-z0-9]' dist-wa; then echo "::error::A secret key was found in the build output"; exit 1; fi
-          npx --yes wrangler@4.141.0 pages project create "$WA_PREVIEW_PAGES_PROJECT" --production-branch main >/dev/null 2>&1 || true
           npx --yes wrangler@4.141.0 pages deploy dist-wa --project-name="$WA_PREVIEW_PAGES_PROJECT" --branch=main --commit-hash="$GITHUB_SHA"
 
       - name: Make an existing preview user the founder
@@ -399,15 +439,25 @@ jobs:
           FOUNDER_EMAIL: ${{ inputs.founder_email }}
         run: node supabase/scripts/wa-preview-deploy.mjs founder
 
-      - name: Readiness (schema, switches off, settings, schedule, webhook handshake, site)
+      - name: Infrastructure readiness (schema, switches off, settings, schedule, functions, webhook handshake, site)
         if: inputs.target == 'wa-preview-deploy' || inputs.target == 'wa-preview-readiness'
         env:
           WA_PREVIEW_SUPABASE_ACCESS_TOKEN: ${{ secrets.WA_PREVIEW_SUPABASE_ACCESS_TOKEN }}
           WA_VERIFY_TOKEN: ${{ secrets.WA_VERIFY_TOKEN }}
+          SITE: ${{ steps.pages.outputs.origin }}
         run: |
           ok=0; node supabase/scripts/wa-preview-deploy.mjs readiness || ok=1
           code="$(curl -s -o /dev/null -w '%{http_code}' --get --data-urlencode 'hub.mode=subscribe' --data-urlencode "hub.verify_token=$WA_VERIFY_TOKEN" --data-urlencode 'hub.challenge=4242' \
             "https://$WA_PREVIEW_PROJECT_REF.supabase.co/functions/v1/whatsapp/webhook")"
           echo "webhook handshake HTTP $code"; [ "$code" = 200 ] || ok=1
-          curl -sf "https://$WA_PREVIEW_PAGES_PROJECT.pages.dev/" -o /dev/null && echo "preview site reachable" || ok=1
+          curl -sf "$SITE/" -o /dev/null && echo "preview site reachable: $SITE" || { echo "preview site NOT reachable"; ok=1; }
+          echo "RESULT: INFRASTRUCTURE $([ $ok = 0 ] && echo READY || echo 'NOT READY')"
           exit $ok
+
+      - name: Founder-account readiness (separate from infrastructure)
+        if: >-
+          !cancelled() && steps.guard.outcome == 'success'
+          && (inputs.target == 'wa-preview-founder' || inputs.target == 'wa-preview-readiness')
+        env:
+          WA_PREVIEW_SUPABASE_ACCESS_TOKEN: ${{ secrets.WA_PREVIEW_SUPABASE_ACCESS_TOKEN }}
+        run: node supabase/scripts/wa-preview-deploy.mjs founder-readiness

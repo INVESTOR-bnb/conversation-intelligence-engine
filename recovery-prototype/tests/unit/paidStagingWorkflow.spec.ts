@@ -36,7 +36,7 @@ test('manual only: no push, pull request, fork, schedule or other trigger; read-
   expect(FILE).toMatch(/^permissions:\n {2}contents: read$/m);
   expect(FILE).not.toMatch(/:\s*write\b/);
   for (const job of [GATE, JOB]) expect(job).toMatch(/\n {4}permissions:\n {6}contents: read\n/);
-  expect(FILE).toContain('options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]');
+  expect(FILE).toContain('options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, wa-preview-preflight, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]');
   expect(FILE).toMatch(/expected_sha:\n {8}description: [^\n]+\n {8}type: string\n/);
 });
 

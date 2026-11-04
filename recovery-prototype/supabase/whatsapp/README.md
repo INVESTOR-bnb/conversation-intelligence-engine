@@ -4,10 +4,12 @@ Branch `claude/whatsapp-integration` (from `claude/whatsapp-feasibility-test` @ 
 WhatsApp Business Platform (Cloud API) only: Meta's Embedded Signup "WhatsApp Business app
 onboarding" (also called coexistence). No WhatsApp Web automation, no session bridges.
 
-## What the owner gets
-1. **Connect WhatsApp** (their existing Business-app number; the app keeps working).
-2. **Authorize** with stated limits: history period (1–6 months), RRE sends or owner sends,
-   follow-ups per day and per person, and a WhatsApp spending limit. Connecting alone authorizes nothing.
+## What the owner gets (in this order; nothing happens before the owner's authorization)
+1. **Authorize** first, with stated limits: history period (1–6 months), RRE sends or owner sends,
+   follow-ups per day and per person, and a WhatsApp spending limit. Without a saved authorization the
+   Connect button is disabled and the server refuses to connect (`AUTHORIZATION_REQUIRED`).
+2. **Connect WhatsApp** (their existing Business-app number; the app keeps working). RRE records the
+   connection, then requests contacts and history — only after step 1 is saved.
 3. RRE **imports** the last months of 1:1 chats once (Meta's limit), turns stalled sales chats into
    ordinary RRE cases; the founder analyses and approves them in the existing workflow.
 4. RRE **sends** approved follow-ups from the owner's number: for an old prospect, the owner's
@@ -92,20 +94,42 @@ Nigerian Business-app number and a consenting test contact: steps A–G of the c
 | 4. One complete live cycle | BLOCKED (3 + spending approval) |
 | 5. Budget | proposed below; nothing spent |
 
-### Deploy the preview (once the inputs exist)
-Actions → "Deploy recovery prototype" → Run workflow → branch `claude/whatsapp-integration`, target
-`wa-preview-deploy`, `expected_sha` = the branch's latest commit → approve. Then add yourself as a user
-in the PREVIEW Supabase project (Authentication → Add user) and run target `wa-preview-founder` with
-your email. Check any time with `wa-preview-readiness`.
+### Deploy the preview
+All targets run from Actions → "Deploy recovery prototype" → Run workflow → branch `claude/whatsapp-integration`,
+`expected_sha` = the branch's latest commit.
+1. `wa-preview-preflight` — no Supabase input needed. Proves the Cloudflare secrets reach the `wa-preview`
+   environment and can read/create Pages projects, creates the separate Pages project `rre-whatsapp-preview`
+   if absent (free), puts a placeholder page there while nothing else was ever deployed, and prints the real
+   address. If the Supabase inputs exist it also probes the token read-only and names any missing permission.
+2. `wa-preview-deploy` — preflight, then schema (each migration and the WhatsApp bundle applied once, in its own
+   transaction, recorded with a checksum in `rre_preview.applied`; an interrupted run resumes where it stopped;
+   a file changed after it was applied is refused), function settings (`WA_TOKEN_KEY` created once and never
+   replaced; a missing worker schedule is recreated with a new worker secret), functions, site, then
+   **infrastructure readiness** (no founder needed).
+3. Add yourself as a user in the PREVIEW Supabase project (Authentication → Add user), then `wa-preview-founder`
+   with your email: records the founder and checks **founder-account readiness**.
+4. `wa-preview-readiness` any time: infrastructure and founder account, reported separately.
 
 ### Inputs needed (GitHub → Settings → Environments → `wa-preview`; never in chat)
 - Protection: required reviewer `INVESTOR-bnb`; deployment branch `claude/whatsapp-integration` only.
 - Variables: `WA_PREVIEW_PROJECT_REF` (the new project's 20-letter reference), `WA_PREVIEW_PUBLISHABLE_KEY`
-  (its `sb_publishable_…` key; public), `WA_PREVIEW_PAGES_PROJECT` = `rre-whatsapp-preview`, `WA_APP_ID`, `WA_ES_CONFIG_ID`.
-- Secrets: `WA_PREVIEW_SUPABASE_ACCESS_TOKEN` (scoped to the NEW project only: Database, Edge Functions,
-  Edge Function Secrets read-write; 30 days), `WA_APP_SECRET`, `WA_VERIFY_TOKEN` (any random 24+ characters;
-  the same value goes into the Meta webhook settings).
-- The Cloudflare token already used by the site deploy creates the separate Pages project.
+  (its `sb_publishable_…` key; public), `WA_APP_ID`, `WA_ES_CONFIG_ID`; optional `WA_PREVIEW_PAGES_PROJECT`
+  (default `rre-whatsapp-preview`; never `revenue-recovery-v0`).
+- Secrets: `WA_APP_SECRET`, `WA_VERIFY_TOKEN` (any random 24+ characters; the same value goes into the Meta
+  webhook settings) and `WA_PREVIEW_SUPABASE_ACCESS_TOKEN`: a scoped token for the NEW project only, 30 days,
+  with exactly these permissions (each is used; preflight names any that is missing):
+
+  | Permission | Used for |
+  |---|---|
+  | Project Settings: Read | confirm the project is the preview and healthy |
+  | Database: Read and write | schema, tracking, worker schedule, founder, readiness |
+  | Edge Function Secrets: Read | which settings exist (names only) |
+  | Edge Function Secrets: Write | set the function settings |
+  | Edge Functions: Read | readiness of the deployed functions |
+  | Edge Functions: Write | deploy `whatsapp` and `analyze-case` |
+- Cloudflare: the repository secrets `CLOUDFLARE_API_TOKEN` (Account › Cloudflare Pages › Edit) and
+  `CLOUDFLARE_ACCOUNT_ID` already used by the site deploy are inherited by the `wa-preview` environment
+  (verified by `wa-preview-preflight`); the separate Pages project is created with them.
 
 ### Partner fallback (only if Meta refuses direct onboarding of the Nigerian number)
 360dialog lists coexistence; reported price ≈ EUR 49 (≈ USD 49–59) per number per month plus Meta's

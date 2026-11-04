@@ -7,6 +7,7 @@ const routes = {
   'aqwdwswpmbnzmkvyuqil.supabase.co': (u) => (u.pathname.startsWith('/functions/v1/') ? process.env.ROUTE_FUNCTIONS : process.env.ROUTE_SUPABASE),
   'api.supabase.com': () => process.env.ROUTE_MGMT,
   'revenue-recovery-v0.pages.dev': () => process.env.ROUTE_PAGES,
+  'api.cloudflare.com': () => process.env.ROUTE_CF,
 };
 
 globalThis.fetch = async (input, init) => {
