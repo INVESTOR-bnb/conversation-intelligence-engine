@@ -196,6 +196,23 @@ test('re-running setup applies nothing and never regenerates the token key or wo
   expect(st.queries.slice(n).some((q) => q.includes('cron.schedule('))).toBe(false);
 });
 
+test('Meta not configured yet: setup still completes, Meta settings are PENDING and infrastructure readiness is separate', async () => {
+  const bad = await run('setup', { WA_ALLOWED_ORIGIN: 'https://revenue-recovery-v0.example.com' });
+  expect(bad.code).toBe(1);
+  expect(bad.out).toContain('WA_ALLOWED_ORIGIN must be the preview site');
+  const saved = new Map(st.secrets);
+  for (const k of ['WA_APP_ID', 'WA_APP_SECRET', 'WA_VERIFY_TOKEN']) st.secrets.delete(k);
+  const r = await run('setup', { WA_APP_ID: '', WA_APP_SECRET: '', WA_VERIFY_TOKEN: '' });
+  expect(r.code, r.out).toBe(0);
+  for (const k of ['WA_APP_ID', 'WA_APP_SECRET', 'WA_VERIFY_TOKEN']) expect(r.out).toContain(`PENDING  ${k} not provided`);
+  expect([...st.secrets.keys()].sort()).toEqual(['WA_ALLOWED_ORIGIN', 'WA_TOKEN_KEY', 'WA_WORKER_SECRET']);
+  const ready = await run('readiness');
+  expect(ready.code, ready.out).toBe(0);
+  expect(ready.out).toContain('PENDING  meta_setting_WA_APP_ID (not part of infrastructure readiness)');
+  for (const [k, v] of saved) st.secrets.set(k, v);
+  expect((await run('readiness')).out).toContain('SET      meta_setting_WA_APP_SECRET');
+});
+
 test('a missing worker schedule is repaired with a new worker secret; the token key is kept', async () => {
   const key = st.secrets.get('WA_TOKEN_KEY'); const worker = st.secrets.get('WA_WORKER_SECRET');
   st.schedule = false;

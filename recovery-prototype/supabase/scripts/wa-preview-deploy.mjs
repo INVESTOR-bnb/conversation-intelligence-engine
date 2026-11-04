@@ -66,6 +66,7 @@ async function mgmt(path, { method = 'GET', body, permission } = {}) {
 const query = (q) => mgmt('/database/query', { method: 'POST', body: { query: q }, permission: 'Database: Read and write' });
 const scalar = async (q) => { const r = await query(`select (${q}) as v`); return Array.isArray(r) ? r[0]?.v : undefined; };
 const secretNames = async () => new Set(((await mgmt('/secrets', { permission: 'Edge Function Secrets: Read' })) ?? []).map((s) => s?.name));
+export const META_SETTINGS = ['WA_APP_ID', 'WA_APP_SECRET', 'WA_VERIFY_TOKEN'];
 const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 /** Every schema file in order: the migrations, then the WhatsApp bundle; with checksums. */
@@ -125,9 +126,12 @@ async function setup(env) {
 
   const names = await secretNames();
   const set = [];
-  for (const k of ['WA_APP_ID', 'WA_APP_SECRET', 'WA_VERIFY_TOKEN', 'WA_ALLOWED_ORIGIN']) {
-    if (!env[k]) throw new Stop(`${k} is required`);
-    set.push({ name: k, value: env[k] });
+  if (!/^https:\/\/[a-z0-9-]+\.pages\.dev$/.test(env.WA_ALLOWED_ORIGIN ?? '')) throw new Stop('WA_ALLOWED_ORIGIN must be the preview site (https://….pages.dev)');
+  set.push({ name: 'WA_ALLOWED_ORIGIN', value: env.WA_ALLOWED_ORIGIN });
+  // Meta values may not exist yet: the function then refuses every request (CONFIG_INVALID) — safe to deploy.
+  for (const k of META_SETTINGS) {
+    if (env[k]) set.push({ name: k, value: env[k] });
+    else out(`PENDING  ${k} not provided (Meta not configured yet); the whatsapp function stays closed until it is`);
   }
   // The token key encrypts stored WhatsApp credentials: created once, never replaced.
   if (!names.has('WA_TOKEN_KEY')) set.push({ name: 'WA_TOKEN_KEY', value: randomBytes(32).toString('base64') });
@@ -166,11 +170,13 @@ async function readiness() {
     worker_scheduled: await scalar(`exists (select 1 from cron.job where jobname = 'rre-wa-worker') and exists (select 1 from vault.secrets where name = 'rre_wa_worker_secret')`),
   };
   const names = await secretNames();
-  for (const k of ['WA_APP_ID', 'WA_APP_SECRET', 'WA_VERIFY_TOKEN', 'WA_WORKER_SECRET', 'WA_TOKEN_KEY', 'WA_ALLOWED_ORIGIN']) checks[`setting_${k}`] = names.has(k);
+  for (const k of ['WA_WORKER_SECRET', 'WA_TOKEN_KEY', 'WA_ALLOWED_ORIGIN']) checks[`setting_${k}`] = names.has(k);
   const fns = ((await mgmt('/functions', { permission: 'Edge Functions: Read' })) ?? []).map((f) => `${f?.slug}:${f?.status}:${f?.verify_jwt}`);
   checks.function_whatsapp_active_jwt_off = fns.includes('whatsapp:ACTIVE:false');
   checks.function_analyze_case_active_jwt_on = fns.includes('analyze-case:ACTIVE:true');
   for (const [k, v] of Object.entries(checks)) out(`${v === true ? 'PASS' : 'FAIL'}  ${k}`);
+  // Meta configuration is reported separately: it is not infrastructure and does not prove WhatsApp works.
+  for (const k of META_SETTINGS) out(`${names.has(k) ? 'SET    ' : 'PENDING'}  meta_setting_${k} (not part of infrastructure readiness)`);
   if (Object.values(checks).some((v) => v !== true)) throw new Stop('infrastructure readiness incomplete');
 }
 

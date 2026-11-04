@@ -514,9 +514,13 @@ jobs:
           SITE: ${{ steps.pages.outputs.origin }}
         run: |
           ok=0; node supabase/scripts/wa-preview-deploy.mjs readiness || ok=1
-          code="$(curl -s -o /dev/null -w '%{http_code}' --get --data-urlencode 'hub.mode=subscribe' --data-urlencode "hub.verify_token=$WA_VERIFY_TOKEN" --data-urlencode 'hub.challenge=4242' \
-            "https://$WA_PREVIEW_PROJECT_REF.supabase.co/functions/v1/whatsapp/webhook")"
-          echo "webhook handshake HTTP $code"; [ "$code" = 200 ] || ok=1
+          if [ -n "$WA_VERIFY_TOKEN" ]; then
+            code="$(curl -s -o /dev/null -w '%{http_code}' --get --data-urlencode 'hub.mode=subscribe' --data-urlencode "hub.verify_token=$WA_VERIFY_TOKEN" --data-urlencode 'hub.challenge=4242' \
+              "https://$WA_PREVIEW_PROJECT_REF.supabase.co/functions/v1/whatsapp/webhook")"
+            echo "META webhook handshake HTTP $code (reported separately; not infrastructure)"
+          else
+            echo "PENDING  META webhook handshake: WA_VERIFY_TOKEN not set (Meta not configured yet)"
+          fi
           curl -sf "$SITE/" -o /dev/null && echo "preview site reachable: $SITE" || { echo "preview site NOT reachable"; ok=1; }
           echo "RESULT: INFRASTRUCTURE $([ $ok = 0 ] && echo READY || echo 'NOT READY')"
           exit $ok

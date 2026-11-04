@@ -22,6 +22,9 @@ interface WaContact { id: string; number: string; permission: string; taken_over
 declare global { interface Window { FB?: { init: (o: object) => void; login: (cb: (r: { authResponse?: { code?: string } }) => void, o: object) => void }; fbAsyncInit?: () => void } }
 
 /** Meta's official Embedded Signup, WhatsApp Business app onboarding flow. Resolves with the code and the ids Meta reports. */
+/** Both Meta values are compiled in only once the Meta app and its Embedded Signup configuration exist. */
+const META_CONFIGURED = /^[0-9]{5,20}$/.test(import.meta.env.VITE_WA_APP_ID ?? '') && /^[0-9]{5,20}$/.test(import.meta.env.VITE_WA_ES_CONFIG_ID ?? '');
+
 function metaSignup(appId: string, configId: string): Promise<{ code: string; phoneNumberId: string; wabaId: string } | null> {
   return new Promise((resolve) => {
     let ids: { phoneNumberId: string; wabaId: string } | null = null;
@@ -84,6 +87,7 @@ export function ClientWhatsAppPage() {
   const connect = async () => {
     setBusy(true); setError(null);
     const appId = import.meta.env.VITE_WA_APP_ID ?? ''; const configId = import.meta.env.VITE_WA_ES_CONFIG_ID ?? '';
+    if (!META_CONFIGURED) { setBusy(false); setError('WhatsApp connection is not set up yet (the Meta app is pending). Nothing was connected.'); return; }
     const r = await metaSignup(appId, configId);
     if (!r) { setBusy(false); setError('Meta sign-up did not complete. Nothing was connected.'); return; }
     const { error: err } = await supabase.functions.invoke('whatsapp/connect', { body: { code: r.code, phone_number_id: r.phoneNumberId, waba_id: r.wabaId } });
