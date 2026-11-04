@@ -89,7 +89,7 @@ Nigerian Business-app number and a consenting test contact: steps A–G of the c
 | Step | Result |
 |---|---|
 | 1. History-import sequencing | DONE, SIMULATED PASS: authorization and verified mapping saved before history is requested; immediate and out-of-order batches; no analysis until history is complete and settled (10 min); late history added as labelled evidence, case back to re-analysis, outdated approval unusable |
-| 2. Independent private preview | TOOLING DONE (workflow job `wa-preview`, tested offline); deployment BLOCKED on a new Supabase project and the `wa-preview` environment |
+| 2. Independent private preview | LIVE (run 41810104502, commit `c939ce3`): Cloudflare secrets reach `wa-preview`; separate Pages project `rre-whatsapp-preview` created; placeholder at https://rre-whatsapp-preview.pages.dev. Supabase part BLOCKED on a new Supabase project, its scoped token and the `wa-preview` inputs |
 | 3. Historical-chat access, live | BLOCKED (Meta app, number, consent) |
 | 4. One complete live cycle | BLOCKED (3 + spending approval) |
 | 5. Budget | proposed below; nothing spent |
