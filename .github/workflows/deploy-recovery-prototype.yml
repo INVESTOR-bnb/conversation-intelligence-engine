@@ -466,6 +466,7 @@ jobs:
           WA_APP_SECRET: ${{ secrets.WA_APP_SECRET }}
           WA_VERIFY_TOKEN: ${{ secrets.WA_VERIFY_TOKEN }}
           WA_ALLOWED_ORIGIN: ${{ steps.pages.outputs.origin }}
+          WA_PREVIEW_PUBLISHABLE_KEY: ${{ vars.WA_PREVIEW_PUBLISHABLE_KEY }}
         run: node supabase/scripts/wa-preview-deploy.mjs setup
 
       - name: Deploy the whatsapp and analyze-case functions to the preview project

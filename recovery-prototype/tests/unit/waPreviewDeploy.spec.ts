@@ -314,3 +314,25 @@ test('workflow job: preflight checks Cloudflare and Supabase, deploy is prefligh
   const infra = JOB.slice(JOB.indexOf('- name: Infrastructure readiness'), JOB.indexOf('- name: Founder-account readiness'));
   expect(infra).not.toContain('founder');
 });
+
+/** Each workflow step (name → its text), for checking what a command receives. */
+const steps = () => JOB.split(/\n {6}- name: /).slice(1).map((t) => t);
+test('workflow job: every script command receives the inputs that command reads', () => {
+  const needs: Record<string, string[]> = {
+    // setup runs preflight first, so it needs everything preflight reads
+    'wa-preview-deploy.mjs preflight': ['WA_PREVIEW_SUPABASE_ACCESS_TOKEN', 'WA_PREVIEW_PUBLISHABLE_KEY'],
+    'wa-preview-deploy.mjs setup': ['WA_PREVIEW_SUPABASE_ACCESS_TOKEN', 'WA_PREVIEW_PUBLISHABLE_KEY', 'WA_ALLOWED_ORIGIN', 'WA_APP_ID', 'WA_APP_SECRET', 'WA_VERIFY_TOKEN'],
+    'wa-preview-deploy.mjs readiness': ['WA_PREVIEW_SUPABASE_ACCESS_TOKEN'],
+    'wa-preview-deploy.mjs founder\n': ['WA_PREVIEW_SUPABASE_ACCESS_TOKEN', 'FOUNDER_EMAIL'],
+    'wa-preview-deploy.mjs founder-readiness': ['WA_PREVIEW_SUPABASE_ACCESS_TOKEN'],
+    'wa-preview-pages.mjs': ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'],
+  };
+  for (const [cmd, vars] of Object.entries(needs)) {
+    const using = steps().filter((s) => `${s}\n`.includes(cmd));
+    expect(using.length, cmd).toBeGreaterThan(0);
+    for (const s of using) for (const v of vars) expect(s, `${cmd} needs ${v}`).toMatch(new RegExp(`\\n {10}${v}: \\$\\{\\{ `));
+  }
+  // the job-level values every command also reads
+  expect(JOB).toMatch(/\n {6}WA_PREVIEW_PROJECT_REF: \$\{\{ vars\.WA_PREVIEW_PROJECT_REF \}\}/);
+});
+
