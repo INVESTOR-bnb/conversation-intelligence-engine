@@ -40,7 +40,7 @@ cd recovery-prototype && npm run test:whatsapp
 ```
 
 ## Set up the isolated environment (needs owner access; nothing here is done yet)
-1. **Supabase**: a NEW project (Free plan is enough for a pilot test). Apply `supabase/migrations/*`, then
+1. **Supabase**: a NEW Free-plan project in a Free organization (see *Create the preview Supabase project* below). Apply `supabase/migrations/*`, then
    `supabase/whatsapp/wa_integration.sql`. Create the founder and one test business there (synthetic or
    the authorizing pilot business only — no prototype data is copied).
 2. **Edge Functions** in that project: `analyze-case` (AI spending stays off; its own allowance) and
@@ -94,6 +94,18 @@ Nigerian Business-app number and a consenting test contact: steps A–G of the c
 | 3. Historical-chat access, live | BLOCKED (Meta app, number, consent) |
 | 4. One complete live cycle | BLOCKED (3 + spending approval) |
 | 5. Budget | proposed below; nothing spent |
+
+### Create the preview Supabase project (owner; no cost)
+- **Allowance:** Supabase allows **two active Free-plan projects per account**, counted across every organization
+  where the account is an Owner or Administrator. Creating a new organization does **not** reset it.
+- **Organization:** the project must be in an organization on the **Free** plan. A paid organization cannot contain
+  a Free-plan project, so do not use the prototype's organization if it is paid; use (or create) a Free organization.
+- **Never** upgrade, pause, delete or repurpose an existing project to make room. If Supabase asks for any of
+  these, or for a payment method, stop and report the exact message.
+- Create `rre-whatsapp-preview` only when the form explicitly shows **Free / $0**. Region: the prototype's.
+- **Database password:** use Supabase's generated password and save it privately in a password manager
+  (never in chat, GitHub or a file in the repository). The deployment does not use it.
+- Report only the non-secret 20-letter project reference.
 
 ### Deploy the preview
 All targets run from Actions → "Deploy recovery prototype" → Run workflow → branch `claude/whatsapp-integration`,
