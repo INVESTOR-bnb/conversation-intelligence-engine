@@ -270,7 +270,7 @@ test('workflow job: manual, this branch only, exact commit, its own environment,
 });
 
 test('workflow job: preflight checks Cloudflare and Supabase, deploy is preflighted and resumable, readiness split', () => {
-  expect(FILE).toContain('wa-preview-preflight, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]');
+  expect(FILE).toContain('wa-preview-gate-test, wa-preview-preflight, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]');
   expect(JOB).toContain("WA_PREVIEW_PAGES_PROJECT: ${{ vars.WA_PREVIEW_PAGES_PROJECT || 'rre-whatsapp-preview' }}");
   expect(JOB).toContain('node supabase/scripts/wa-preview-pages.mjs "$mode"');
   expect(JOB).toContain('node supabase/scripts/wa-preview-deploy.mjs preflight');

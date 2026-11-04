@@ -111,7 +111,11 @@ All targets run from Actions → "Deploy recovery prototype" → Run workflow �
 4. `wa-preview-readiness` any time: infrastructure and founder account, reported separately.
 
 ### Inputs needed (GitHub → Settings → Environments → `wa-preview`; never in chat)
-- Protection: required reviewer `INVESTOR-bnb`; deployment branch `claude/whatsapp-integration` only.
+- Protection (checked by the `wa-preview-gate` job before every wa-preview job; nothing enters the environment
+  otherwise): Required reviewers = `INVESTOR-bnb`; **Prevent self-review OFF** (single-founder account: you
+  start and approve your own runs); **Allow administrators to bypass OFF**; Deployment branches = Selected
+  branches, exactly `claude/whatsapp-integration`. Prove it with target `wa-preview-gate-test`: the run waits
+  for your approval and does nothing else (no secret, no code).
 - Variables: `WA_PREVIEW_PROJECT_REF` (the new project's 20-letter reference), `WA_PREVIEW_PUBLISHABLE_KEY`
   (its `sb_publishable_…` key; public), `WA_APP_ID`, `WA_ES_CONFIG_ID`; optional `WA_PREVIEW_PAGES_PROJECT`
   (default `rre-whatsapp-preview`; never `revenue-recovery-v0`).

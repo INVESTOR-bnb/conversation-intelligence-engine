@@ -46,7 +46,7 @@ on:
         type: choice
         required: true
         default: frontend
-        options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, wa-preview-preflight, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]
+        options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, wa-preview-gate-test, wa-preview-preflight, wa-preview-deploy, wa-preview-founder, wa-preview-readiness]
       expected_sha:
         description: Paid targets only — the full 40-character commit hash this run must execute
         type: string
@@ -298,13 +298,79 @@ jobs:
   # Targets: wa-preview-preflight (Cloudflare check + separate Pages project, Supabase token probe if
   # configured; writes no Supabase data), wa-preview-deploy (resumable), wa-preview-founder,
   # wa-preview-readiness (infrastructure and founder account reported separately).
+  # Gate for every wa-preview-* target: no environment, no secret. Refuses unless the run is a manual
+  # dispatch of this branch at expected_sha AND environment wa-preview requires the founder's approval
+  # (self-review allowed, no administrator bypass, only claude/whatsapp-integration may deploy).
+  wa-preview-gate:
+    if: >-
+      github.repository == 'INVESTOR-bnb/conversation-intelligence-engine'
+      && github.event_name == 'workflow_dispatch'
+      && github.ref == 'refs/heads/claude/whatsapp-integration'
+      && startsWith(inputs.target, 'wa-preview-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: recovery-prototype
+    steps:
+      - name: Check out exactly expected_sha of the WhatsApp branch (git only, no credential)
+        working-directory: .
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          BRANCH: claude/whatsapp-integration
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::expected_sha must be a full 40-character commit hash"; exit 1; }
+          git init -q .
+          git remote add origin "https://github.com/INVESTOR-bnb/conversation-intelligence-engine.git"
+          git fetch -q --no-tags origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+          git checkout -q -B "$BRANCH" "$EXPECTED_SHA"
+
+      - name: Use the runner's Node 22
+        working-directory: .
+        run: |
+          dir="$(ls -d /opt/hostedtoolcache/node/22.*/x64 2>/dev/null | sort -V | tail -1)"
+          [ -n "$dir" ] || { echo "::error::Node 22 is not available on this runner image"; exit 1; }
+          echo "$dir/bin" >> "$GITHUB_PATH"
+
+      - name: Gate (run, commit and wa-preview protection; no secret exists in this job)
+        env:
+          TARGET: ${{ inputs.target }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node supabase/scripts/wa-preview-gate.mjs
+
+  # Harmless proof of the approval gate: enters wa-preview (so it waits for the founder), reads no
+  # secret, checks out nothing, changes nothing.
+  wa-preview-gate-test:
+    needs: wa-preview-gate
+    if: >-
+      github.repository == 'INVESTOR-bnb/conversation-intelligence-engine'
+      && github.event_name == 'workflow_dispatch'
+      && github.ref == 'refs/heads/claude/whatsapp-integration'
+      && inputs.target == 'wa-preview-gate-test'
+      && github.sha == inputs.expected_sha
+      && needs.wa-preview-gate.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: wa-preview
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Approved by the founder (no secret, no source code, no change)
+        run: echo "wa-preview approval gate PASSED - this job ran only after the founder approved it"
+
   wa-preview:
     if: >-
       github.repository == 'INVESTOR-bnb/conversation-intelligence-engine'
       && github.event_name == 'workflow_dispatch'
       && github.ref == 'refs/heads/claude/whatsapp-integration'
       && startsWith(inputs.target, 'wa-preview-')
+      && inputs.target != 'wa-preview-gate-test'
       && github.sha == inputs.expected_sha
+      && needs.wa-preview-gate.result == 'success'
+    needs: wa-preview-gate
     runs-on: ubuntu-24.04
     environment: wa-preview
     concurrency:
