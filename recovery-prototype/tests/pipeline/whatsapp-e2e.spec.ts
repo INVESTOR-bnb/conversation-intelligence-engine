@@ -29,15 +29,18 @@ const fake = new FakeSupabase();
 const graphCalls: { method: string; path: string; body: unknown; auth: string | null }[] = [];
 let sendMode: 'accept' | 'timeout' | 'reject' | 'token' = 'accept';
 let wamidN = 0;
+/** Runs while Meta is still answering the history request (a webhook that arrives before the request returns). */
+let duringHistoryRequest: (() => Promise<void>) | null = null;
 const graph: Server = createServer((req, res) => {
   let raw = '';
   req.on('data', (d) => { raw += d; });
-  req.on('end', () => {
+  req.on('end', async () => {
     const u = new URL(req.url ?? '/', 'http://g');
     graphCalls.push({ method: req.method ?? '', path: u.pathname, body: raw ? JSON.parse(raw) : null, auth: req.headers.authorization ?? null });
     const send = (status: number, b: unknown) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(b)); };
     if (u.pathname.endsWith('/oauth/access_token')) return send(200, { access_token: BUSINESS_TOKEN });
     if (u.pathname === `/v25.0/${PNID}`) return send(200, { display_phone_number: '+234 800 000 0001' });
+    if (u.pathname.endsWith('/smb_app_data') && raw.includes('"history"') && duringHistoryRequest) { await duringHistoryRequest(); duringHistoryRequest = null; }
     if (u.pathname.endsWith('/messages')) {
       if (sendMode === 'timeout') return send(504, { message: 'gateway timeout' });
       if (sendMode === 'reject') return send(400, { error: { code: 131026, message: 'undeliverable' } });
@@ -86,7 +89,8 @@ test.beforeAll(async () => {
   if (one(`select to_regclass('private.wa_settings') is null`) === 't') sql(BUNDLE);
   for (const [n, t] of [['internal_wa_ingest', 'jsonb'], ['internal_wa_record_connection', 'void'], ['internal_wa_set_connection_status', 'void'],
     ['internal_wa_connection', 'jsonb'], ['internal_wa_active_businesses', 'jsonb'], ['internal_wa_import_cases', 'jsonb'], ['internal_wa_plan_sends', 'jsonb'],
-    ['internal_wa_claim_sends', 'jsonb'], ['internal_wa_finish_send', 'void'], ['client_wa_disconnect', 'void']] as const) registerRpc(n, t);
+    ['internal_wa_claim_sends', 'jsonb'], ['internal_wa_finish_send', 'void'], ['client_wa_disconnect', 'void'],
+    ['internal_wa_has_authorization', 'jsonb'], ['internal_wa_mark_history_requested', 'uuid'], ['internal_wa_apply_late_history', 'jsonb']] as const) registerRpc(n, t);
   await fake.start();
   GRAPH_URL = await new Promise<string>((r) => graph.listen(0, '127.0.0.1', () => r(`http://127.0.0.1:${(graph.address() as { port: number }).port}`)));
 });
@@ -105,26 +109,39 @@ test('isolation: the handler refuses to run against the current prototype\'s pro
   expect(graphCalls).toEqual([]);
 });
 
-test('the full owner journey (SIMULATED): connect → authorize → history → case → founder approval → reopening template → reply → personal reply → takeover', async () => {
+test('the full owner journey (SIMULATED): authorize → connect → history → case → founder approval → reopening template → reply → personal reply → takeover', async () => {
+  // ---- sequencing: no authorization, no connection (refused before any Meta call)
+  const early = await post('connect', { code: 'c0de', phone_number_id: PNID, waba_id: WABA }, member(CLIENT_A));
+  expect([early.status, (await early.json()).code]).toEqual([409, 'AUTHORIZATION_REQUIRED']);
+  expect(graphCalls).toEqual([]);
+
+  // ---- the owner's explicit authorization comes first
+  sql(`select public.client_wa_authorize('v1', 3, 'AUTOMATIC', 5, 2, 1, 'rre_reopen', 'en', :'t')`, { t: TEMPLATE_TEXT }, asClient(CLIENT_A));
+
   // ---- connect: only a business member, for their own business; the body cannot name a business
   expect((await post('connect', { code: 'c0de', phone_number_id: PNID, waba_id: WABA }, member(FOUNDER))).status).toBe(403);
   expect((await post('connect', { code: 'c0de', phone_number_id: PNID, waba_id: WABA, business_id: BIZ_B }, member(CLIENT_A))).status).toBe(400);
+  // signed history; the FINAL batch is delivered while the history request is still in flight (immediate, out of order)
+  const finalBatch = value('history', { history: [{ metadata: { phase: 2, chunk_order: 9, progress: 100 }, threads: [] }] });
+  let mappingSeenByImmediateWebhook = '';
+  duringHistoryRequest = async () => {
+    mappingSeenByImmediateWebhook = one(`select status from private.wa_connections where phone_number_id = :'p'`, { p: PNID }) ?? 'NONE';
+    expect((await webhook(finalBatch)).status).toBe(200);
+  };
   const c = await post('connect', { code: 'c0de', phone_number_id: PNID, waba_id: WABA }, member(CLIENT_A));
-  expect([c.status, await c.json()]).toEqual([200, { code: 'SYNCING', contacts_sync: 'OK', history_sync: 'OK' }]);
+  expect([c.status, await c.json()]).toEqual([200, { code: 'CONNECTED', contacts_sync: 'OK', history_sync: 'OK' }]);
+  expect(mappingSeenByImmediateWebhook).toBe('CONNECTING'); // the mapping was saved before history was requested
   expect(graphCalls.map((g) => `${g.method} ${g.path}`)).toEqual([`GET /v25.0/oauth/access_token`, `GET /v25.0/${PNID}`,
     `POST /v25.0/${WABA}/subscribed_apps`, `POST /v25.0/${PNID}/smb_app_data`, `POST /v25.0/${PNID}/smb_app_data`]);
   const stored = one(`select token_ciphertext from private.wa_connections where business_id = :'b'`, { b: BIZ_A })!;
   expect(stored.startsWith('v1:') && !stored.includes(BUSINESS_TOKEN)).toBe(true);
   expect(await decryptToken(TOKEN_KEY, stored)).toBe(BUSINESS_TOKEN);
-  expect(one(`select status || '/' || number_last4 from private.wa_connections where business_id = :'b'`, { b: BIZ_A })).toBe('SYNCING/0001');
+  expect(one(`select status || '/' || number_last4 from private.wa_connections where business_id = :'b'`, { b: BIZ_A })).toBe('CONNECTED/0001');
   const other = await post('connect', { code: 'c0de', phone_number_id: PNID, waba_id: WABA }, member(CLIENT_B));
-  expect(other.status).toBe(409); // the number already belongs to business A
+  expect(other.status).toBe(409); // B has no authorization (and the number already belongs to business A)
 
-  // ---- the owner's explicit authorization (nothing is sent without it)
-  sql(`select public.client_wa_authorize('v1', 3, 'AUTOMATIC', 5, 2, 1, 'rre_reopen', 'en', :'t')`, { t: TEMPLATE_TEXT }, asClient(CLIENT_A));
-
-  // ---- signed history webhook (unsigned rejected); a group thread is not imported; an image has no importable content
-  const history = value('history', { history: [{ metadata: { phase: 0, chunk_order: 1, progress: 100 }, threads: [
+  // ---- an earlier batch arrives after the final one; unsigned rejected; a group thread is not imported; a voice note has no importable content
+  const history = value('history', { history: [{ metadata: { phase: 0, chunk_order: 1, progress: 60 }, threads: [
     { id: PROSPECT, messages: [
       { from: OWNER_NUMBER, id: 'h2', timestamp: String(now() - 10 * 86400 + 60), type: 'text', text: { body: 'It is 9,500.' } },
       { from: PROSPECT, id: 'h1', timestamp: String(now() - 10 * 86400), type: 'text', text: { body: 'How much is the hatchback?' } },
@@ -135,6 +152,8 @@ test('the full owner journey (SIMULATED): connect → authorize → history → 
   expect((await webhook(history)).status).toBe(200); // a retry changes nothing
   expect(one(`select count(*) from private.wa_messages where business_id = :'b'`, { b: BIZ_A })).toBe('3');
   expect(one(`select history_status || '/' || status from private.wa_connections where business_id = :'b'`, { b: BIZ_A })).toBe('COMPLETE/CONNECTED');
+  expect((await (await worker()).json())).toMatchObject({ imported: 0 }); // batches still settling: no analysis of an incomplete import
+  sql(`update private.wa_history_chunks set received_at = now() - interval '11 minutes' where business_id = :'b'`, { b: BIZ_A });
 
   // ---- worker: the chat becomes an ordinary case for founder analysis (voice note marked, not invented)
   expect((await worker('wrong-secret-0123456789abcdef0123456789')).status).toBe(401);
@@ -190,13 +209,14 @@ test('the full owner journey (SIMULATED): connect → authorize → history → 
 
 test('provider failures: a definitive refusal is FAILED (no retry); an expired token puts the connection in Action required', async () => {
   // a fresh approved, permitted case for the same contact is not possible after takeover; use business B's own connection
+  sql(`select public.client_wa_authorize('v1', 3, 'AUTOMATIC', 5, 2, 1, null, null, null)`, {}, asClient(CLIENT_B));
   const r = await post('connect', { code: 'c0de', phone_number_id: '100000000000002', waba_id: '200000000000002' }, member(CLIENT_B));
   expect(r.status).toBe(200);
   expect(one(`select status from private.wa_connections where business_id = :'b'`, { b: BIZ_B })).toBe('SYNCING');
+  expect((await r.json()).code).toBe('SYNCING');
   sendMode = 'token';
   sql('select public.founder_wa_set_sending(true)', {}, asClient(FOUNDER));
   // a queued send for B (inserted as the database owner for this failure-mode check)
-  sql(`select public.client_wa_authorize('v1', 3, 'AUTOMATIC', 5, 2, 1, null, null, null)`, {}, asClient(CLIENT_B));
   sql(`insert into private.wa_contacts (business_id, wa_id, permission, last_live_inbound_at) values (:'b', '2348000000222', 'OPTED_IN', now());
        insert into public.cases (business_id, reference, product_service, lead_source, conversation_source, idempotency_key, workflow_state)
        values (:'b', 'WA-FAIL', 'x', 'Unknown', 'TEXT', gen_random_uuid(), 'SUBMITTED');`, { b: BIZ_B });

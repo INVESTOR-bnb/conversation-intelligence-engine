@@ -118,7 +118,8 @@ export function ClientWhatsAppPage() {
       {st && !connected && (
         <Card title="Connect WhatsApp">
           <p className="muted small">Use your existing WhatsApp Business app number. You keep using the app as usual; nothing is deleted or moved.</p>
-          <Button block disabled={busy} onClick={() => void connect()}>Connect WhatsApp</Button>
+          {!st.authorization && <p className="muted small" data-testid="wa-authorize-first">First save your recovery settings below. RRE requests your chat history only after you have authorized it.</p>}
+          <Button block disabled={busy || !st.authorization} onClick={() => void connect()}>Connect WhatsApp</Button>
         </Card>
       )}
 
@@ -150,7 +151,7 @@ export function ClientWhatsAppPage() {
         </Card>
       )}
 
-      {st && connected && (
+      {st && (
         <Card title={st.authorization ? 'Your recovery settings' : 'Authorize recovery'}>
           {st.authorization && (
             <p className="muted small" data-testid="wa-auth-current">

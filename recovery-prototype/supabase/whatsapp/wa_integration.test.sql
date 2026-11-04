@@ -4,29 +4,11 @@ select tests.as_owner();
 select tests.seed();
 \set TPL_TEXT 'Hello from Synthetic Autos A. Are you still interested in what you asked us about? Reply STOP to opt out.'
 
--- ---------------------------------------------------------------- connection: members only, one business per number
+-- ---------------------------------------------------------------- sequencing: authorization BEFORE any connection or history request
 select tests.as_service();
-select tests.throws(format('select public.internal_wa_record_connection(%L, %L, %L, %L, %L, %L, %L, null)', tests.biz_b(), tests.client_a(),
-  '100000000000002', '200000000000002', '0002', 'enc:x', 'SYNCING'), '^FORBIDDEN', 'a member of business A cannot connect business B');
-select public.internal_wa_record_connection(tests.biz_a(), tests.client_a(), '100000000000001', '200000000000001', '0001', 'enc:tokenA', 'SYNCING', null);
-select public.internal_wa_record_connection(tests.biz_b(), tests.client_b(), '100000000000002', '200000000000002', '0002', 'enc:tokenB', 'CONNECTED', null);
-select tests.throws(format('select public.internal_wa_record_connection(%L, %L, %L, %L, %L, %L, %L, null)', tests.biz_b(), tests.client_b(),
-  '100000000000001', '200000000000001', '0001', 'enc:x', 'SYNCING'), '^CONFLICT', 'a number connected to A cannot be bound to B');
-select tests.as_anon();
-select tests.throws($$select public.internal_wa_ingest('[]')$$, 'permission denied', 'anon cannot post events');
-select tests.login(tests.client_a());
-select tests.throws($$select public.internal_wa_claim_sends(5)$$, 'permission denied', 'a business cannot run the send worker');
-select tests.is(public.client_wa_status() ->> 'status', 'SYNCING', 'owner sees SYNCING (not Connected) until history arrives');
-select tests.ok(public.client_wa_status() -> 'authorization' = 'null'::jsonb, 'connecting alone authorizes nothing');
-
--- ---------------------------------------------------------------- history before authorization is discarded (minimised)
-select tests.as_service();
-select tests.is(public.internal_wa_ingest(jsonb_build_array(jsonb_build_object('kind', 'HISTORY_CHUNK', 'phone_number_id', '100000000000001',
-  'chunk_key', 'pre-auth', 'phase', 0, 'chunk_order', 0, 'progress', 5, 'messages', jsonb_build_array(
-    jsonb_build_object('wa_id', '2348000000099', 'wamid', 'h.pre', 'direction', 'IN', 'msg_type', 'text', 'body', 'old', 'content_available', true,
-      'sent_at', extract(epoch from now() - interval '5 days')))))) ->> 'stored', '1', 'chunk recorded');
-select tests.as_owner();
-select tests.is((select count(*) from private.wa_messages), 0::bigint, 'no message content is kept before the owner authorizes a history scope');
+select tests.throws(format('select public.internal_wa_record_connection(%L, %L, %L, %L, %L, %L, %L, null)', tests.biz_a(), tests.client_a(),
+  '100000000000001', '200000000000001', '0001', 'enc:tokenA', 'CONNECTING'), '^AUTHORIZATION_REQUIRED', 'no connection is recorded before the owner authorizes');
+select tests.is(public.internal_wa_has_authorization(tests.biz_a()), 'false'::jsonb, 'the Edge Function can check authorization before the Meta exchange');
 
 -- ---------------------------------------------------------------- the owner's explicit authorization
 select tests.login(tests.client_a());
@@ -34,9 +16,34 @@ select tests.throws($$select public.client_wa_authorize('v1', 12, 'AUTOMATIC', 5
 select tests.throws($$select public.client_wa_authorize('v1', 3, 'AUTOMATIC', 5, 2, 500, null, null, null)$$, 'check constraint', 'spending limit is capped');
 select public.client_wa_authorize('v1', 3, 'AUTOMATIC', 5, 2, 1, 'rre_reopen', 'en', :'TPL_TEXT');
 select tests.is(public.client_wa_status() -> 'authorization' ->> 'send_mode', 'AUTOMATIC', 'authorization recorded with its limits');
+select tests.login(tests.client_b());
+select public.client_wa_authorize('v1', 3, 'AUTOMATIC', 5, 2, 1, null, null, null);
 
--- ---------------------------------------------------------------- history import: scope, order, duplicates, unsupported content
+-- ---------------------------------------------------------------- connection: members only, one business per number, mapping saved first
 select tests.as_service();
+select tests.throws(format('select public.internal_wa_record_connection(%L, %L, %L, %L, %L, %L, %L, null)', tests.biz_b(), tests.client_a(),
+  '100000000000002', '200000000000002', '0002', 'enc:x', 'CONNECTING'), '^FORBIDDEN', 'a member of business A cannot connect business B');
+select public.internal_wa_record_connection(tests.biz_a(), tests.client_a(), '100000000000001', '200000000000001', '0001', 'enc:tokenA', 'CONNECTING', null);
+select public.internal_wa_record_connection(tests.biz_b(), tests.client_b(), '100000000000002', '200000000000002', '0002', 'enc:tokenB', 'CONNECTING', null);
+select tests.is(public.internal_wa_mark_history_requested(tests.biz_b()), 'SYNCING', 'B: history requested, now syncing');
+select tests.throws(format('select public.internal_wa_record_connection(%L, %L, %L, %L, %L, %L, %L, null)', tests.biz_b(), tests.client_b(),
+  '100000000000001', '200000000000001', '0001', 'enc:x', 'CONNECTING'), '^CONFLICT', 'a number connected to A cannot be bound to B');
+select tests.as_anon();
+select tests.throws($$select public.internal_wa_ingest('[]')$$, 'permission denied', 'anon cannot post events');
+select tests.login(tests.client_a());
+select tests.throws($$select public.internal_wa_claim_sends(5)$$, 'permission denied', 'a business cannot run the send worker');
+select tests.is(public.client_wa_status() ->> 'status', 'CONNECTING', 'owner sees Connecting (not Connected)');
+
+-- ---------------------------------------------------------------- immediate and out-of-order history: the FINAL batch arrives first, before the request returned
+select tests.as_service();
+select public.internal_wa_ingest(jsonb_build_array(jsonb_build_object('kind', 'HISTORY_CHUNK', 'phone_number_id', '100000000000001',
+  'chunk_key', 'p2-c9', 'phase', 2, 'chunk_order', 9, 'progress', 100, 'messages', '[]'::jsonb)));
+select tests.as_owner();
+select tests.is((select status || '/' || history_status from private.wa_connections where business_id = tests.biz_a()), 'CONNECTING/COMPLETE',
+  'an immediate webhook finds the mapping saved before the request; still not Connected before the request is confirmed');
+select tests.as_service();
+select tests.is(public.internal_wa_mark_history_requested(tests.biz_a()), 'CONNECTED', 'request confirmed after the history already completed: Connected');
+-- an earlier batch arrives late (out of order): stored, history stays COMPLETE
 select public.internal_wa_ingest(jsonb_build_array(
   jsonb_build_object('kind', 'HISTORY_CHUNK', 'phone_number_id', '100000000000001', 'chunk_key', 'p0-c1', 'phase', 0, 'chunk_order', 1, 'progress', 60,
     'messages', jsonb_build_array(
@@ -56,9 +63,8 @@ select tests.is(public.internal_wa_ingest(jsonb_build_array(jsonb_build_object('
   'chunk_key', 'p0-c1', 'progress', 60, 'messages', '[]'::jsonb))) ->> 'duplicates', '1', 'a re-delivered history chunk is ignored');
 select tests.is(public.internal_wa_ingest(jsonb_build_array(jsonb_build_object('kind', 'HISTORY_CHUNK', 'phone_number_id', '999999999999999',
   'chunk_key', 'x', 'messages', '[]'::jsonb))) ->> 'unknown_number', '1', 'events for an unmapped number are rejected');
-select public.internal_wa_ingest(jsonb_build_array(jsonb_build_object('kind', 'HISTORY_CHUNK', 'phone_number_id', '100000000000001',
-  'chunk_key', 'p2-c9', 'phase', 2, 'chunk_order', 9, 'progress', 100, 'messages', '[]'::jsonb)));
 select tests.as_owner();
+select tests.is((select history_status from private.wa_connections where business_id = tests.biz_a()), 'COMPLETE', 'a late partial batch never moves history back');
 select tests.is((select count(*) from private.wa_messages where business_id = tests.biz_a()), 5::bigint, 'five in-scope messages kept');
 select tests.is((select sum(discarded) from private.wa_history_chunks where business_id = tests.biz_a() and chunk_key = 'p0-c1'), 1::bigint,
   'the message outside the 3-month scope was discarded');
@@ -67,6 +73,12 @@ select tests.ok((select last_live_inbound_at is null from private.wa_contacts wh
 select tests.login(tests.client_a());
 select tests.ok(public.client_wa_status() ->> 'status' = 'CONNECTED' and public.client_wa_status() -> 'history' ->> 'status' = 'COMPLETE'
   and (public.client_wa_status() -> 'history' ->> 'kept')::int = 5, 'Connected only once history has been received; owner sees what was kept');
+
+-- ---------------------------------------------------------------- no analysis of an unsettled import
+select tests.as_service();
+select tests.is(public.internal_wa_import_cases(tests.biz_a(), 10), 0, 'batches still arriving (within 10 minutes): no case is created yet');
+select tests.as_owner();
+update private.wa_history_chunks set received_at = now() - interval '11 minutes' where business_id = tests.biz_a();
 
 -- ---------------------------------------------------------------- chats → ordinary RRE cases (speakers, order, missing content)
 select tests.as_service();
@@ -129,6 +141,30 @@ select tests.ok((:'claim1'::jsonb -> 0 ->> 'kind') = 'REOPEN_TEMPLATE' and (:'cl
 select tests.as_owner();
 select tests.is((select status_detail from private.wa_sends where contact_id = :'k10' and status = 'CANCELLED' order by created_at desc limit 1),
   'EVIDENCE_INCOMPLETE', 'incomplete evidence prevents automatic outreach');
+
+-- ---------------------------------------------------------------- late history after the case exists: evidence updated, approval invalidated
+select tests.as_owner();
+select evidence_version as ev10_before from public.cases where id = :'c10' \gset
+select tests.is((select workflow_state::text from public.cases where id = :'c10'), 'CLIENT_ACTION_REQUIRED', 'case 10 was approved');
+select tests.as_service();
+select public.internal_wa_ingest(jsonb_build_array(jsonb_build_object('kind', 'HISTORY_CHUNK', 'phone_number_id', '100000000000001',
+  'chunk_key', 'p1-c4-late', 'phase', 1, 'chunk_order', 4, 'progress', 100, 'messages', jsonb_build_array(
+    jsonb_build_object('wa_id', '2348000000010', 'wamid', 'h.10late', 'direction', 'IN', 'msg_type', 'text', 'body', 'Do you offer a weekend class?',
+      'content_available', true, 'sent_at', extract(epoch from now() - interval '41 days'))))));
+select tests.is(public.internal_wa_apply_late_history(tests.biz_a()), 0, 'not applied while batches are still arriving');
+select tests.as_owner();
+update private.wa_history_chunks set received_at = now() - interval '11 minutes' where business_id = tests.biz_a();
+select tests.as_service();
+select tests.is(public.internal_wa_apply_late_history(tests.biz_a()), 1, 'late history applied to the existing case');
+select tests.is(public.internal_wa_apply_late_history(tests.biz_a()), 0, 'applied once');
+select tests.as_owner();
+select tests.ok((select workflow_state::text = 'REANALYZING' and evidence_version > :ev10_before from public.cases where id = :'c10'),
+  'the approved case returns to the founder with a new evidence version (the old approval is unusable)');
+select tests.ok((select count(*) = 2 and bool_or(body like '[Additional WhatsApp history received later%Prospect: Do you offer a weekend class?')
+  from public.case_messages where case_id = :'c10' and kind = 'PASTED_CONVERSATION'), 'the late messages are added as labelled evidence, not merged unseen');
+select tests.login(tests.founder());
+select tests.throws(format('select public.founder_approve(%L, %L, %s, %L, %L, %L, %L, %L)', :'c10', :'a10', :ev10_before, 'GREEN', 's', 'n', 'x', 'EDITED'),
+  '^(INVALID_STATE|STALE)', 'the outdated analysis can no longer be approved');
 select tests.as_service();
 select public.internal_wa_finish_send((:'claim1'::jsonb -> 0 ->> 'send_id')::uuid, 'ACCEPTED', 'wamid.R1', null);
 select tests.as_owner();

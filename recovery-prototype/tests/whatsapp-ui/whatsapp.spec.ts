@@ -47,8 +47,14 @@ test('not connected: the honest scope (6 months, 1:1 only, groups stay in the ap
   await expect(scope).toContainText('only prospects you confirm agreed');
   await expect(scope).toContainText('replies STOP is never messaged again');
   await expect(scope).toContainText('Meta charges per message');
-  await expect(page.getByRole('button', { name: 'Connect WhatsApp' })).toBeVisible();
+  // authorization comes first: Connect is disabled until it is saved
+  await expect(page.getByRole('button', { name: 'Connect WhatsApp' })).toBeDisabled();
+  await expect(page.getByTestId('wa-authorize-first')).toContainText('RRE requests your chat history only after you have authorized it');
+  await expect(page.getByRole('button', { name: 'Save authorization' })).toBeVisible();
   await expect(page.getByTestId('wa-status')).toHaveCount(0);
+  status = { ...status, authorization: { send_mode: 'AUTOMATIC', history_months: 3, max_sends_per_day: 10, max_followups_per_contact: 2, spend_limit_usd: 2, reopen_template_text: null } };
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Connect WhatsApp' })).toBeEnabled();
   expect(await noSideScroll(page)).toBe(true);
 });
 

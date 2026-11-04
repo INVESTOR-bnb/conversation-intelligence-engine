@@ -104,6 +104,7 @@ create table private.wa_messages (
   content_available boolean not null,
   sent_at timestamptz not null,
   received_at timestamptz not null default now(),
+  in_case_at timestamptz,
   unique (business_id, wamid)
 );
 create index wa_messages_contact_idx on private.wa_messages (contact_id, sent_at, wamid);
@@ -246,18 +247,22 @@ begin
   if not exists (select 1 from public.business_members where business_id = p_business and user_id = p_actor) then
     perform private.fail('FORBIDDEN', 'only a member of this business can connect its WhatsApp');
   end if;
+  if p_status in ('CONNECTING', 'SYNCING', 'CONNECTED') and (private.wa_active_auth(p_business)).id is null then
+    perform private.fail('AUTHORIZATION_REQUIRED', 'the owner must authorize recovery before connecting');
+  end if;
   if exists (select 1 from private.wa_connections where phone_number_id = p_phone_number_id and business_id <> p_business and status <> 'DISCONNECTED') then
     perform private.fail('CONFLICT', 'this WhatsApp number is connected to another business');
   end if;
   insert into private.wa_connections (business_id, status, action_code, phone_number_id, waba_id, number_last4, token_ciphertext,
                                       history_status, history_requested_at, connected_by, updated_at)
   values (p_business, p_status, p_action_code, p_phone_number_id, p_waba_id, p_last_four, p_token_ciphertext,
-          case when p_status = 'SYNCING' then 'REQUESTED' else 'NOT_REQUESTED' end,
-          case when p_status = 'SYNCING' then now() end, p_actor, now())
+          'NOT_REQUESTED', null, p_actor, now())
   on conflict (business_id) do update set status = excluded.status, action_code = excluded.action_code,
     phone_number_id = excluded.phone_number_id, waba_id = excluded.waba_id, number_last4 = excluded.number_last4,
-    token_ciphertext = excluded.token_ciphertext, history_status = excluded.history_status,
-    history_requested_at = excluded.history_requested_at, connected_by = excluded.connected_by, updated_at = now();
+    token_ciphertext = excluded.token_ciphertext, connected_by = excluded.connected_by, updated_at = now(),
+    -- a reconnection starts a fresh history request; an earlier result is kept only for the same number
+    history_status = case when private.wa_connections.phone_number_id = excluded.phone_number_id then private.wa_connections.history_status else 'NOT_REQUESTED' end,
+    history_progress = case when private.wa_connections.phone_number_id = excluded.phone_number_id then private.wa_connections.history_progress end;
   perform private.audit('WA_CONNECTION', null, p_business, 'SERVICE', null, jsonb_build_object('status', p_status, 'action_code', p_action_code));
 end $$;
 
@@ -272,6 +277,30 @@ begin
     update private.wa_sends set status = 'CANCELLED', status_detail = 'CONNECTION_' || p_status, updated_at = now()
      where business_id = p_business and status = 'QUEUED';
   end if;
+end $$;
+
+-- Called after Meta accepted the history request. Webhooks may already have arrived (they find the
+-- mapping recorded before the request): a completed or declined history goes straight to CONNECTED.
+create function public.internal_wa_mark_history_requested(p_business uuid) returns text
+language plpgsql security definer set search_path = '' as $$
+declare v text;
+begin
+  perform private.wa_require_service();
+  update private.wa_connections set
+    history_status = case when history_status in ('COMPLETE', 'RECEIVING', 'DECLINED') then history_status else 'REQUESTED' end,
+    history_requested_at = coalesce(history_requested_at, now()),
+    status = case when status = 'CONNECTING' then (case when history_status in ('COMPLETE', 'DECLINED') then 'CONNECTED' else 'SYNCING' end) else status end,
+    updated_at = now()
+   where business_id = p_business returning status into v;
+  return v;
+end $$;
+
+-- Whether the owner has an active authorization (checked before the Meta code exchange).
+create function public.internal_wa_has_authorization(p_business uuid) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+begin
+  perform private.wa_require_service();
+  return to_jsonb((private.wa_active_auth(p_business)).id is not null);
 end $$;
 
 -- The encrypted token of a business (for Graph calls); null when not connected.
@@ -391,14 +420,16 @@ begin
       values (v_business, e ->> 'chunk_key', (e ->> 'phase')::integer, (e ->> 'chunk_order')::integer, (e ->> 'progress')::integer,
               v_kept, v_disc, v_oldest, v_newest);
       update private.wa_connections set history_progress = greatest(coalesce(history_progress, 0), coalesce((e ->> 'progress')::integer, 0)),
-        history_status = case when coalesce((e ->> 'progress')::integer, 0) >= 100 then 'COMPLETE' else 'RECEIVING' end,
-        status = case when status = 'SYNCING' and coalesce((e ->> 'progress')::integer, 0) >= 100 then 'CONNECTED' else status end,
+        history_status = case when history_status = 'COMPLETE' or coalesce((e ->> 'progress')::integer, 0) >= 100 then 'COMPLETE' else 'RECEIVING' end,
+        status = case when status in ('CONNECTING', 'SYNCING') and coalesce((e ->> 'progress')::integer, 0) >= 100 and history_requested_at is not null
+                      then 'CONNECTED' else status end,
         updated_at = now()
        where business_id = v_business;
       v_ins := v_ins + 1;
 
     elsif e ->> 'kind' = 'HISTORY_DECLINED' then
-      update private.wa_connections set history_status = 'DECLINED', status = case when status = 'SYNCING' then 'CONNECTED' else status end,
+      update private.wa_connections set history_status = 'DECLINED',
+        status = case when status in ('CONNECTING', 'SYNCING') and history_requested_at is not null then 'CONNECTED' else status end,
         updated_at = now() where business_id = v_business;
       v_ins := v_ins + 1;
 
@@ -424,6 +455,9 @@ begin
   perform private.wa_require_service();
   v_auth := private.wa_active_auth(p_business);
   if v_auth.id is null then return 0; end if;
+  -- never analyse an incomplete import: history must be complete (or declined) and settled
+  if not exists (select 1 from private.wa_connections where business_id = p_business and history_status in ('COMPLETE', 'DECLINED')) then return 0; end if;
+  if exists (select 1 from private.wa_history_chunks where business_id = p_business and received_at > now() - interval '10 minutes') then return 0; end if;
   for k in select c.* from private.wa_contacts c
             where c.business_id = p_business and c.case_id is null and c.permission <> 'OPTED_OUT'
               and exists (select 1 from private.wa_messages x where x.contact_id = c.id and x.direction = 'IN')
@@ -456,7 +490,49 @@ begin
     returning id into v_case;
     insert into public.case_messages (case_id, business_id, kind, body) values (v_case, p_business, 'PASTED_CONVERSATION', v_text);
     update private.wa_contacts set case_id = v_case, evidence_incomplete = evidence_incomplete or v_missing > 0 where id = k.id;
+    update private.wa_messages set in_case_at = now() where contact_id = k.id and in_case_at is null
+       and sent_at >= now() - make_interval(months => v_auth.history_months);
     perform private.audit('CASE_CREATED', v_case, p_business, 'SERVICE', 'Imported from WhatsApp');
+    v_n := v_n + 1;
+  end loop;
+  return v_n;
+end $$;
+
+-- History that arrives after a contact's case was created (a late or out-of-order batch) is added to
+-- the case as an extra, labelled conversation entry. The case's evidence version rises, so earlier
+-- analyses become stale and their approvals unusable; a reviewed or approved case returns to the
+-- founder for re-analysis and queued sends are cancelled. Never silently ignored, never merged unseen.
+create function public.internal_wa_apply_late_history(p_business uuid) returns integer
+language plpgsql security definer set search_path = '' as $$
+declare
+  k private.wa_contacts; v_case public.cases; m private.wa_messages; v_lines text[]; v_n integer := 0; v_missing integer;
+begin
+  perform private.wa_require_service();
+  if exists (select 1 from private.wa_history_chunks where business_id = p_business and received_at > now() - interval '10 minutes') then return 0; end if;
+  for k in select c.* from private.wa_contacts c where c.business_id = p_business and c.case_id is not null
+             and exists (select 1 from private.wa_messages x where x.contact_id = c.id and x.source = 'HISTORY' and x.in_case_at is null) loop
+    select * into v_case from public.cases where id = k.case_id for update;
+    if not found or private.is_terminal(v_case.workflow_state) then continue; end if;
+    v_lines := array[format('[Additional WhatsApp history received later — earlier messages in this conversation]')]; v_missing := 0;
+    for m in select * from private.wa_messages where contact_id = k.id and source = 'HISTORY' and in_case_at is null order by sent_at, wamid loop
+      v_lines := v_lines || format('[%s] %s: %s', to_char(m.sent_at at time zone 'Africa/Lagos', 'YYYY-MM-DD HH24:MI'),
+        case m.direction when 'IN' then 'Prospect' else 'Business' end,
+        case when m.content_available then replace(m.body, E'\n', ' ') else format('[%s not available to RRE — content not imported]', m.msg_type) end);
+      if not m.content_available then v_missing := v_missing + 1; end if;
+    end loop;
+    insert into public.case_messages (case_id, business_id, kind, body)
+    values (v_case.id, v_case.business_id, 'PASTED_CONVERSATION', left(array_to_string(v_lines, E'\n'), 19000));
+    update private.wa_messages set in_case_at = now() where contact_id = k.id and source = 'HISTORY' and in_case_at is null;
+    update private.wa_contacts set evidence_incomplete = evidence_incomplete or v_missing > 0 where id = k.id;
+    perform private.wa_cancel_pending(k.id, 'EVIDENCE_CHANGED');
+    update public.cases set evidence_version = evidence_version + 1,
+      workflow_state = case when workflow_state in ('AWAITING_ADMIN_REVIEW', 'CLIENT_ACTION_REQUIRED', 'WAITING_FOR_PROSPECT')
+                            then 'REANALYZING'::public.workflow_state else workflow_state end,
+      review_reason = case when workflow_state in ('AWAITING_ADMIN_REVIEW', 'CLIENT_ACTION_REQUIRED', 'WAITING_FOR_PROSPECT')
+                           then 'REANALYSIS'::public.review_reason else review_reason end,
+      queued_at = case when workflow_state in ('AWAITING_ADMIN_REVIEW', 'CLIENT_ACTION_REQUIRED', 'WAITING_FOR_PROSPECT') then now() else queued_at end
+     where id = v_case.id;
+    perform private.audit('WA_LATE_HISTORY', v_case.id, v_case.business_id, 'SERVICE', null, jsonb_build_object('missing', v_missing));
     v_n := v_n + 1;
   end loop;
   return v_n;
@@ -715,7 +791,8 @@ revoke all on function private.wa_require_service(), private.wa_my_business(), p
 do $$
 declare f text;
 begin
-  foreach f in array array['internal_wa_active_businesses()', 'internal_wa_business_for_number(text)', 'internal_wa_record_connection(uuid, uuid, text, text, text, text, text, text)',
+  foreach f in array array['internal_wa_active_businesses()', 'internal_wa_mark_history_requested(uuid)', 'internal_wa_has_authorization(uuid)',
+    'internal_wa_apply_late_history(uuid)', 'internal_wa_business_for_number(text)', 'internal_wa_record_connection(uuid, uuid, text, text, text, text, text, text)',
     'internal_wa_set_connection_status(uuid, text, text)', 'internal_wa_connection(uuid)', 'internal_wa_ingest(jsonb)',
     'internal_wa_import_cases(uuid, integer)', 'internal_wa_plan_sends()', 'internal_wa_claim_sends(integer)',
     'internal_wa_finish_send(uuid, text, text, text)'] loop

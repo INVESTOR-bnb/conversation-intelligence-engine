@@ -213,8 +213,14 @@ export function createWaHandler(deps: WaIntDeps): (req: Request) => Promise<Resp
       // route === 'connect'
       const code = str(body.code, 2000); const pnid = str(body.phone_number_id, 30); const waba = str(body.waba_id, 30);
       if (!code || !/^[A-Za-z0-9_.#-]+$/.test(code) || !pnid || !DIGITS.test(pnid) || !waba || !DIGITS.test(waba) || 'business_id' in body) return json(400, { code: 'INVALID_REQUEST' });
+      // 1. the owner's authorization must exist BEFORE anything is requested from Meta
+      const authorized = await service(cfg, deps.fetch, 'internal_wa_has_authorization', { p_business: member.businessId });
+      if (!authorized.ok) return json(503, { code: 'STORE_FAILED' });
+      if (authorized.data !== true) return json(409, { code: 'AUTHORIZATION_REQUIRED' });
       const record = (status: string, action: string | null, cipher: string | null, last4: string | null) => service(cfg, deps.fetch, 'internal_wa_record_connection', {
         p_business: member.businessId, p_actor: member.userId, p_phone_number_id: pnid, p_waba_id: waba, p_last_four: last4, p_token_ciphertext: cipher, p_status: status, p_action_code: action });
+      const setStatus = (status: string, action: string | null) => service(cfg, deps.fetch, 'internal_wa_set_connection_status', { p_business: member.businessId, p_status: status, p_action_code: action });
+      // 2. Meta's code exchange and a check that the chosen number is accessible
       const ex = await graph(deps.fetch, `${GRAPH}/oauth/access_token?${new URLSearchParams({ client_id: cfg.appId, client_secret: cfg.appSecret, code })}`, null, 'GET');
       const token = typeof ex.data?.access_token === 'string' ? ex.data.access_token : null;
       if (!token) { await record('ACTION_REQUIRED', 'AUTHORIZATION_FAILED', null, null); return json(502, { code: 'AUTHORIZATION_FAILED', detail: ex.code }); }
@@ -222,16 +228,23 @@ export function createWaHandler(deps: WaIntDeps): (req: Request) => Promise<Resp
       const digits = String(phone.data?.display_phone_number ?? '').replace(/\D/g, '');
       const last4 = digits.length >= 4 ? digits.slice(-4) : null;
       if (phone.code !== 'OK') { await record('ACTION_REQUIRED', 'NUMBER_NOT_ACCESSIBLE', null, null); return json(502, { code: 'NUMBER_NOT_ACCESSIBLE', detail: phone.code }); }
-      const cipher = await encryptToken(cfg.tokenKey, token);
+      // 3. the verified mapping (and encrypted token) is saved BEFORE webhooks or history can arrive
+      const rec = await record('CONNECTING', null, await encryptToken(cfg.tokenKey, token), last4);
+      if (!rec.ok) return json(rec.status === 400 || rec.status === 409 ? 409 : 503, { code: 'CONNECTION_NOT_RECORDED' });
+      // 4. webhooks, then the one-time contact and history sync requests
       const sub = await graph(deps.fetch, `${GRAPH}/${waba}/subscribed_apps`, token, 'POST');
-      if (sub.code !== 'OK') { await record('ACTION_REQUIRED', 'WEBHOOK_SUBSCRIPTION_FAILED', cipher, last4); return json(502, { code: 'WEBHOOK_SUBSCRIPTION_FAILED', detail: sub.code }); }
+      if (sub.code !== 'OK') { await setStatus('ACTION_REQUIRED', 'WEBHOOK_SUBSCRIPTION_FAILED'); return json(502, { code: 'WEBHOOK_SUBSCRIPTION_FAILED', detail: sub.code }); }
       const contacts = await graph(deps.fetch, `${GRAPH}/${pnid}/smb_app_data`, token, 'POST', { messaging_product: 'whatsapp', sync_type: 'smb_app_state_sync' });
       const history = await graph(deps.fetch, `${GRAPH}/${pnid}/smb_app_data`, token, 'POST', { messaging_product: 'whatsapp', sync_type: 'history' });
       // Meta reports an ineligible number (e.g. country or app version) as an error on these calls.
-      const status = history.code === 'OK' ? 'SYNCING' : 'ACTION_REQUIRED';
-      const action = history.code === 'OK' ? null : `HISTORY_SYNC_${history.code}`.slice(0, 64);
-      const rec = await record(status, action, cipher, last4);
-      if (!rec.ok) return json(rec.status === 400 || rec.status === 409 ? 409 : 503, { code: 'CONNECTION_NOT_RECORDED' });
+      if (history.code !== 'OK') {
+        const action = `HISTORY_SYNC_${history.code}`.slice(0, 64);
+        await setStatus('ACTION_REQUIRED', action);
+        log('connect', { status: 'ACTION_REQUIRED', contacts: contacts.code, history: history.code });
+        return json(200, { code: 'ACTION_REQUIRED', action_code: action, contacts_sync: contacts.code, history_sync: history.code });
+      }
+      const marked = await service(cfg, deps.fetch, 'internal_wa_mark_history_requested', { p_business: member.businessId });
+      const status = typeof marked.data === 'string' ? marked.data : 'SYNCING';
       log('connect', { status, contacts: contacts.code, history: history.code });
       return json(200, { code: status, contacts_sync: contacts.code, history_sync: history.code });
     } catch {
@@ -243,12 +256,14 @@ export function createWaHandler(deps: WaIntDeps): (req: Request) => Promise<Resp
 
 /** One worker pass: import chats → cases, plan sends, send what the database releases (no retries). */
 export async function runWorker(cfg: WaIntConfig, f: typeof fetch, log: (e: string, x?: Record<string, string | number | boolean | null>) => void) {
-  let imported = 0; let accepted = 0; let failed = 0; let unknown = 0;
+  let imported = 0; let lateApplied = 0; let accepted = 0; let failed = 0; let unknown = 0;
   const biz = await service(cfg, f, 'internal_wa_active_businesses', {});
   for (const b of arr(biz.data)) {
     if (typeof b !== 'string' || !UUID.test(b)) continue;
     const r = await service(cfg, f, 'internal_wa_import_cases', { p_business: b, p_limit: 5 });
     imported += Number(r.data) || 0;
+    const late = await service(cfg, f, 'internal_wa_apply_late_history', { p_business: b });
+    lateApplied += Number(late.data) || 0;
   }
   const planned = Number((await service(cfg, f, 'internal_wa_plan_sends', {})).data) || 0;
   const claim = await service(cfg, f, 'internal_wa_claim_sends', { p_limit: 10 });
@@ -268,8 +283,8 @@ export async function runWorker(cfg: WaIntConfig, f: typeof fetch, log: (e: stri
       if (r.code === 'META_190' || r.status === 401) await service(cfg, f, 'internal_wa_set_connection_status', { p_business: s.business_id, p_status: 'ACTION_REQUIRED', p_action_code: 'TOKEN_REVOKED' });
     } else { await finish(cfg, f, id, 'UNKNOWN', null, r.code); unknown++; }
   }
-  log('worker.pass', { imported, planned, accepted, failed, unknown });
-  return { imported, planned, accepted, failed, unknown };
+  log('worker.pass', { imported, lateApplied, planned, accepted, failed, unknown });
+  return { imported, lateApplied, planned, accepted, failed, unknown };
 }
 const finish = (cfg: WaIntConfig, f: typeof fetch, id: string, outcome: string, wamid: string | null, detail: string | null) =>
   service(cfg, f, 'internal_wa_finish_send', { p_send_id: id, p_outcome: outcome, p_wamid: wamid, p_detail: detail ? detail.replace(/[^A-Za-z0-9_:.-]/g, '_').slice(0, 80) : null });
