@@ -180,10 +180,23 @@ async function readiness() {
   if (Object.values(checks).some((v) => v !== true)) throw new Stop('infrastructure readiness incomplete');
 }
 
+/** a***@g***.com — enough to recognise, not enough to publish an address in a public log. */
+export const maskEmail = (e) => String(e ?? '').replace(/^(.)[^@]*@(.)[^.]*\.(.*)$/, '$1***@$2***.$3');
+
 async function founder(env) {
   const email = String(env.FOUNDER_EMAIL ?? '').trim().toLowerCase();
-  if (!/^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}$/.test(email)) throw new Stop('FOUNDER_EMAIL is not a valid email address');
-  const id = await scalar(`select id from auth.users where lower(email) = ${lit(email)}`);
+  let id;
+  if (email === '') {
+    // No address in the (public) run: use the preview project's only user, refusing if there is not exactly one.
+    const r = await query(`select count(*)::int as n, (array_agg(id))[1] as id, (array_agg(email))[1] as email from auth.users`);
+    const n = Array.isArray(r) ? r[0]?.n : undefined;
+    if (n !== 1) throw new Stop(`the PREVIEW project has ${n ?? 'an unknown number of'} users; with no FOUNDER_EMAIL there must be exactly one (Authentication → Add user)`);
+    id = r[0].id;
+    out(`using the preview project's only user ${maskEmail(r[0].email)}`);
+  } else {
+    if (!/^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}$/.test(email)) throw new Stop('FOUNDER_EMAIL is not a valid email address');
+    id = await scalar(`select id from auth.users where lower(email) = ${lit(email)}`);
+  }
   if (!id) throw new Stop('no user with that email in the PREVIEW project: add them in its Supabase dashboard (Authentication → Add user) first');
   await query(`insert into public.founders (user_id) values (${lit(id)}) on conflict do nothing`);
   out('founder recorded in the preview project');

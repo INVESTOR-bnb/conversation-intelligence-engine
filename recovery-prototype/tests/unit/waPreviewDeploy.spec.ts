@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // @ts-expect-error plain ES module without type declarations
-import { configProblem, PERMISSIONS, PROTOTYPE_REF, schemaFiles } from '../../supabase/scripts/wa-preview-deploy.mjs';
+import { configProblem, maskEmail, PERMISSIONS, PROTOTYPE_REF, schemaFiles } from '../../supabase/scripts/wa-preview-deploy.mjs';
 // @ts-expect-error plain ES module without type declarations
 import { pagesConfigProblem } from '../../supabase/scripts/wa-preview-pages.mjs';
 
@@ -31,7 +31,7 @@ const FILES: { name: string; sha256: string }[] = schemaFiles();
 
 const st = {
   applied: new Map<string, string>(), foreignSchema: false, failOn: '' as string, deny: new Set<string>(),
-  secrets: new Map<string, string>(), queries: [] as string[], cronExt: false, schedule: false, founderUser: true, founder: false,
+  secrets: new Map<string, string>(), queries: [] as string[], cronExt: false, schedule: false, founderUser: true, founder: false, users: 1,
 };
 let mgmt: Server; let MGMT_URL = '';
 const cfState = { projects: new Map<string, { subdomain: string; latest_deployment: unknown }>(), denyList: false, creates: 0 };
@@ -68,6 +68,7 @@ test.beforeAll(async () => {
       if (q.includes("from cron.job where jobname = 'rre-wa-worker'") && q.startsWith('select (')) return v(st.schedule);
       if (q.includes('cron.schedule(')) { st.cronExt = true; st.schedule = true; return send(201, []); }
       if (q.includes('select id from auth.users')) return v(st.founderUser ? '00000000-0000-4000-8000-00000000000f' : null);
+      if (q.includes('select count(*)::int as n')) return send(201, [{ n: st.users, id: st.users === 1 ? '00000000-0000-4000-8000-00000000000f' : null, email: 'founder.person@example.com' }]);
       if (q.startsWith('insert into public.founders')) { st.founder = true; return send(201, []); }
       if (q.includes('from public.founders')) return v(st.founder);
       if (q.includes('sending_enabled') || q.includes('ai_spend_config')) return v(true);
@@ -253,6 +254,21 @@ test('founder: a strict email, an existing user of the PREVIEW project only; the
   expect(r.code, r.out).toBe(0);
   expect(st.queries.at(-1)).toMatch(/^insert into public\.founders/);
   expect((await run('founder-readiness')).out).toContain('PASS  founder_account');
+});
+
+test('founder without an address in the run: only when the preview project has exactly one user; the address is masked', async () => {
+  expect(maskEmail('founder.person@example.com')).toBe('f***@e***.com');
+  st.founder = false; st.users = 2;
+  const two = await run('founder', { FOUNDER_EMAIL: '' });
+  expect(two.code).toBe(1);
+  expect(two.out).toContain('has 2 users');
+  expect(st.founder).toBe(false);
+  st.users = 1;
+  const one = await run('founder', { FOUNDER_EMAIL: '' });
+  expect(one.code, one.out).toBe(0);
+  expect(one.out).toContain('f***@e***.com');
+  expect(one.out).not.toContain('founder.person@example.com');
+  expect(st.founder).toBe(true);
 });
 
 test('Pages: refuses the prototype\'s site and missing credentials; names a token without Pages access', async () => {

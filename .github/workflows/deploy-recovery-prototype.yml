@@ -53,7 +53,7 @@ on:
         required: false
         default: ''
       founder_email:
-        description: wa-preview-founder only — the email of a user already added to the PREVIEW Supabase project
+        description: wa-preview-founder only — leave EMPTY (the repository is public; the preview project's only user is used) or the email of a user already added to the PREVIEW project
         type: string
         required: false
         default: ''
