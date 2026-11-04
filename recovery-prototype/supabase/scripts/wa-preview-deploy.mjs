@@ -11,7 +11,8 @@
 //   founder-readiness  a founder exists
 //
 // Environment: WA_PREVIEW_SUPABASE_ACCESS_TOKEN (scoped to the preview project), WA_PREVIEW_PROJECT_REF,
-// WA_APP_ID, WA_APP_SECRET, WA_VERIFY_TOKEN, WA_ALLOWED_ORIGIN; FOUNDER_EMAIL for `founder`.
+// WA_APP_ID, WA_APP_SECRET, WA_VERIFY_TOKEN, WA_ALLOWED_ORIGIN; WA_PREVIEW_PUBLISHABLE_KEY for `preflight`;
+// FOUNDER_EMAIL for `founder`.
 // Nothing is printed but names and states.
 
 import { createHash, randomBytes } from 'node:crypto';
@@ -88,7 +89,21 @@ async function preflight() {
   await scalar('1'); out('PASS  Database (query)');
   await secretNames(); out('PASS  Edge Function Secrets: Read');
   await mgmt('/functions', { permission: 'Edge Functions: Read' }); out('PASS  Edge Functions: Read');
+  await publishableKeyCheck(process.env.WA_PREVIEW_PUBLISHABLE_KEY);
   out('NOTE  write permissions (Database, Edge Function Secrets, Edge Functions) are confirmed by the first setup and deploy');
+}
+
+/** The public publishable key must be accepted by THIS project's API (a key of another project is rejected). */
+async function publishableKeyCheck(key) {
+  if (!key) throw new Stop('variable WA_PREVIEW_PUBLISHABLE_KEY is not set');
+  if (!/^sb_publishable_[A-Za-z0-9_-]{10,}$/.test(key)) throw new Stop('WA_PREVIEW_PUBLISHABLE_KEY is not an sb_publishable_ key (never use a secret or service-role key there)');
+  let res;
+  try {
+    res = await fetch(`https://${REF}.supabase.co/auth/v1/settings`, { headers: { apikey: key }, redirect: 'error', signal: AbortSignal.timeout(30_000) });
+  } catch (e) { throw new Stop(`the preview project's API is unreachable (${e?.name ?? 'error'})`); }
+  if (res.status === 401 || res.status === 403) throw new Stop(`the preview project rejected WA_PREVIEW_PUBLISHABLE_KEY (HTTP ${res.status}): it belongs to another project or was revoked`);
+  if (!res.ok) throw new Stop(`the preview project's auth API answered HTTP ${res.status}`);
+  out(`PASS  publishable key accepted by project ${REF}`);
 }
 
 async function setup(env) {

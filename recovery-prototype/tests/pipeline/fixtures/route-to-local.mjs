@@ -8,6 +8,7 @@ const routes = {
   'api.supabase.com': () => process.env.ROUTE_MGMT,
   'revenue-recovery-v0.pages.dev': () => process.env.ROUTE_PAGES,
   'api.cloudflare.com': () => process.env.ROUTE_CF,
+  'isolatedpreviewabcde.supabase.co': () => process.env.ROUTE_PROJECT, // the preview-tool tests' fake project
 };
 
 globalThis.fetch = async (input, init) => {

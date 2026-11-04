@@ -36,6 +36,8 @@ const st = {
 let mgmt: Server; let MGMT_URL = '';
 const cfState = { projects: new Map<string, { subdomain: string; latest_deployment: unknown }>(), denyList: false, creates: 0 };
 let cf: Server; let CF_URL = '';
+const PUB = 'sb_publishable_TESTONLYpreviewkey0123';
+let proj: Server; let PROJ_URL = '';
 
 test.beforeAll(async () => {
   mgmt = createServer((req, res) => {
@@ -93,11 +95,16 @@ test.beforeAll(async () => {
     });
   });
   CF_URL = await new Promise((r) => cf.listen(0, '127.0.0.1', () => r(`http://127.0.0.1:${(cf.address() as { port: number }).port}`)));
+  proj = createServer((req, res) => {
+    const ok = req.url === '/auth/v1/settings' && req.headers.apikey === PUB;
+    res.writeHead(ok ? 200 : 401, { 'content-type': 'application/json' }); res.end(ok ? '{"external":{}}' : '{"message":"Invalid API key"}');
+  });
+  PROJ_URL = await new Promise((r) => proj.listen(0, '127.0.0.1', () => r(`http://127.0.0.1:${(proj.address() as { port: number }).port}`)));
 });
-test.afterAll(async () => { await new Promise((r) => mgmt.close(r)); await new Promise((r) => cf.close(r)); });
+test.afterAll(async () => { for (const s of [mgmt, cf, proj]) await new Promise((r) => s.close(r)); });
 
 function spawnScript(script: string, args: string[], over: Record<string, string | undefined>): Promise<{ code: number | null; out: string }> {
-  const env: Record<string, string> = { PATH: process.env.PATH ?? '', ROUTE_MGMT: MGMT_URL, ROUTE_CF: CF_URL };
+  const env: Record<string, string> = { PATH: process.env.PATH ?? '', ROUTE_MGMT: MGMT_URL, ROUTE_CF: CF_URL, ROUTE_PROJECT: PROJ_URL };
   for (const [k, v] of Object.entries(over)) if (v !== undefined) env[k] = v;
   const child = spawn(process.execPath, ['--import', PRELOAD, script, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; child.stdout.on('data', (d) => { out += d; }); child.stderr.on('data', (d) => { out += d; });
@@ -105,7 +112,7 @@ function spawnScript(script: string, args: string[], over: Record<string, string
 }
 const run = (cmd: string, over: Record<string, string | undefined> = {}) => spawnScript(SCRIPT, [cmd], {
   WA_PREVIEW_PROJECT_REF: REF, WA_PREVIEW_SUPABASE_ACCESS_TOKEN: PAT, WA_APP_ID: '123456789012345', WA_APP_SECRET: APP_SECRET,
-  WA_VERIFY_TOKEN: VERIFY, WA_ALLOWED_ORIGIN: 'https://rre-whatsapp-preview-7xq.pages.dev', ...over });
+  WA_VERIFY_TOKEN: VERIFY, WA_ALLOWED_ORIGIN: 'https://rre-whatsapp-preview-7xq.pages.dev', WA_PREVIEW_PUBLISHABLE_KEY: PUB, ...over });
 const pages = (args: string[], over: Record<string, string | undefined> = {}) => spawnScript(PAGES, args, {
   CLOUDFLARE_API_TOKEN: CF_TOKEN, CLOUDFLARE_ACCOUNT_ID: CF_ACCOUNT, WA_PREVIEW_PAGES_PROJECT: 'rre-whatsapp-preview', ...over });
 const appliedLines = (out: string) => (out.match(/^applied \S+$/gm) ?? []).length;
@@ -133,6 +140,13 @@ test('preflight: probes Project Settings: Read first and names the exact missing
   st.deny.add('GET /functions');
   expect((await run('preflight')).out).toContain('lacks "Edge Functions: Read"');
   st.deny.clear();
+  const wrongKey = await run('preflight', { WA_PREVIEW_PUBLISHABLE_KEY: 'sb_publishable_TESTONLYotherproject0123' });
+  expect(wrongKey.code).toBe(1);
+  expect(wrongKey.out).toContain('rejected WA_PREVIEW_PUBLISHABLE_KEY');
+  const secretKey = await run('preflight', { WA_PREVIEW_PUBLISHABLE_KEY: 'sb_secret_TESTONLYnotpublic0123456' });
+  expect(secretKey.out).toContain('is not an sb_publishable_ key');
+  expect(secretKey.out).not.toContain('sb_secret_TESTONLY');
+  expect(ok.out).toContain('PASS  publishable key accepted');
   // the checklist in the README lists every permission the deployment uses
   for (const p of new Set<string>(PERMISSIONS.map((x: { permission: string }) => x.permission))) expect(README).toContain(p);
 });

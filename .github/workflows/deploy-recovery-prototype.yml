@@ -446,10 +446,11 @@ jobs:
           printf '/*\n  X-Robots-Tag: noindex\n  X-Frame-Options: DENY\n' > "$site/_headers"
           npx --yes wrangler@4.141.0 pages deploy "$site" --project-name="$WA_PREVIEW_PAGES_PROJECT" --branch=main --commit-hash="$GITHUB_SHA"
 
-      - name: Supabase token and project probe (read-only)
+      - name: Supabase token, project health and publishable key (read-only)
         if: inputs.target == 'wa-preview-preflight' || inputs.target == 'wa-preview-deploy'
         env:
           WA_PREVIEW_SUPABASE_ACCESS_TOKEN: ${{ secrets.WA_PREVIEW_SUPABASE_ACCESS_TOKEN }}
+          WA_PREVIEW_PUBLISHABLE_KEY: ${{ vars.WA_PREVIEW_PUBLISHABLE_KEY }}
         run: |
           if [ "$TARGET" = "wa-preview-preflight" ] && { [ -z "$WA_PREVIEW_PROJECT_REF" ] || [ -z "$WA_PREVIEW_SUPABASE_ACCESS_TOKEN" ]; }; then
             echo "NOT READY  Supabase preview project: variable WA_PREVIEW_PROJECT_REF and/or secret WA_PREVIEW_SUPABASE_ACCESS_TOKEN not set in environment wa-preview"
