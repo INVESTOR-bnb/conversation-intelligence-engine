@@ -68,7 +68,7 @@ test('the prompts state the id rules the grammar cannot enforce (uniqueness, exi
     expect(ANALYST_SYSTEM, rule).toContain(rule);
   }
   for (const rule of ['C1, C2, C3', 'each id used once', 'an id that exists in the analysis under review', 'target_id null']) expect(REVIEWER_SYSTEM, rule).toContain(rule);
-  expect(PROMPT_VERSION).toBe('rre-6i-analyst-v6+reviewer-v5');
+  expect(PROMPT_VERSION).toBe('rre-6j-analyst-v7+reviewer-v6');
   expect(PROMPT_VERSION.length).toBeLessThanOrEqual(50);
 });
 
@@ -88,7 +88,7 @@ test('merging analyst and review never renames, adds or removes an observation o
 const flat = (t: string) => t.replace(/\s+/g, ' ');
 
 test('strategic next move: one move from the prospect\'s own words, in the existing fields; no generic check-ins; reviewer checks it', () => {
-  for (const rule of ['ONE strategic next move', 'only from the prospect\'s own words', 'BUYER SIGNAL:', 'NEXT MOVE:', 'WHY THIS MOVE:',
+  for (const rule of ['ONE strategic next move', 'only from what the prospect wrote and did', 'BUYER SIGNAL:', 'NEXT MOVE:', 'WHY THIS MOVE:',
     'One move, never a list of options', 'INSUFFICIENT_EVIDENCE keeps strategy exactly UNKNOWN', 'ask at most ONE',
     'answer it with facts the seller stated', '"Are you still', 'interested?"', 'silence alone', 'For WAIT or STOP_CONTACT', 'I need to talk to my wife',
     'Never invent facts, prices or offers', 'No pressure tactics']) {
@@ -125,4 +125,20 @@ test('v6: every hypothesis rests on evidence; unsupported possibilities go to un
   expect(flat(ANALYST_SYSTEM)).not.toContain('with competing hypotheses that do not blame the seller (busy, deciding with someone else, price, bought elsewhere');
   // VERIFY FIRST and the single next move are untouched
   for (const kept of ['VERIFY FIRST: <fact>', 'One move, never a list of options', 'WHY THIS MOVE:']) expect(ANALYST_SYSTEM).toContain(kept);
+});
+
+test('v7: a testable decision hypothesis in the existing fields; observed signals, not intentions; silence proves nothing; reviewer must reject on a HIGH recommendation challenge', () => {
+  for (const rule of ['what the ORDER of their statements and actions suggests about where they are in deciding',
+    'which explanation has the strongest supporting evidence', 'what uncertainty could change the recommendation',
+    'the ONE useful action that addresses their concern and would reveal more about their decision',
+    'the reply or action you would expect if that explanation is right', 'the reply or action that would challenge it',
+    'no probabilities or percentages', 'silence alone shows nothing about intent and never confirms or challenges a hypothesis',
+    'the most important OBSERVED signal, quoting the prospect, not an inferred intention',
+    'DECISION HYPOTHESIS:', 'IF RIGHT, EXPECT:', 'as a possibility, never a promise', 'WOULD CHALLENGE IT:',
+    'The H-id is one you wrote and list in based_on_hypotheses', 'at most four short sentences']) {
+    expect(flat(ANALYST_SYSTEM), rule).toContain(flat(rule));
+  }
+  for (const kept of ['VERIFY FIRST: <fact>', 'One move, never a list of options', 'a draft never asserts availability or stock',
+    'Never write an observation just to support a hypothesis', 'ask at most ONE']) expect(flat(ANALYST_SYSTEM), kept).toContain(flat(kept));
+  expect(flat(REVIEWER_SYSTEM)).toContain('give the verdict REJECT_RECOMMENDATION, never UPHOLD_WITH_CONCERNS, when you raise one');
 });

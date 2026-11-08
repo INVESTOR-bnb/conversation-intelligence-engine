@@ -246,6 +246,11 @@ export function proposedMessage(state: AnalysisState, row: AnalysisRow | null, o
   if (!row || !output || !row.ai_proposed_message) return { text: null, withheld: null };
   if (restrictions.some((r) => r.status === 'ACTIVE')) return { text: null, withheld: 'Withheld: this case has an active contact restriction. Do not contact the prospect.' };
   if (output.review?.verdict === 'REJECT_RECOMMENDATION') return { text: null, withheld: 'Withheld: the independent review rejected this recommendation.' };
+  // A HIGH challenge on the recommendation (for example an unverified availability, price or time in the draft)
+  // means the draft is not ready to send, whatever the verdict says. The founder can still write a message.
+  if (output.review?.challenges.some((c) => c.target === 'RECOMMENDATION' && c.severity === 'HIGH')) {
+    return { text: null, withheld: 'Withheld: the independent review raised a HIGH-severity challenge to this recommendation (see the review). Check it and write the message yourself if contact is still right.' };
+  }
   if (state !== 'READY') return { text: null, withheld: 'Withheld: this analysis is not current. Request a re-analysis.' };
   if (row.ai_classification === 'RED' || output.recommendation.nextAction?.type !== 'SEND_MESSAGE') return { text: null, withheld: null };
   return { text: row.ai_proposed_message, withheld: null };

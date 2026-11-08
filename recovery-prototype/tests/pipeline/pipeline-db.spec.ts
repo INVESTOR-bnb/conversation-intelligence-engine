@@ -479,3 +479,28 @@ test('paid-diagnose (read-only) against the real schema: the rejected analysis\'
     analyst_tokens: [1000, 500], reviewer_tokens: [1000, 500] });
   for (const secret of [BODY1, BODY2, 'the price feels high', 'bought a car elsewhere', DRAFT]) expect(raw).not.toContain(secret);
 });
+
+test('v7 format: DECISION HYPOTHESIS / IF RIGHT, EXPECT / WOULD CHALLENGE IT fits psychological_rationale and passes the real contract', async () => {
+  const { c, m1, m2 } = textCase();
+  const answer = analystAnswer(m1, m2, { recommendation: { pursue: 'PURSUE',
+    strategy: 'BUYER SIGNAL: the prospect asked "Can I see it on Saturday" after "the price feels high". VERIFY FIRST: that the car is still available and which Saturday times the seller can offer. NEXT MOVE: answer the viewing request once confirmed.',
+    psychological_rationale: 'DECISION HYPOTHESIS: H1: still evaluating the car in person before deciding. WHY THIS MOVE: it answers the request they made and lets them judge the price against the car. IF RIGHT, EXPECT: they suggest a viewing time or ask about a Saturday slot. WOULD CHALLENGE IT: they raise the price again without mentioning the viewing, which would point to H2.',
+    based_on_hypotheses: ['H1'], next_action: { type: 'SEND_MESSAGE', text: 'Thanks for asking about Saturday. Let me confirm the car and a viewing time for you today. What time of day usually suits you best?' } } });
+  const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }));
+  expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
+  const rec = row(r.analysisId!).output.recommendation;
+  expect(rec.psychological_rationale).toMatch(/^DECISION HYPOTHESIS: H1: .+ WHY THIS MOVE: .+ IF RIGHT, EXPECT: .+ WOULD CHALLENGE IT: .+/);
+  expect(rec.psychological_rationale.length).toBeLessThanOrEqual(1500);
+});
+
+test('WHY THE UI RULE IS NEEDED: the contract accepts UPHOLD_WITH_CONCERNS with a HIGH recommendation challenge and stores the draft as the proposed message', async () => {
+  const { c, m1, m2 } = textCase();
+  const bad = 'Good morning. The car is still here. Would Saturday at 10 suit you for a viewing?';
+  const answer = analystAnswer(m1, m2, { recommendation: { pursue: 'PURSUE', strategy: 'BUYER SIGNAL: asked to view. NEXT MOVE: offer Saturday.',
+    psychological_rationale: 'DECISION HYPOTHESIS: H1. WHY THIS MOVE: x. IF RIGHT, EXPECT: y. WOULD CHALLENGE IT: z.', based_on_hypotheses: ['H1'], next_action: { type: 'SEND_MESSAGE', text: bad } } });
+  const review = { challenges: [{ id: 'C1', target: 'RECOMMENDATION', target_id: null, severity: 'HIGH',
+    challenge: 'The draft asserts availability the seller never confirmed.', evidence: [] }], verdict: 'UPHOLD_WITH_CONCERNS', verdict_rationale: 'Concerns.' };
+  const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(review) }));
+  expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
+  expect(row(r.analysisId!).ai_proposed_message).toBe(bad); // stored; only src/live/analysis.ts proposedMessage() now withholds it
+});

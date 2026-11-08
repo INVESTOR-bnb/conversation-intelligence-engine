@@ -149,3 +149,19 @@ test('fake-provider analyses are recognised by their model (Stage 2A-5d-4b)', ()
   expect(isFakeProviderAnalysis(row({ model: null }))).toBe(false);
   expect(isFakeProviderAnalysis(null)).toBe(false);
 });
+
+test('a HIGH challenge on the recommendation withholds the draft even when the verdict is only UPHOLD_WITH_CONCERNS (unverified claims are never pre-filled as ready)', () => {
+  const v2 = reviewedOutput(MID, 'UPHOLD_WITH_CONCERNS') as { adversarial_review: Record<string, unknown> };
+  const withHigh = { ...v2, adversarial_review: { verdict: 'UPHOLD_WITH_CONCERNS', verdict_rationale: 'x', challenges: [
+    { id: 'C1', target: 'RECOMMENDATION', target_id: null, severity: 'HIGH', challenge: 'The draft says the car is still available; the seller never confirmed it.', evidence: [] }] } };
+  const out = parseAnalysisOutput(withHigh)!;
+  const w = proposedMessage('READY', row({ output: withHigh }), out, []);
+  expect(w.text).toBeNull();
+  expect(w.withheld).toContain('HIGH-severity challenge to this recommendation');
+  // MEDIUM concerns, or HIGH concerns about a hypothesis only, leave the draft for the founder to judge
+  for (const [target, severity] of [['RECOMMENDATION', 'MEDIUM'], ['HYPOTHESIS', 'HIGH']] as const) {
+    const other = { ...v2, adversarial_review: { verdict: 'UPHOLD_WITH_CONCERNS', verdict_rationale: 'x', challenges: [
+      { id: 'C1', target, target_id: target === 'HYPOTHESIS' ? 'H1' : null, severity, challenge: 'y', evidence: [] }] } };
+    expect(proposedMessage('READY', row({ output: other }), parseAnalysisOutput(other)!, []).text, `${target} ${severity}`).toBe(MSG);
+  }
+});
