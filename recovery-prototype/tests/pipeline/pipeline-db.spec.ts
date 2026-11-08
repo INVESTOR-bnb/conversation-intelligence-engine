@@ -516,12 +516,12 @@ test('R6 two competing explanations that can both be true (partner/bank agreemen
     ],
     recommendation: { pursue: 'PURSUE',
       strategy: 'BUYER SIGNAL: on 6 Oct the prospect asked "Can I see it on Saturday" (that Saturday has passed). VERIFY FIRST: that the car is still available and which days the seller can offer now. NEXT MOVE: reopen the viewing request without naming a day.',
-      psychological_rationale: 'DECISION HYPOTHESIS: H1: needs agreement before committing; H2 (a busy schedule) may also be true. WHY THIS MOVE: it offers the viewing on their terms and shows whether a second person is involved. IF RIGHT, EXPECT: they suggest coming with their partner or ask what the bank needs. WOULD CHALLENGE IT: they book a time alone with no mention of anyone else, which points to H2.',
+      psychological_rationale: 'DECISION HYPOTHESIS: H1: needs agreement before committing; H2 (a busy schedule) may also be true. WHY THIS MOVE: it offers the viewing on their terms and shows whether a second person is involved. IF RIGHT, EXPECT: they suggest coming with their partner or ask what the bank needs. WOULD CHALLENGE IT: they say they decide alone and need no one else\'s agreement, which contradicts H1.',
       based_on_hypotheses: ['H1'], next_action: { type: 'SEND_MESSAGE', text: 'Sorry we missed your Saturday request last month. If you would still like to see the car, which day suits you? You are welcome to bring anyone who is helping you decide.' } },
   });
   const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }));
   expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
   const rec = row(r.analysisId!).output.recommendation;
   expect(rec.psychological_rationale).toMatch(/WOULD CHALLENGE IT: .+/);
-  expect(rec.psychological_rationale).not.toMatch(/WOULD CHALLENGE IT: [^.]*(no reply|silence|does not (reply|respond))/i);
+  expect(rec.psychological_rationale).not.toMatch(/WOULD CHALLENGE IT: [^.]*(no reply|silence|does not (reply|respond)|no mention|without mentioning|does not mention)/i);
 });

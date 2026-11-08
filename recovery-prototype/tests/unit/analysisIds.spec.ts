@@ -68,7 +68,7 @@ test('the prompts state the id rules the grammar cannot enforce (uniqueness, exi
     expect(ANALYST_SYSTEM, rule).toContain(rule);
   }
   for (const rule of ['C1, C2, C3', 'each id used once', 'an id that exists in the analysis under review', 'target_id null']) expect(REVIEWER_SYSTEM, rule).toContain(rule);
-  expect(PROMPT_VERSION).toBe('rre-6k-analyst-v8+reviewer-v7');
+  expect(PROMPT_VERSION).toBe('rre-6l-analyst-v8.1+reviewer-v7.1');
   expect(PROMPT_VERSION.length).toBeLessThanOrEqual(50);
 });
 
