@@ -68,7 +68,7 @@ test('the prompts state the id rules the grammar cannot enforce (uniqueness, exi
     expect(ANALYST_SYSTEM, rule).toContain(rule);
   }
   for (const rule of ['C1, C2, C3', 'each id used once', 'an id that exists in the analysis under review', 'target_id null']) expect(REVIEWER_SYSTEM, rule).toContain(rule);
-  expect(PROMPT_VERSION).toBe('rre-6h-analyst-v5+reviewer-v5');
+  expect(PROMPT_VERSION).toBe('rre-6i-analyst-v6+reviewer-v5');
   expect(PROMPT_VERSION.length).toBeLessThanOrEqual(50);
 });
 
@@ -103,7 +103,7 @@ test('no unverified operational claims; seller mistakes are observations, the ca
   for (const rule of ['a draft never asserts availability or stock', '"still here"', 'a price, discount, terms, a delivery or viewing date or time',
     'unless the SELLER stated it in the evidence', 'may have changed, so present it as something to confirm',
     'Do not propose a specific day or time the seller has not', 'VERIFY FIRST: <fact>', 'true either way (no placeholders, no claim)',
-    'these are facts about what the', 'WHY the prospect went quiet is a separate, unproven question', 'competing hypotheses that do not blame the seller',
+    'these are facts about what the', 'WHY the prospect went quiet is a separate, unproven question', 'explanations that do not blame the seller',
     'the cause of the silence is unknown', 'never present one hypothesis as the cause', 'if the answer is not in the evidence, VERIFY FIRST instead of answering',
     'never "The car is still here"', 'only if the seller has them']) {
     expect(flat(ANALYST_SYSTEM), rule).toContain(flat(rule));
@@ -111,4 +111,18 @@ test('no unverified operational claims; seller mistakes are observations, the ca
   expect(ANALYST_SYSTEM).not.toContain('answer it instead of asking'); // the instruction that invited unverified answers is gone
   for (const rule of ['operational fact the seller did not state in the evidence? That is a HIGH challenge on the RECOMMENDATION',
     'presented as the cause, or with more confidence than the evidence allows']) expect(flat(REVIEWER_SYSTEM), rule).toContain(flat(rule));
+});
+
+test('v6: every hypothesis rests on evidence; unsupported possibilities go to unknowns; no forced or invented competitors', () => {
+  for (const rule of ['Every hypothesis, each competing one included, lists at least one supporting observation',
+    'one observation may support two competing readings', 'Never write an observation just to support a hypothesis',
+    'A possibility that no observation supports is not a hypothesis: put it in unknowns',
+    'If no evidence-supported competing reading exists, record the interpretation in unknowns',
+    'make one a competing hypothesis only where an observation supports it', 'put unsupported ones (bought elsewhere, no longer needs it) in unknowns']) {
+    expect(flat(ANALYST_SYSTEM), rule).toContain(flat(rule));
+  }
+  // the v5 wording that listed evidence-free competitors as if required is gone
+  expect(flat(ANALYST_SYSTEM)).not.toContain('with competing hypotheses that do not blame the seller (busy, deciding with someone else, price, bought elsewhere');
+  // VERIFY FIRST and the single next move are untouched
+  for (const kept of ['VERIFY FIRST: <fact>', 'One move, never a list of options', 'WHY THIS MOVE:']) expect(ANALYST_SYSTEM).toContain(kept);
 });

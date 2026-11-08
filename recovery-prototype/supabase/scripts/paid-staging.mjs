@@ -7,6 +7,8 @@
 //   node supabase/scripts/paid-staging.mjs activate                   Kimi settings + spending ON (USD 3 allowance)
 //   node supabase/scripts/paid-staging.mjs deactivate                 spending OFF (the Kimi key is kept)
 //   node supabase/scripts/paid-staging.mjs deactivate-and-remove-key  spending OFF and the paid settings deleted
+//   node supabase/scripts/paid-staging.mjs diagnose                   read-only: the latest synthetic analysis's stored metadata
+//                                                                     (status, contract error, tokens, cost, ledger, limits); no content
 //
 // Environment: SUPABASE_ACCESS_TOKEN (all), KIMI_API_KEY (activate; readiness compares its digest).
 // Neither is ever printed: every line of output passes through redact().
@@ -35,7 +37,7 @@ export const KIMI = Object.freeze({ model: 'kimi-k3', in: 3, out: 15, cap: 8000 
 export const PER_ANALYSIS_CAP_USD = 1;
 export const ALLOWANCE_USD = 3;
 /** What the deployed bundle must contain besides the reviewed safeguards: the fixed model and the contract-id fix (9f5bf4c). */
-export const DEPLOYED_MARKERS = ["KIMI_MODEL = 'kimi-k3'", 'rre-6h-analyst-v5+reviewer-v5', 'provider.answer_unparsable'];
+export const DEPLOYED_MARKERS = ["KIMI_MODEL = 'kimi-k3'", 'rre-6i-analyst-v6+reviewer-v5', 'provider.answer_unparsable'];
 /** What the live frontend must contain: the founder's paid action, its confirmation, and the spending gate. */
 export const FRONTEND_MARKERS = ['Run paid analysis', 'The total permitted cost is capped at $1.', 'founder_ai_spend_summary'];
 const PAID_SETTINGS = ['ANALYSIS_PROVIDER', 'ALLOW_PAID_PROVIDER', 'KIMI_API_KEY'];
@@ -434,10 +436,45 @@ async function deactivate(removeKey) {
   }
 }
 
+/**
+ * Read-only diagnosis of the latest analysis of the newest synthetic (DASH-PAID-) case: stored metadata only.
+ * Never prints conversation text, the analysis output or any model answer (a rejected output is not stored).
+ */
+export const DIAGNOSE_SQL = `(select json_build_object(
+    'reference', c.reference, 'case_state', c.workflow_state,
+    'analysis_version', a.version, 'status', a.status, 'model', a.model, 'prompt_version', a.prompt_version,
+    'input_tokens', a.input_tokens, 'output_tokens', a.output_tokens, 'estimated_cost_usd', a.estimated_cost_usd,
+    'output_stored', a.output is not null, 'error', left(a.error, 600),
+    'ledger', (select json_build_object('status', l.status, 'reserved_usd', l.reserved_usd, 'actual_usd', l.actual_usd, 'settled_by', l.settled_by,
+        'analyst_dispatched', l.analyst_dispatched_at is not null, 'reviewer_dispatched', l.reviewer_dispatched_at is not null,
+        'analyst_tokens', json_build_array(l.analyst_input_tokens, l.analyst_output_tokens),
+        'reviewer_tokens', json_build_array(l.reviewer_input_tokens, l.reviewer_output_tokens), 'overrun', l.overrun)
+      from private.ai_spend_ledger l where l.analysis_id = a.id),
+    'case_attempts_24h', (select count(*) from private.ai_spend_ledger l where l.case_id = c.id and l.created_at > now() - interval '24 hours'),
+    'case_attempts_total', (select count(*) from private.ai_spend_ledger l where l.case_id = c.id))
+  from public.cases c join public.analyses a on a.case_id = c.id
+  where c.reference like '${CASE_PREFIX}%'
+  order by c.created_at desc, a.version desc limit 1)`;
+
+async function diagnose() {
+  out('== Diagnosis (read-only; no provider call, no analysis, no change; no conversation or model content)');
+  const d = await read('diagnose', DIAGNOSE_SQL);
+  if (!d) throw new Stop('no analysis of a synthetic case was found');
+  out(`      case ${d.reference}: state ${d.case_state}; analysis v${d.analysis_version} ${d.status}; model ${d.model}; prompt ${d.prompt_version}`);
+  out(`      tokens in ${d.input_tokens} / out ${d.output_tokens}; estimated cost USD ${d.estimated_cost_usd}; output stored: ${d.output_stored}`);
+  out(`      error: ${d.error ?? '(none)'}`);
+  const l = d.ledger;
+  out(l ? `      ledger: ${l.status} (${l.settled_by ?? '-'}); reserved USD ${l.reserved_usd}; actual USD ${l.actual_usd}; overrun ${l.overrun}; `
+    + `analyst dispatched ${l.analyst_dispatched} tokens ${JSON.stringify(l.analyst_tokens)}; reviewer dispatched ${l.reviewer_dispatched} tokens ${JSON.stringify(l.reviewer_tokens)}`
+    : '      ledger: no reservation recorded');
+  out(`      case attempts: ${d.case_attempts_24h} in 24h, ${d.case_attempts_total} in total`);
+  out(`      ${fmtState(await readState())}`);
+}
+
 async function main() {
   const cmd = process.argv[2];
-  if (!['readiness', 'activate', 'deactivate', 'deactivate-and-remove-key'].includes(cmd ?? '')) {
-    console.error('usage: paid-staging.mjs readiness|activate|deactivate|deactivate-and-remove-key');
+  if (!['readiness', 'activate', 'deactivate', 'deactivate-and-remove-key', 'diagnose'].includes(cmd ?? '')) {
+    console.error('usage: paid-staging.mjs readiness|activate|deactivate|deactivate-and-remove-key|diagnose');
     return 2;
   }
   const pat = accessToken(process.env.SUPABASE_ACCESS_TOKEN);
@@ -453,6 +490,7 @@ async function main() {
   try {
     if (cmd === 'readiness') await readiness(kimiKey || null);
     else if (cmd === 'activate') await activate(kimiKey);
+    else if (cmd === 'diagnose') await diagnose();
     else await deactivate(cmd === 'deactivate-and-remove-key');
     out(`RESULT: ${cmd.toUpperCase()} PASSED (${results.filter((r) => r.ok).length} checks)`);
     return 0;

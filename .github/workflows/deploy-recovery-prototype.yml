@@ -12,6 +12,7 @@
 #                                  Kimi settings → spending ON (USD 3 allowance, USD 1 cap) → case → readiness
 #   paid-deactivate                spending OFF (the Kimi key is kept)
 #   paid-deactivate-and-remove-key spending OFF and the paid provider settings deleted
+#   paid-diagnose                  read-only: stored metadata of the latest synthetic analysis (no content)
 # A paid target also needs expected_sha: the full 40-character hash of the branch commit to run.
 # Job "paid-gate" (no environment, no secret) refuses unless the run is a manual dispatch of this
 # repository's authorised branch at exactly expected_sha, and the environment "staging-paid" is
@@ -42,7 +43,7 @@ on:
         type: choice
         required: true
         default: frontend
-        options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key]
+        options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, paid-diagnose]
       expected_sha:
         description: Paid targets only — the full 40-character commit hash this run must execute
         type: string
@@ -281,6 +282,7 @@ jobs:
             paid-activate) action=activate ;;
             paid-deactivate) action=deactivate ;;
             paid-deactivate-and-remove-key) action=deactivate-and-remove-key ;;
+            paid-diagnose) action=diagnose ;;
             *) echo "::error::unknown target"; exit 1 ;;
           esac
           node supabase/scripts/paid-staging.mjs "$action"

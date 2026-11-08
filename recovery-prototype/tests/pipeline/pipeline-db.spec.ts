@@ -7,6 +7,8 @@ import {
   REJECTED_RECOMMENDATION, runAnalysisPipeline, sha256Hex, type AnalysisProvider, type FounderDb, type PipelineResult,
 } from '../../supabase/functions/_shared/analysis-pipeline/index.ts';
 import { analystAnswer, BODY1, BODY2, CONFIG, DRAFT, FakeProvider, MemoryLogger, ok, reviewAnswer } from './fakes';
+// @ts-expect-error plain ES module without type declarations
+import { DIAGNOSE_SQL } from '../../supabase/scripts/paid-staging.mjs';
 import { BIZ_A, CLIENT_A, CLIENT_B, enableTestSpending, makeRoomForCase, one, PsqlFounderDb, PsqlServiceDb, spend, sql } from './psqlDb';
 
 const storage = new Map<string, Uint8Array>();
@@ -420,4 +422,60 @@ test('KNOWN GAP (documented, not fixed): if the AI reviewer upholds it, a draft 
   const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }));
   expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
   expect(row(r.analysisId!).ai_proposed_message).toBe(bad);
+});
+
+/** The v5 live failure (DASH-PAID-20261108131559): a fourth, evidence-free competing hypothesis. */
+function fourHypotheses(m1: string, m2: string, h4Supporting: string[]) {
+  return analystAnswer(m1, m2, {
+    hypotheses: [
+      { id: 'H1', category: 'DECISION_FRICTION', statement: 'Wants to view the car before deciding.', basis: 'STATED_BY_PROSPECT',
+        supporting_observations: ['O2'], contradicting_observations: [], competing_hypotheses: [], confidence: 'MEDIUM', uncertainty: 'No visit was fixed.' },
+      { id: 'H2', category: 'TRUST_AND_RISK', statement: 'The price may feel high for the value seen.', basis: 'HYPOTHESIS',
+        supporting_observations: ['O1'], contradicting_observations: [], competing_hypotheses: ['H3', 'H4'], confidence: 'LOW', uncertainty: 'No target price given.' },
+      { id: 'H3', category: 'SELLER_CREATED_RESISTANCE', statement: 'The flat price reply may have discouraged the prospect.', basis: 'HYPOTHESIS',
+        supporting_observations: ['O1'], contradicting_observations: ['O2'], competing_hypotheses: ['H2'], confidence: 'LOW', uncertainty: 'They still asked to view.' },
+      { id: 'H4', category: 'BUYING_MOTIVATION', statement: 'The prospect may have bought a car elsewhere.', basis: 'HYPOTHESIS',
+        supporting_observations: h4Supporting, contradicting_observations: [], competing_hypotheses: ['H2'], confidence: 'UNKNOWN', uncertainty: 'Nothing in the chat shows this.' },
+    ],
+  });
+}
+
+test('REGRESSION v5 live failure: an evidence-free competing hypothesis is rejected by the real contract with the exact message; both calls billed; nothing kept', async () => {
+  const { c, m1, m2 } = textCase();
+  const provider = new FakeProvider({ ANALYST: ok(fourHypotheses(m1, m2, [])), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) });
+  const r = await run(c, provider);
+  expect(r).toMatchObject({ outcome: 'REJECTED', code: 'CONTRACT_REJECTED' });
+  const a = row(r.analysisId!);
+  expect(a.status).toBe('ERROR');
+  expect(a.error).toBe('REJECTED by analysis contract rre-analysis/1: hypotheses[3] rests on no observation; record it as an unknown instead');
+  expect([a.output, a.ai_proposed_message, a.ai_classification]).toEqual([null, null, null]); // validation is not weakened, nothing repaired or kept
+  expect(provider.requests.map((x) => x.role)).toEqual(['ANALYST', 'REVIEWER']); // the contract runs after both calls: two billed calls, no retry
+  expect(spend(r.analysisId!)).toBe('SETTLED:REPORTED_USAGE:0.0210'); // usage of both calls settled, nothing left reserved
+  expect([a.input_tokens, a.output_tokens]).toEqual([2000, 1000]);
+  expect(caseState(c)).toBe('SUBMITTED'); // the case returns to its prior state
+});
+
+test('REGRESSION v5 corrected form: the same possibility recorded under unknowns (not as a hypothesis) passes the real contract', async () => {
+  const { c, m1, m2 } = textCase();
+  const answer = fourHypotheses(m1, m2, []);
+  answer.hypotheses = answer.hypotheses.slice(0, 3).map((h) => ({ ...h, competing_hypotheses: h.competing_hypotheses.filter((x: string) => x !== 'H4') }));
+  answer.unknowns = [...answer.unknowns, { question: 'Has the prospect bought a car elsewhere?', why_it_matters: 'Nothing in the chat shows it; if so, no follow-up helps.' }];
+  const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }));
+  expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
+  const out = row(r.analysisId!).output;
+  expect(out.hypotheses.every((h: { supporting_observations: string[] }) => h.supporting_observations.length > 0)).toBe(true);
+  expect(out.unknowns.map((u: { question: string }) => u.question)).toContain('Has the prospect bought a car elsewhere?');
+});
+
+test('paid-diagnose (read-only) against the real schema: the rejected analysis\'s stored metadata, two dispatched calls, settled usage, no content', async () => {
+  const { c, m1, m2 } = textCase();
+  sql(`update public.cases set reference = 'DASH-PAID-DIAG' || floor(random() * 1e9)::text where id = :'c'`, { c });
+  await run(c, new FakeProvider({ ANALYST: ok(fourHypotheses(m1, m2, [])), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }));
+  const raw = one(`select ${DIAGNOSE_SQL}`)!;
+  const d = JSON.parse(raw);
+  expect(d).toMatchObject({ status: 'ERROR', output_stored: false, input_tokens: 2000, output_tokens: 1000, case_attempts_total: 1,
+    error: 'REJECTED by analysis contract rre-analysis/1: hypotheses[3] rests on no observation; record it as an unknown instead' });
+  expect(d.ledger).toMatchObject({ status: 'SETTLED', settled_by: 'REPORTED_USAGE', analyst_dispatched: true, reviewer_dispatched: true,
+    analyst_tokens: [1000, 500], reviewer_tokens: [1000, 500] });
+  for (const secret of [BODY1, BODY2, 'the price feels high', 'bought a car elsewhere', DRAFT]) expect(raw).not.toContain(secret);
 });

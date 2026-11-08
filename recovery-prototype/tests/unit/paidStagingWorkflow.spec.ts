@@ -35,7 +35,7 @@ test('manual only: no push, pull request, fork, schedule or other trigger; read-
   expect(FILE).toMatch(/^permissions:\n {2}contents: read$/m);
   expect(FILE).not.toMatch(/:\s*write\b/);
   for (const job of [GATE, JOB]) expect(job).toMatch(/\n {4}permissions:\n {6}contents: read\n/);
-  expect(FILE).toContain('options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key]');
+  expect(FILE).toContain('options: [frontend, paid-readiness, paid-activate, paid-deactivate, paid-deactivate-and-remove-key, paid-diagnose]');
   expect(FILE).toMatch(/expected_sha:\n {8}description: [^\n]+\n {8}type: string\n/);
 });
 
@@ -95,7 +95,7 @@ test('no input or secret is interpolated into a shell command; the target maps t
   expect(runs.length).toBeGreaterThanOrEqual(8);
   for (const r of runs) expect(r, r).not.toMatch(/\$\{\{/);
   const last = runs[runs.length - 1];
-  expect(last).toMatch(/case "\$TARGET" in\n\s+paid-readiness\) action=readiness ;;\n\s+paid-activate\) action=activate ;;\n\s+paid-deactivate\) action=deactivate ;;\n\s+paid-deactivate-and-remove-key\) action=deactivate-and-remove-key ;;\n\s+\*\) echo "::error::unknown target"; exit 1 ;;\n\s+esac\n\s+node supabase\/scripts\/paid-staging\.mjs "\$action"/);
+  expect(last).toMatch(/case "\$TARGET" in\n\s+paid-readiness\) action=readiness ;;\n\s+paid-activate\) action=activate ;;\n\s+paid-deactivate\) action=deactivate ;;\n\s+paid-deactivate-and-remove-key\) action=deactivate-and-remove-key ;;\n\s+paid-diagnose\) action=diagnose ;;\n\s+\*\) echo "::error::unknown target"; exit 1 ;;\n\s+esac\n\s+node supabase\/scripts\/paid-staging\.mjs "\$action"/);
 });
 
 test('no tracing, no artifact, no cache, no install scripts in the gate, and no install at all in the secret job', () => {

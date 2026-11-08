@@ -16,7 +16,7 @@ export const REPOSITORY = 'INVESTOR-bnb/conversation-intelligence-engine';
 export const OWNER = 'INVESTOR-bnb';
 export const BRANCH = 'claude/revenue-recovery-engine-stage-1-8xg8vf';
 export const ENVIRONMENT = 'staging-paid';
-export const TARGETS = ['paid-readiness', 'paid-activate', 'paid-deactivate', 'paid-deactivate-and-remove-key'];
+export const TARGETS = ['paid-readiness', 'paid-activate', 'paid-deactivate', 'paid-deactivate-and-remove-key', 'paid-diagnose'];
 const SHA = /^[0-9a-f]{40}$/;
 
 /** Problems with the run itself (no network). */
