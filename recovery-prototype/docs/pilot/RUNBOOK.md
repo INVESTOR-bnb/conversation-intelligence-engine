@@ -18,6 +18,17 @@ credential or an approval.
 | The business adds the prospect's reply, records the outcome, or reports an opt-out | business case page | TESTED OFFLINE (screens + real database) |
 | You see what was sent, the reply and the outcome | case page → After your decision | TESTED OFFLINE (screens + real database) |
 
+### Before you approve: unverified facts and VERIFY FIRST (manual check; nothing in code enforces it)
+The prompt and the independent review try to stop drafts that state unconfirmed facts, but **neither is a
+guarantee**, and no code inspects the draft's wording. The only safeguard that always applies is this check:
+1. Read the draft for any statement about the business: availability or stock ("still here", "still available"),
+   price, discount, terms, dates or times, documents, delivery. If the seller did not state it in the conversation
+   — or stated it some days ago — **edit it out** or rewrite it so it is true either way.
+2. If the report's Strategy contains **VERIFY FIRST: …**, replace the default **Next step** text ("Send the message
+   below once…") with: *"Before sending: confirm <the fact>. If it is not true, do not send; add a note instead."*
+   (≤ 300 characters). Otherwise the business is told to send at once and never sees the verification step.
+3. If you cannot make the draft true either way, mark the case for re-analysis or RED instead of approving.
+
 Analysis runs only while AI spending is enabled. When it is off, the button is replaced by
 "Analysis is currently switched off…" — by design.
 

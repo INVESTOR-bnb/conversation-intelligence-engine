@@ -1,102 +1,131 @@
 # Stage 1 — Buyer Decision Intelligence (design for founder review; NOT implemented)
 
-Status: proposal, 8 Nov 2026. Nothing here is built, migrated or deployed. Every item that changes the
-database, the analysis contract, spending or customer messaging needs separate founder approval.
+Status: proposal, revision 2, 8 Nov 2026. Nothing here is built, migrated or deployed. Any change to the
+database, the analysis contract, spending, the frontend or customer messaging needs separate founder approval.
 
-## 1. What Stage 1 is, and is not
-RRE does not read minds. Stage 1 turns each analysis into a **testable prediction** about an unresolved buyer
-decision, records what actually happened, and measures whether RRE's recommended move does better than the
-follow-up the business would have sent anyway.
+## 1. Purpose and limits
+Stage 1 tests one question: **do RRE's recommendations lead to better results than the business's genuine
+usual follow-up, without more harm?** It does this by writing down, before anything happens, what RRE expects,
+and comparing that with what actually happens.
 
-- A *barrier hypothesis* is a guess about what is holding the decision, grounded in quoted evidence, with
-  competing explanations and stated uncertainty (the analysis already produces these: `hypotheses[]`).
-- A *diagnostic next move* is the one message (or verification step) most likely to **resolve or reveal**
-  that barrier. A good move is useful even if the hypothesis is wrong: the reply tells us which one was right.
-- The founder approves every message. Nothing is sent automatically.
+RRE does not read minds and does not claim to. It never states a buyer's private thoughts, never assigns a
+numeric probability it cannot justify (confidence stays the existing LOW / MEDIUM / HIGH / UNKNOWN labels),
+and never promises that a message will influence a particular buyer.
 
-## 2. What already exists (reused, not rebuilt)
-| Need | Existing source |
+## 2. Three things kept separate
+| Layer | What it is | Example | Source |
+|---|---|---|---|
+| **A. Barrier hypothesis** | An evidence-grounded guess about what is holding the decision, with competing guesses and uncertainty | H2 "needs partner and bank agreement" (stated by prospect) vs H3 "price above budget" (hypothesis, LOW) | existing `analyses.output.hypotheses` |
+| **B. Predicted buyer response** | What should happen *if* the targeted hypothesis is right and the recommended move is sent, within a set time | "Replies with a viewing time or a partner/bank update within 7 days" | new prediction record (§4) |
+| **C. Sales outcome** | What eventually happened commercially | WON with amount paid; LOST; PAUSED; DISQUALIFIED | existing `outcomes` |
+
+A good B can be judged in days; C takes weeks and is affected by many things RRE does not control. A failed
+C does not by itself refute A or B, and a WON does not prove A was right.
+
+## 3. Evidence that supports or contradicts a prediction
+Judged only from what the buyer later writes or does (existing `PROSPECT_RESPONSE` messages, recorded actions):
+| Verdict on the targeted hypothesis | Counts as evidence |
 |---|---|
-| Evidence, quotes, observations, hypotheses, confidence, uncertainty | `analyses.output` (rre-analysis/2, contract-checked) |
-| Independent challenge of the reasoning | `adversarial_review` in the same output |
-| The draft vs what the founder actually approved | `approvals.ai_proposed_message`, `approved_message`, `approval_type` (UNCHANGED / EDITED / MARKED_RED) |
-| What was sent and what the buyer said back | `case_messages` kinds `RECOVERY_SENT`, `PROSPECT_RESPONSE` (timestamped) |
-| Final result | `outcomes` (WON / LOST / PAUSED / DISQUALIFIED, deal value, amount paid) |
-| Opt-outs | `contact_restrictions` |
+| SUPPORTED | The buyer's reply addresses the targeted barrier (e.g. mentions partner/bank, asks about the point raised) or takes the predicted step |
+| CONTRADICTED | The buyer states a different reason, or the predicted step happens without the barrier ever being relevant |
+| NEW_BARRIER | The reply reveals a reason none of the hypotheses named |
+| UNRESOLVED | No reply, or a reply that says nothing about the reason |
 
-What is missing: (a) which hypothesis the move was betting on, written as a checkable prediction;
-(b) a short-horizon result (did the buyer reply, and what did the reply reveal); (c) which message arm the
-case was in (RRE vs baseline); (d) the founder's after-the-fact judgement of which hypothesis was right.
+Rules: silence is UNRESOLVED, never support or contradiction. Verdicts quote the buyer's words. The founder
+records the verdict; the AI does not grade itself.
 
-## 3. The prediction record (one per approved recommendation)
-Written by the founder at approval time, pre-filled from the analysis; ~30 seconds.
+## 4. Pre-registration: predictions are fixed before outcomes are seen
+At the moment of approval (before the message is sent), one prediction record is written and never edited:
 | Field | Meaning |
 |---|---|
-| `target_hypothesis` | The H-id the move is designed to test (e.g. H2), or `NONE` for a pure verification/wait move |
-| `expected_signal` | One of: REPLY_ADDRESSING_BARRIER, BOOKS_NEXT_STEP, REVEALS_OTHER_BARRIER, DECLINES |
-| `horizon_days` | When to judge (default 7) |
-| `arm` | `RRE` or `BASELINE` (section 5) |
-| `verify_first` | The fact the seller had to confirm before sending, if any |
+| case reference, analysis id, prompt version | links the prediction to the exact analysis |
+| `target_hypothesis` | the H-id the move tests, or NONE (pure verification or wait) |
+| `predicted_response` | one of REPLIES_ON_BARRIER, TAKES_NEXT_STEP (named), REVEALS_OTHER_REASON, DECLINES |
+| `horizon_days` | default 7 (reply), 14 (next step), 60 (sale) |
+| `arm` and allocation number | §6 |
+| `verify_first` | the fact the seller had to confirm, if any |
+| `recorded_at` | timestamp; Phase 0 uses a dated, append-only log |
 
-## 4. Outcome recording
-Two horizons, because final sales are rare and slow.
-1. **Short horizon (primary, at `horizon_days`)** — recorded by the founder from the existing
-   `PROSPECT_RESPONSE` messages: `NO_REPLY`, `REPLIED_ADDRESSED_BARRIER`, `REPLIED_OTHER_BARRIER`,
-   `NEXT_STEP_BOOKED` (viewing, call, payment link requested), `DECLINED`, `OPTED_OUT`; plus
-   `hypothesis_verdict`: SUPPORTED / CONTRADICTED / UNCLEAR / NEW_BARRIER (free text ≤ 200 chars).
-2. **Long horizon** — the existing `outcomes` row (WON / LOST / PAUSED / DISQUALIFIED, amount paid).
+Corrections are appended as new rows with a reason; the original stays. A later re-analysis creates a new
+prediction; it never replaces the earlier one. This is what stops the explanation being rewritten afterwards.
 
-Rules: silence is recorded as `NO_REPLY`, never as a hypothesis verdict; outcomes are recorded for both arms;
-nothing is inferred about a person beyond what they wrote.
-
-## 5. Evaluation against a baseline
-**Baseline** = the follow-up the business would normally send (their own wording, or the generic
-"Hello, are you still interested?" check-in when they have none). Both arms are messages a reasonable business
-would send; the founder approves both; no deception, no pressure.
-
-**Assignment** — per eligible case (PURSUE, no restriction, founder willing to send either), alternate or
-randomise by a fixed rule recorded *before* the message is written (e.g. case number parity), so the founder
-cannot pick the "easy" cases for RRE. A founder override is allowed but recorded and reported.
-
-**Metrics** (pre-registered before the first case):
-| Metric | Type |
+## 5. Was the recommendation actually used?
+Recorded per case, because a recommendation that was never sent cannot be credited or blamed:
+| Field | Values |
 |---|---|
-| Reply within 7 days | primary |
-| Next step booked within 14 days | secondary |
-| WON rate, amount paid within 60 days | secondary (low power at pilot scale) |
-| Opt-outs / complaints after the message | harm — must not be higher in the RRE arm |
-| Founder edit rate and MARKED_RED rate on RRE drafts | quality |
-| Unverified-claim incidents caught at review | safety — target 0 sent |
-| Hypothesis calibration: share SUPPORTED by stated confidence (LOW / MEDIUM) | prediction quality |
+| `founder_decision` | UNCHANGED / EDITED / MARKED_RED (existing `approvals.approval_type`) |
+| `verified_before_send` | YES / NO / NOT_NEEDED (when VERIFY FIRST applied) |
+| `sent` | YES (existing `RECOVERY_SENT`, "I sent it") / NO / UNKNOWN |
+| `sent_as_approved` | YES / CHANGED_BY_SELLER / UNKNOWN |
+| `days_to_send` | from release to "I sent it" |
 
-**Honest power estimate** — to detect a reply-rate lift from 20% to 35% with 80% power needs roughly 140
-cases per arm. A 1–3 business pilot will not reach that. Stage 1 therefore reports **effect estimates with
-95% confidence intervals and the raw counts**, not "proof"; a decision to scale needs either more cases or a
-consistent direction across businesses plus zero harm signals.
+Analysis is by allocation (intention to treat) and, separately, among cases actually sent as approved.
 
-## 6. Minimal build when approved (proposal only)
-- **Phase 0 — no schema change (recommended first, ~20 cases):** a founder-kept log (one row per approved
-  case: case reference, arm, target hypothesis, expected signal, short-horizon result, verdict). Measures
-  whether the fields are usable before anything is built.
-- **Phase 1 — one migration:** table `case_predictions` (fields of sections 3–4, founder-only RLS like
-  `founder_notes`, append-only corrections), two founder RPCs (record prediction at approval; record result),
-  and a CSV export. No change to `analyses`, the contract, spending, or client screens.
-- **Not in Stage 1:** automatic sending, automatic hypothesis scoring by AI, extra AI calls, buyer profiling,
-  dashboards beyond the export.
+## 6. Baseline and allocation
+**Baseline (preferred):** the follow-up this business would genuinely have sent, written by the business
+*before* seeing RRE's draft (or taken from their real past follow-ups for historical cases). The generic
+"are you still interested?" is used only if that is genuinely what the business sends, and is labelled so.
 
-## 7. Guardrails
-Founder approves every message; opt-outs stop both arms; no personal traits inferred; prospect data stays in
-the existing tables under existing RLS; the evaluation never changes what a buyer is told about who is
-writing to them; any business taking part agrees to the A/B approach in writing.
+**Eligibility (documented per case):** PURSUE recommendation; no contact restriction; consent in place (§8);
+the business is willing to send either message; the founder judges both messages acceptable to send.
 
-## 8. What would show Stage 1 is not working
-- RRE arm reply rate not above baseline after 40+ cases per arm with overlapping intervals and no
-  consistent direction across businesses.
-- Hypotheses marked SUPPORTED no more often at MEDIUM than at LOW confidence (no calibration).
-- Founder edits most drafts substantially, or any unverified claim reaches a buyer.
+**Allocation:** preassigned random order per business (a sealed list generated before the first case, e.g.
+blocks of four, two RRE / two BASELINE), applied in order of eligibility. Overrides allowed only for safety or
+business reasons, recorded with the reason, and reported. Where randomisation is impractical (very few cases),
+strict alternation by case number, declared in advance.
 
-## 9. Decisions needed from the founder
-1. Baseline definition per business (their wording vs the generic check-in).
-2. Assignment rule (parity vs random) and whether overrides are allowed.
-3. Phase 0 only, or Phase 0 then Phase 1 migration.
-4. Horizons (7 / 14 / 60 days) and the primary metric.
+## 7. Measures (reported separately, never merged into one score)
+| Measure | Definition | Window |
+|---|---|---|
+| Reply | any buyer reply | 7 days |
+| Meaningful next step | viewing/call booked, documents requested, payment details requested — confirmed by the business | 14 days |
+| Verified sale | `outcomes` WON with amount paid and payment date | 60 days |
+| Opt-out / complaint | contact restriction or complaint after the message | any time |
+| Draft quality | founder edit rate, MARKED_RED rate, unverified claims caught before release | at approval |
+| Hypothesis accuracy | SUPPORTED / CONTRADICTED / NEW_BARRIER / UNRESOLVED counts by confidence label | at horizon |
+
+Results are reported as counts and rates per arm with 95% confidence intervals. With pilot-scale numbers the
+intervals will be wide; Stage 1 reports estimates and direction, not proof. (Illustration only, not a
+forecast: telling a 20% reply rate apart from 35% with conventional power needs roughly 140 cases per arm.)
+
+## 8. Privacy, consent, retention, access
+- **Consent:** each participating business agrees in writing to (a) RRE storing the conversations it submits,
+  (b) the random allocation between its own follow-up and RRE's, (c) recording replies and outcomes. Only
+  conversations the business is entitled to share are used; buyers who opted out are excluded.
+- **Data minimisation:** prediction and outcome records hold codes, dates, ids and short quotes needed for a
+  verdict; no new personal data, no inferred personal traits.
+- **Access:** founder only (as `founder_notes` today); a business sees only its own approved messages and
+  outcomes, never predictions or hypotheses. No export leaves the founder's control.
+- **Retention:** prediction/outcome records follow the case's retention; deleted with the case; Phase 0 log
+  deleted or anonymised (case reference only) within 90 days of the Phase 0 report.
+- Applicable law (e.g. Nigeria's NDPA 2023 for Nigerian businesses) is to be confirmed by the founder;
+  this design does not constitute legal advice.
+
+## 9. Phase 0 — about 20 authorised cases, no migration, no extra AI spending
+**Goal:** check that the records are practical and the verdicts can be judged consistently, before any build.
+
+| Step | What | Who |
+|---|---|---|
+| 0 | Written consent from 1–3 businesses (§8); allocation list generated and stored before case 1 | Founder |
+| 1 | Select ~20 cases: (a) **historical** — already-analysed or past stalled chats where the business's real follow-up and the buyer's response are known (for verdict practice and draft comparison only; no allocation), and/or (b) **prospective** — new eligible cases allocated per §6 | Founder |
+| 2 | For each case, at approval: fill the prediction row (§4) and usage fields (§5) in a dated spreadsheet; append-only | Founder |
+| 3 | At 7 / 14 / 60 days: record reply, next step, sale, opt-out, and hypothesis verdict with the buyer's quote | Founder (business supplies replies) |
+| 4 | Second look: for 5 cases, a second person (or the founder a week later, blind to the first verdict) re-judges verdicts to test consistency | Founder |
+| 5 | Phase 0 report: completeness of records, verdict agreement, edit/RED rates, any unverified claim reaching a buyer, per-arm counts with intervals, recommendation on Phase 1 | Claude drafts, founder decides |
+
+Spending: no extra AI calls — only analyses the founder would run anyway, within the existing $1 cap and
+allowance. Historical cases use analyses already paid for, or none.
+
+**Phase 0 stops early if:** any unverified claim reaches a buyer; an opt-out follows an RRE message; or
+records cannot be completed for more than a quarter of cases.
+
+## 10. Phase 1 (not to be built until Phase 0 is reviewed)
+One founder-only table for §4–5 records, two founder RPCs (record prediction at approval; append outcome or
+correction), a CSV export, and pre-filling the approval form's Next step from VERIFY FIRST. No change to the
+analysis contract, spending, or what businesses see.
+
+## 11. Decisions for the founder
+1. Which businesses, and their consent wording.
+2. Historical, prospective, or both for Phase 0.
+3. Allocation: random blocks (recommended) or alternation.
+4. Horizons (7 / 14 / 60 days) and who confirms next steps and sales.

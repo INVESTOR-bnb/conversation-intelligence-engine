@@ -410,3 +410,14 @@ test('founder-review case: a draft asserting unverified availability, challenged
   expect([a.ai_classification, a.ai_proposed_message]).toEqual([null, null]);
   expect(JSON.stringify(a.output.recommendation)).not.toContain('still here');
 });
+
+test('KNOWN GAP (documented, not fixed): if the AI reviewer upholds it, a draft asserting unverified availability passes the contract and reaches the founder unchanged', async () => {
+  // Nothing deterministic inspects draft wording. Only the founder's review stands between this draft and the business.
+  const { c, m1, m2 } = textCase();
+  const bad = 'Good morning. The car is still here. Would Saturday at 10 suit you for a viewing?';
+  const answer = analystAnswer(m1, m2, { recommendation: { pursue: 'PURSUE', strategy: 'BUYER SIGNAL: asked to view. NEXT MOVE: offer Saturday.',
+    psychological_rationale: 'WHY THIS MOVE: turns interest into a visit.', based_on_hypotheses: ['H1'], next_action: { type: 'SEND_MESSAGE', text: bad } } });
+  const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }));
+  expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
+  expect(row(r.analysisId!).ai_proposed_message).toBe(bad);
+});
