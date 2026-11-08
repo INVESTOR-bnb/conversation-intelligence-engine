@@ -330,3 +330,36 @@ test('spending: a second dispatch of the same call is refused by the database (n
   expect(await run(c, provider)).toMatchObject({ outcome: 'COMPLETED' });
   expect(retried).toBe('ALREADY_DISPATCHED');
 });
+
+test('strategic next move: the BUYER SIGNAL / NEXT MOVE / WHY THIS MOVE format fits the existing fields and the real contract', async () => {
+  const strategy = (move: string) => `BUYER SIGNAL: the prospect asked "Can I see it on Saturday?" after saying "the price feels high". NEXT MOVE: ${move}`;
+  const send = 'Saturday works. Would 10am suit you? I can also bring the service history so you can judge the price against the car itself.';
+  const cases = [
+    { name: 'PURSUE + message', classification: 'GREEN', message: send,
+      recommendation: { pursue: 'PURSUE', strategy: strategy('confirm the Saturday viewing and offer the service history.'),
+        psychological_rationale: 'WHY THIS MOVE: it answers the request they made and addresses the price concern with information, not pressure.',
+        based_on_hypotheses: ['H1'], next_action: { type: 'SEND_MESSAGE', text: send } } },
+    { name: 'UNKNOWN + wait', classification: null, message: null,
+      recommendation: { pursue: 'UNKNOWN', strategy: strategy('wait for the prospect; do not send a check-in.'),
+        psychological_rationale: 'WHY THIS MOVE: silence alone shows nothing about their intent.',
+        based_on_hypotheses: [], next_action: { type: 'WAIT', text: 'Wait; do not send a generic follow-up.' } } },
+    { name: 'DO_NOT_PURSUE + close respectfully', classification: 'RED', message: null,
+      recommendation: { pursue: 'DO_NOT_PURSUE', strategy: strategy('close respectfully and stop contact.'),
+        psychological_rationale: 'WHY THIS MOVE: the evidence does not justify more effort.',
+        based_on_hypotheses: [], next_action: { type: 'STOP_CONTACT', text: 'Close respectfully; send nothing further.' } },
+      reasons_not_to_pursue: [{ reason: 'Price objection with no budget given.', evidence: [] as unknown[] }] },
+  ];
+  for (const t of cases) {
+    const { c, m1, m2 } = textCase();
+    const answer = analystAnswer(m1, m2, {
+      classification: t.classification, recommendation: t.recommendation,
+      reasons_not_to_pursue: (t.reasons_not_to_pursue ?? []).map((r) => ({ ...r, evidence: [{ type: 'MESSAGE', message_id: m1, quote: 'the price feels high' }] })),
+    });
+    const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }));
+    expect(r, t.name).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
+    const a = row(r.analysisId!);
+    expect(a.output.recommendation.strategy, t.name).toMatch(/^BUYER SIGNAL: .+ NEXT MOVE: .+/);
+    expect(a.output.recommendation.psychological_rationale, t.name).toMatch(/^WHY THIS MOVE: /);
+    expect(a.ai_proposed_message, t.name).toBe(t.message);
+  }
+});

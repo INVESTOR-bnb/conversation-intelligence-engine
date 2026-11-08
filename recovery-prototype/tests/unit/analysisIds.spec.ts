@@ -68,7 +68,7 @@ test('the prompts state the id rules the grammar cannot enforce (uniqueness, exi
     expect(ANALYST_SYSTEM, rule).toContain(rule);
   }
   for (const rule of ['C1, C2, C3', 'each id used once', 'an id that exists in the analysis under review', 'target_id null']) expect(REVIEWER_SYSTEM, rule).toContain(rule);
-  expect(PROMPT_VERSION).toBe('rre-6f-analyst-v3+reviewer-v3');
+  expect(PROMPT_VERSION).toBe('rre-6g-analyst-v4+reviewer-v4');
   expect(PROMPT_VERSION.length).toBeLessThanOrEqual(50);
 });
 
@@ -83,4 +83,16 @@ test('merging analyst and review never renames, adds or removes an observation o
     expect(output.hypotheses).toEqual(a.hypotheses);
     expect(output.contract_version).toBe('rre-analysis/2');
   }
+});
+
+test('strategic next move: one move from the prospect\'s own words, in the existing fields; no generic check-ins; reviewer checks it', () => {
+  for (const rule of ['ONE strategic next move', 'only from the prospect\'s own words', 'BUYER SIGNAL:', 'NEXT MOVE:', 'WHY THIS MOVE:',
+    'One move, never a list of options', 'INSUFFICIENT_EVIDENCE keeps strategy exactly UNKNOWN', 'ask at most ONE',
+    'answer it instead of asking', '"Are you still', 'interested?"', 'silence alone', 'For WAIT or STOP_CONTACT', 'I need to talk to my wife',
+    'Never invent facts, prices or offers', 'No pressure tactics']) {
+    expect(ANALYST_SYSTEM, rule).toContain(rule);
+  }
+  expect(REVIEWER_SYSTEM).toContain('is it ONE specific move grounded in the prospect\'s words');
+  // the prompts stay small: the addition costs about 450 input tokens per analysis (two calls, ~4 chars/token)
+  expect(ANALYST_SYSTEM.length + REVIEWER_SYSTEM.length).toBeLessThan(11_000);
 });
