@@ -363,3 +363,50 @@ test('strategic next move: the BUYER SIGNAL / NEXT MOVE / WHY THIS MOVE format f
     expect(a.ai_proposed_message, t.name).toBe(t.message);
   }
 });
+
+test('founder-review case: seller mistake as an observation, silence cause as a competing hypothesis, VERIFY FIRST, a draft true either way — the real contract accepts it', async () => {
+  const { c, m1, m2 } = textCase();
+  const draft = 'Thanks for asking about Saturday. Let me confirm the car and a viewing time for you today. What time of day usually suits you best?';
+  const answer = analystAnswer(m1, m2, {
+    classification: 'YELLOW',
+    observations: [
+      { id: 'O1', actor: 'PROSPECT', behavior: 'Said the price feels high.', evidence: [{ type: 'MESSAGE', message_id: m1, quote: 'the price feels high' }] },
+      { id: 'O2', actor: 'PROSPECT', behavior: 'Asked to see the car on Saturday.', evidence: [{ type: 'MESSAGE', message_id: m2, quote: 'Can I see it on Saturday' }] },
+      { id: 'O3', actor: 'SELLER', behavior: 'Answered the price concern with a flat refusal.', evidence: [{ type: 'MESSAGE', message_id: m1, quote: 'It is our best price' }] },
+    ],
+    hypotheses: [
+      { id: 'H1', category: 'SELLER_CREATED_RESISTANCE', statement: 'The flat price reply may have discouraged the prospect.', basis: 'HYPOTHESIS',
+        supporting_observations: ['O3'], contradicting_observations: ['O2'], competing_hypotheses: ['H2'], confidence: 'LOW',
+        uncertainty: 'The prospect still asked to view afterwards; the cause of any silence is unknown.' },
+      { id: 'H2', category: 'DECISION_FRICTION', statement: 'The prospect may simply be arranging time to view.', basis: 'HYPOTHESIS',
+        supporting_observations: ['O2'], contradicting_observations: [], competing_hypotheses: ['H1'], confidence: 'LOW',
+        uncertainty: 'Nothing shows why no visit was fixed.' },
+    ],
+    recommendation: { pursue: 'PURSUE',
+      strategy: 'BUYER SIGNAL: the prospect asked "Can I see it on Saturday". VERIFY FIRST: that the car is still available and which Saturday times the seller can offer. NEXT MOVE: reply to the viewing request once confirmed.',
+      psychological_rationale: 'WHY THIS MOVE: it answers the request they made without asserting availability or a time nobody has confirmed.',
+      based_on_hypotheses: ['H2'], next_action: { type: 'SEND_MESSAGE', text: draft } },
+  });
+  const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }));
+  expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
+  const a = row(r.analysisId!);
+  expect(a.output.recommendation.strategy).toMatch(/BUYER SIGNAL: .+ VERIFY FIRST: .+ NEXT MOVE: .+/);
+  expect(a.ai_proposed_message).toBe(draft);
+  expect(a.ai_proposed_message).not.toMatch(/still (here|available)/i);
+});
+
+test('founder-review case: a draft asserting unverified availability, challenged HIGH by the reviewer, is removed deterministically — no message survives', async () => {
+  const { c, m1, m2 } = textCase();
+  const bad = 'Good morning. The car is still here. Would Saturday at 10 suit you for a viewing?';
+  const answer = analystAnswer(m1, m2, { recommendation: { pursue: 'PURSUE', strategy: 'BUYER SIGNAL: asked to view. NEXT MOVE: offer Saturday.',
+    psychological_rationale: 'WHY THIS MOVE: turns interest into a visit.', based_on_hypotheses: ['H1'], next_action: { type: 'SEND_MESSAGE', text: bad } } });
+  const review = { challenges: [{ id: 'C1', target: 'RECOMMENDATION', target_id: null, severity: 'HIGH',
+    challenge: 'The draft asserts the car is still available and offers a time the seller never stated.', evidence: [{ type: 'MESSAGE', message_id: m2, quote: 'Can I see it on Saturday' }] }],
+    verdict: 'REJECT_RECOMMENDATION', verdict_rationale: 'Unverified operational claims in the draft.' };
+  const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(review) }));
+  expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'RECOMMENDATION_REJECTED_BY_REVIEW' });
+  const a = row(r.analysisId!);
+  expect(a.output.recommendation).toEqual(REJECTED_RECOMMENDATION);
+  expect([a.ai_classification, a.ai_proposed_message]).toEqual([null, null]);
+  expect(JSON.stringify(a.output.recommendation)).not.toContain('still here');
+});
