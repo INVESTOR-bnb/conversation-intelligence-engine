@@ -138,6 +138,11 @@ export interface ProviderResponse {
   stopReason: string;
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Shape-only diagnostics from the provider adapter (never content): how the answer text was
+   * formatted before the adapter normalised it, its length, and reported reasoning tokens.
+   */
+  diagnostics?: { answerShape?: string; answerChars?: number; reasoningTokens?: number | null };
 }
 
 /**

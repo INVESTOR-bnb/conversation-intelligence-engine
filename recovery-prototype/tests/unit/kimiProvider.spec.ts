@@ -153,7 +153,8 @@ test('3/12/14. a structured answer is parsed for BOTH stages through the same ad
   expect(out.adversarial_review).toEqual(reviewAnswer('UPHOLD_WITH_CONCERNS'));
   expect(JSON.stringify({ db: db.completions, logs: logger.events })).not.toContain(REASONING);
   const parsed = parseCompletion(completion({ a: 1 }), KIMI_MODEL, { type: 'object', additionalProperties: false, properties: { a: { type: 'integer' } }, required: ['a'] });
-  expect(parsed).toEqual({ text: '{"a":1}', stopReason: 'end_turn', inputTokens: 1200, outputTokens: 900, requestId: 'chatcmpl-synthetic01' });
+  expect(parsed).toEqual({ text: '{"a":1}', stopReason: 'end_turn', inputTokens: 1200, outputTokens: 900, requestId: 'chatcmpl-synthetic01',
+    diagnostics: { answerShape: 'JSON', answerChars: 7, reasoningTokens: null } });
 });
 
 test('3b. strict schema: every property required, optional ones made nullable — and the nulls are removed again before validation', () => {
@@ -195,6 +196,25 @@ test('4/5/6. malformed JSON, off-schema output, truncation and a content filter 
     expect(db.completions[0].output, name).toBeNull();
     expect(chats(), name).toHaveLength(1);
   }
+});
+
+test('6a. Kimi answer formatting: a fenced or BOM-prefixed strict answer completes (its strict nulls still stripped); empty content is diagnosed by shape and reasoning tokens only', async () => {
+  const strictAnswer = analystAnswer(undefined, undefined, { observations: [{ id: 'O1', actor: 'PROSPECT', behavior: 'x',
+    evidence: [{ type: 'MESSAGE', message_id: 'a0000000-0000-4000-8000-000000000001', position: null, quote: 'the price feels high' }] }] });
+  for (const [content, shape] of [[`\`\`\`json\n${JSON.stringify(strictAnswer)}\n\`\`\``, 'JSON_FENCED'], [`\uFEFF${JSON.stringify(strictAnswer)}`, 'JSON_BOM']]) {
+    reset({ ANALYST: [{ status: 200, body: completion(content) }] });
+    const { run, logger } = await setup();
+    expect(await run(), shape).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
+    expect(logger.events.find((e) => e.name === 'provider.answer_normalized')?.fields, shape).toMatchObject({ shape, chars: content.length });
+    expect(chats(), shape).toHaveLength(2); // analyst + reviewer, nothing more
+  }
+  reset({ ANALYST: [{ status: 200, body: completion('', {}, { completion_tokens: 900, total_tokens: 2100, completion_tokens_details: { reasoning_tokens: 880 } }) }] });
+  const { run, logger, db } = await setup();
+  expect(await run()).toMatchObject({ outcome: 'FAILED', code: 'INVALID_JSON_ANALYST' });
+  expect(logger.events.find((e) => e.name === 'provider.answer_unparsable')?.fields).toMatchObject({ shape: 'EMPTY', chars: 0, outputTokens: 900, reasoningTokens: 880 });
+  expect(db.spend()).toBe('SETTLED:REPORTED_USAGE');
+  expect(chats()).toHaveLength(1); // no retry, no reviewer call
+  expect(JSON.stringify(logger.events)).not.toContain(REASONING);
 });
 
 test('6b. more output than the approved cap, or more input than the reserved bound, is reported in full and fails the run', async () => {

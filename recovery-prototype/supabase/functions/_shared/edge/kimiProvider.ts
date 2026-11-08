@@ -29,7 +29,7 @@
 // conversation data.
 
 import {
-  ProviderCallError, type AnalysisProvider, type ModelConfig, type ProviderRequest, type ProviderResponse,
+  ProviderCallError, unwrapAnswer, type AnalysisProvider, type ModelConfig, type ProviderRequest, type ProviderResponse,
 } from '../analysis-pipeline/index.ts';
 
 export const KIMI_API_URL = 'https://api.moonshot.ai';
@@ -164,9 +164,13 @@ export function parseCompletion(raw: unknown, requestedModel: string, schema: Sc
   const content = typeof message.content === 'string' ? message.content : '';
   const finish = typeof choice.finish_reason === 'string' ? choice.finish_reason : 'missing';
   // Only the final answer: reasoning_content (if any) is deliberately ignored.
-  let text = content;
-  try { text = JSON.stringify(stripOptionalNulls(JSON.parse(content), schema)); } catch { /* not JSON: the pipeline rejects it as INVALID_JSON */ }
-  return { text, stopReason: STOPS[finish] ?? finish, inputTokens: input, outputTokens: output, ...(requestId ? { requestId } : {}) };
+  // Harmless formatting (whitespace, byte-order mark, one enclosing code fence) is removed first,
+  // so the strict-mode nulls are stripped from a fenced answer too; anything else is passed on
+  // unchanged and the pipeline rejects it as INVALID_JSON. Diagnostics are shape and counts only.
+  const answer = unwrapAnswer(content);
+  const text = answer.body === null ? content : JSON.stringify(stripOptionalNulls(JSON.parse(answer.body), schema));
+  const diagnostics = { answerShape: answer.shape, answerChars: content.length, reasoningTokens: tokens(reasoning) };
+  return { text, stopReason: STOPS[finish] ?? finish, inputTokens: input, outputTokens: output, ...(requestId ? { requestId } : {}), diagnostics };
 }
 
 /** Maps a fetch failure to fixed values only. */

@@ -362,13 +362,18 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
     if (inTok > bound.inputBound) throw new PipelineFailure(`PROVIDER_INPUT_EXCEEDED_${role}`);
     if (stop === 'refusal') throw new PipelineFailure(`PROVIDER_REFUSED_${role}`);
     if (stop !== 'end_turn') throw new PipelineFailure(`PROVIDER_INCOMPLETE_${role}`);
-    if (typeof response.text !== 'string') throw new PipelineFailure(`INVALID_JSON_${role}`);
-    let value: unknown;
-    try {
-      value = JSON.parse(response.text);
-    } catch {
+    const answer = unwrapAnswer(typeof response.text === 'string' ? response.text : '');
+    const d = response.diagnostics ?? {};
+    // Shape only: never the answer or any conversation text.
+    const shapeFields = { analysisId, role, shape: typeof d.answerShape === 'string' ? d.answerShape : answer.shape,
+      chars: typeof d.answerChars === 'number' ? d.answerChars : (typeof response.text === 'string' ? response.text.length : 0),
+      inputTokens: inTok, outputTokens: outTok, reasoningTokens: tokenCount(d.reasoningTokens), requestId: safeId(response.requestId) };
+    if (answer.body === null) {
+      logger.event('provider.answer_unparsable', shapeFields);
       throw new PipelineFailure(`INVALID_JSON_${role}`);
     }
+    if (shapeFields.shape !== 'JSON') logger.event('provider.answer_normalized', shapeFields);
+    const value: unknown = JSON.parse(answer.body);
     const off = validateOutput(value, schema);
     if (off !== null) {
       logger.event('provider.schema_invalid', { analysisId, role, path: off.slice(0, 120) });
@@ -417,6 +422,30 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
 // ------------------------------------------------------------------ pure parts (exported for tests)
 
 /** A provider-reported token count, or null when it is not a plausible count (usage then counts as unknown). */
+/**
+ * How an answer text is formatted. Harmless formatting is removed deterministically: surrounding
+ * whitespace, a leading byte-order mark, or ONE code fence (``` or ```json) enclosing the whole
+ * answer. Nothing else is repaired: no text is cut out of prose, no brackets are added, nothing is
+ * invented. The unwrapped body must parse as JSON; the schema and the database contract still judge it.
+ */
+export type AnswerShape = 'JSON' | 'JSON_WHITESPACE' | 'JSON_BOM' | 'JSON_FENCED'
+  | 'EMPTY' | 'FENCED_MALFORMED' | 'TEXT_AROUND_JSON' | 'NOT_JSON' | 'MALFORMED_JSON';
+export function unwrapAnswer(text: string): { body: string | null; shape: AnswerShape } {
+  const bom = text.startsWith('\uFEFF');
+  const trimmed = (bom ? text.slice(1) : text).trim();
+  if (trimmed === '') return { body: null, shape: 'EMPTY' };
+  const fence = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?[ \t]*```$/i.exec(trimmed);
+  const body = fence ? fence[1].trim() : trimmed;
+  try {
+    JSON.parse(body);
+  } catch {
+    if (fence) return { body: null, shape: 'FENCED_MALFORMED' };
+    if (/^[{[]/.test(body)) return { body: null, shape: 'MALFORMED_JSON' };
+    return { body: null, shape: /[{[]/.test(body) ? 'TEXT_AROUND_JSON' : 'NOT_JSON' };
+  }
+  return { body, shape: fence ? 'JSON_FENCED' : bom ? 'JSON_BOM' : body !== text ? 'JSON_WHITESPACE' : 'JSON' };
+}
+
 export function tokenCount(v: unknown): number | null {
   return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= MAX_TOKENS ? v : null;
 }
