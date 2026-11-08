@@ -96,7 +96,7 @@ export function FounderRunAnalysis({ caseId, workflowState, onDone }: { caseId: 
 
 // ---------------------------------------------------------------- founder: the decision
 
-interface DecisionData { latest: AnalysisRow | null; state: AnalysisState; restrictions: RestrictionRow[] }
+interface DecisionData { latest: AnalysisRow | null; state: AnalysisState; restrictions: RestrictionRow[]; verifyNotice: string | null }
 
 /** Approve, edit or mark RED (founder_approve), or request a re-analysis. Only while the case awaits review. */
 export function FounderDecision({ caseId, evidenceVersion, onDone }: { caseId: string; evidenceVersion: number; onDone: () => void }) {
@@ -121,12 +121,15 @@ export function FounderDecision({ caseId, evidenceVersion, onDone }: { caseId: s
       const rows = (a.data ?? []) as AnalysisRow[];
       const restrictions = (r.data ?? []) as RestrictionRow[];
       const { state, latest } = analysisState(rows, evidenceVersion);
-      setData({ latest, state, restrictions });
       const restricted = restrictions.some((x) => x.status === 'ACTIVE');
       const output = latest ? parseAnalysisOutput(latest.output) : null;
-      const proposal = proposedMessage(state, latest, output, restrictions).text;
+      const pm = proposedMessage(state, latest, output, restrictions);
+      const proposal = pm.text;
+      setData({ latest, state, restrictions, verifyNotice: pm.needsVerifiedMessage ? pm.withheld : null });
       const ai = (latest?.ai_classification ?? null) as Classification | null;
-      const cls: Classification = restricted || !proposal ? 'RED' : ai ?? 'YELLOW';
+      // A draft withheld for verification keeps the AI's classification with an empty message: the founder writes a
+      // verified message (or chooses RED). Otherwise, no draft means RED by default, as before.
+      const cls: Classification = restricted ? 'RED' : pm.needsVerifiedMessage ? ai ?? 'YELLOW' : !proposal ? 'RED' : ai ?? 'YELLOW';
       setForm({ classification: cls, message: cls === 'RED' ? '' : proposal ?? '', deal: CLIENT_TEXT_DEFAULTS[cls].deal, next: CLIENT_TEXT_DEFAULTS[cls].next });
     })();
     return () => { active = false; };
@@ -138,7 +141,7 @@ export function FounderDecision({ caseId, evidenceVersion, onDone }: { caseId: s
   const restricted = data.restrictions.some((x) => x.status === 'ACTIVE');
 
   const setCls = (c: Classification) => setForm((f) => f && ({ ...f, classification: c, deal: CLIENT_TEXT_DEFAULTS[c].deal, next: CLIENT_TEXT_DEFAULTS[c].next,
-    message: c === 'RED' ? '' : f.message || (data.latest?.ai_proposed_message ?? '') }));
+    message: c === 'RED' ? '' : f.message || (data.verifyNotice ? '' : data.latest?.ai_proposed_message ?? '') }));
 
   const review = () => {
     const e = validateDecision(form, restricted);
@@ -195,6 +198,7 @@ export function FounderDecision({ caseId, evidenceVersion, onDone }: { caseId: s
               {errors.classification && <p className="field-err" role="alert">{errors.classification}</p>}
               {restricted && <Notice tone="warn">Contact is restricted: only RED is possible.</Notice>}
             </fieldset>
+            {data.verifyNotice && form.classification !== 'RED' && <Notice tone="warn"><span data-testid="decision-verify-notice">{data.verifyNotice}</span></Notice>}
             {form.classification !== 'RED' && (
               <Field label="Message the business will send" hint={`Edit freely. At most ${DECISION_LIMITS.message} characters.`} error={errors.message}>
                 {(id, d) => <textarea id={id} aria-describedby={d} rows={6} value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} />}

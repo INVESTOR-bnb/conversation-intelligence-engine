@@ -150,18 +150,41 @@ test('fake-provider analyses are recognised by their model (Stage 2A-5d-4b)', ()
   expect(isFakeProviderAnalysis(null)).toBe(false);
 });
 
-test('a HIGH challenge on the recommendation withholds the draft even when the verdict is only UPHOLD_WITH_CONCERNS (unverified claims are never pre-filled as ready)', () => {
+test('a HIGH challenge on the recommendation withholds the draft even when the verdict is only UPHOLD_WITH_CONCERNS', () => {
   const v2 = reviewedOutput(MID, 'UPHOLD_WITH_CONCERNS') as { adversarial_review: Record<string, unknown> };
   const withHigh = { ...v2, adversarial_review: { verdict: 'UPHOLD_WITH_CONCERNS', verdict_rationale: 'x', challenges: [
     { id: 'C1', target: 'RECOMMENDATION', target_id: null, severity: 'HIGH', challenge: 'The draft says the car is still available; the seller never confirmed it.', evidence: [] }] } };
-  const out = parseAnalysisOutput(withHigh)!;
-  const w = proposedMessage('READY', row({ output: withHigh }), out, []);
+  const w = proposedMessage('READY', row({ output: withHigh }), parseAnalysisOutput(withHigh)!, []);
   expect(w.text).toBeNull();
-  expect(w.withheld).toContain('HIGH-severity challenge to this recommendation');
-  // MEDIUM concerns, or HIGH concerns about a hypothesis only, leave the draft for the founder to judge
-  for (const [target, severity] of [['RECOMMENDATION', 'MEDIUM'], ['HYPOTHESIS', 'HIGH']] as const) {
-    const other = { ...v2, adversarial_review: { verdict: 'UPHOLD_WITH_CONCERNS', verdict_rationale: 'x', challenges: [
-      { id: 'C1', target, target_id: target === 'HYPOTHESIS' ? 'H1' : null, severity, challenge: 'y', evidence: [] }] } };
-    expect(proposedMessage('READY', row({ output: other }), parseAnalysisOutput(other)!, []).text, `${target} ${severity}`).toBe(MSG);
+  expect(w.withheld).toContain('the independent review raised a concern about this recommendation');
+});
+
+// ---------------------------------------------------------------- reliability regression: the real v7 run (DASH-PAID-20261108175930)
+/** A v2 output shaped like the live v7 result: a dated Saturday request, a draft confirming a time, and a review concern. */
+function v7Like(opts: { strategy: string; draft: string; challenges: { target: string; severity: string }[] }) {
+  const v2 = reviewedOutput(MID, 'UPHOLD_WITH_CONCERNS') as Record<string, unknown> & { recommendation: Record<string, unknown> };
+  const output = { ...v2,
+    recommendation: { ...v2.recommendation, strategy: opts.strategy, next_action: { type: 'SEND_MESSAGE', text: opts.draft } },
+    adversarial_review: { verdict: opts.challenges.length ? 'UPHOLD_WITH_CONCERNS' : 'UPHOLD', verdict_rationale: 'x',
+      challenges: opts.challenges.map((c, i) => ({ id: `C${i + 1}`, target: c.target, target_id: c.target === 'HYPOTHESIS' ? 'H1' : null, severity: c.severity, challenge: 'synthetic', evidence: [] })) } };
+  const r = row({ output, ai_proposed_message: opts.draft });
+  return proposedMessage('READY', r, parseAnalysisOutput(output)!, []);
+}
+const SAT = 'Saturday morning works. Shall I book you in?';
+
+test('R1 passed appointment / R3 availability never confirmed: an unresolved VERIFY FIRST withholds the draft (founder can still write one)', () => {
+  const w = v7Like({ strategy: 'BUYER SIGNAL: asked "Could I come on Saturday morning to see it?" on 6 Oct. VERIFY FIRST: that the car is still available and which days the seller can offer now. NEXT MOVE: reply once confirmed.', draft: SAT, challenges: [] });
+  expect(w).toMatchObject({ text: null, needsVerifiedMessage: true });
+  expect(w.withheld).toContain('VERIFY FIRST');
+  // "VERIFY FIRST: nothing" (or none) is not an unresolved requirement
+  for (const none of ['VERIFY FIRST: nothing. NEXT MOVE: reply.', 'VERIFY FIRST: none. NEXT MOVE: reply.']) {
+    expect(v7Like({ strategy: `BUYER SIGNAL: x. ${none}`, draft: 'Thanks for your message. What would help you decide?', challenges: [] }).text, none).not.toBeNull();
   }
+});
+
+test('R4 a MEDIUM reviewer concern about the recommendation (as in the live run) withholds the draft; LOW or hypothesis-only concerns do not', () => {
+  const plain = 'BUYER SIGNAL: asked to view. NEXT MOVE: answer the request.';
+  expect(v7Like({ strategy: plain, draft: SAT, challenges: [{ target: 'RECOMMENDATION', severity: 'MEDIUM' }] })).toMatchObject({ text: null, needsVerifiedMessage: true });
+  expect(v7Like({ strategy: plain, draft: SAT, challenges: [{ target: 'RECOMMENDATION', severity: 'LOW' }] }).text).toBe(SAT);
+  expect(v7Like({ strategy: plain, draft: SAT, challenges: [{ target: 'HYPOTHESIS', severity: 'HIGH' }] }).text).toBe(SAT);
 });

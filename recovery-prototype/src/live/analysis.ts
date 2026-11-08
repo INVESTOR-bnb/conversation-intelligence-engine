@@ -241,15 +241,23 @@ export function showsFindings(state: AnalysisState) {
  * and not rejected by the independent review. Even then it is only text for the
  * founder to review; nothing sends it.
  */
+/** A VERIFY FIRST in the strategy that names a fact (not "none"/"nothing"). */
+export const UNRESOLVED_VERIFY_FIRST = /VERIFY FIRST:\s*(?!(?:none|nothing|n\/a)\b)[^\s.]/i;
+
 export function proposedMessage(state: AnalysisState, row: AnalysisRow | null, output: AnalysisOutput | null, restrictions: RestrictionRow[]):
-  { text: string | null; withheld: string | null } {
+  { text: string | null; withheld: string | null; needsVerifiedMessage?: boolean } {
   if (!row || !output || !row.ai_proposed_message) return { text: null, withheld: null };
   if (restrictions.some((r) => r.status === 'ACTIVE')) return { text: null, withheld: 'Withheld: this case has an active contact restriction. Do not contact the prospect.' };
   if (output.review?.verdict === 'REJECT_RECOMMENDATION') return { text: null, withheld: 'Withheld: the independent review rejected this recommendation.' };
-  // A HIGH challenge on the recommendation (for example an unverified availability, price or time in the draft)
-  // means the draft is not ready to send, whatever the verdict says. The founder can still write a message.
-  if (output.review?.challenges.some((c) => c.target === 'RECOMMENDATION' && c.severity === 'HIGH')) {
-    return { text: null, withheld: 'Withheld: the independent review raised a HIGH-severity challenge to this recommendation (see the review). Check it and write the message yourself if contact is still right.' };
+  // The draft is not ready to send while the recommendation still needs a fact confirmed (VERIFY FIRST), or while
+  // the independent review has a MEDIUM or HIGH concern about the recommendation (for example an unverified
+  // availability, price, day or time), whatever the verdict. The draft stays visible in the recommendation; the
+  // founder writes and approves a verified message instead.
+  if (UNRESOLVED_VERIFY_FIRST.test(output.recommendation.strategy)) {
+    return { text: null, needsVerifiedMessage: true, withheld: 'Withheld until the seller confirms the VERIFY FIRST fact in the strategy. The draft is shown in the recommendation; once the fact is confirmed, write the message yourself.' };
+  }
+  if (output.review?.challenges.some((c) => c.target === 'RECOMMENDATION' && (c.severity === 'HIGH' || c.severity === 'MEDIUM'))) {
+    return { text: null, needsVerifiedMessage: true, withheld: 'Withheld: the independent review raised a concern about this recommendation (see the review). The draft is shown in the recommendation; check it and write the message yourself if contact is still right.' };
   }
   if (state !== 'READY') return { text: null, withheld: 'Withheld: this analysis is not current. Request a re-analysis.' };
   if (row.ai_classification === 'RED' || output.recommendation.nextAction?.type !== 'SEND_MESSAGE') return { text: null, withheld: null };

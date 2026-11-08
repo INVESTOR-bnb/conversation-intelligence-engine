@@ -504,3 +504,24 @@ test('WHY THE UI RULE IS NEEDED: the contract accepts UPHOLD_WITH_CONCERNS with 
   expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
   expect(row(r.analysisId!).ai_proposed_message).toBe(bad); // stored; only src/live/analysis.ts proposedMessage() now withholds it
 });
+
+test('R6 two competing explanations that can both be true (partner/bank agreement AND a busy week), each evidence-backed, with a v8 rationale: the real contract accepts it', async () => {
+  const { c, m1, m2 } = textCase();
+  const answer = analystAnswer(m1, m2, {
+    hypotheses: [
+      { id: 'H1', category: 'DECISION_FRICTION', statement: 'Needs agreement from someone else before committing.', basis: 'HYPOTHESIS',
+        supporting_observations: ['O1'], contradicting_observations: [], competing_hypotheses: ['H2'], confidence: 'MEDIUM', uncertainty: 'Both may hold at once.' },
+      { id: 'H2', category: 'DECISION_FRICTION', statement: 'Simply needs a time that fits a busy schedule.', basis: 'HYPOTHESIS',
+        supporting_observations: ['O2'], contradicting_observations: [], competing_hypotheses: ['H1'], confidence: 'LOW', uncertainty: 'Both may hold at once.' },
+    ],
+    recommendation: { pursue: 'PURSUE',
+      strategy: 'BUYER SIGNAL: on 6 Oct the prospect asked "Can I see it on Saturday" (that Saturday has passed). VERIFY FIRST: that the car is still available and which days the seller can offer now. NEXT MOVE: reopen the viewing request without naming a day.',
+      psychological_rationale: 'DECISION HYPOTHESIS: H1: needs agreement before committing; H2 (a busy schedule) may also be true. WHY THIS MOVE: it offers the viewing on their terms and shows whether a second person is involved. IF RIGHT, EXPECT: they suggest coming with their partner or ask what the bank needs. WOULD CHALLENGE IT: they book a time alone with no mention of anyone else, which points to H2.',
+      based_on_hypotheses: ['H1'], next_action: { type: 'SEND_MESSAGE', text: 'Sorry we missed your Saturday request last month. If you would still like to see the car, which day suits you? You are welcome to bring anyone who is helping you decide.' } },
+  });
+  const r = await run(c, new FakeProvider({ ANALYST: ok(answer), REVIEWER: ok(reviewAnswer('UPHOLD', m1)) }));
+  expect(r).toMatchObject({ outcome: 'COMPLETED', code: 'OK' });
+  const rec = row(r.analysisId!).output.recommendation;
+  expect(rec.psychological_rationale).toMatch(/WOULD CHALLENGE IT: .+/);
+  expect(rec.psychological_rationale).not.toMatch(/WOULD CHALLENGE IT: [^.]*(no reply|silence|does not (reply|respond))/i);
+});

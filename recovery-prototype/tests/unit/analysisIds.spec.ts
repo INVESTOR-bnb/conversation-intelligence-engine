@@ -68,7 +68,7 @@ test('the prompts state the id rules the grammar cannot enforce (uniqueness, exi
     expect(ANALYST_SYSTEM, rule).toContain(rule);
   }
   for (const rule of ['C1, C2, C3', 'each id used once', 'an id that exists in the analysis under review', 'target_id null']) expect(REVIEWER_SYSTEM, rule).toContain(rule);
-  expect(PROMPT_VERSION).toBe('rre-6j-analyst-v7+reviewer-v6');
+  expect(PROMPT_VERSION).toBe('rre-6k-analyst-v8+reviewer-v7');
   expect(PROMPT_VERSION.length).toBeLessThanOrEqual(50);
 });
 
@@ -96,7 +96,7 @@ test('strategic next move: one move from the prospect\'s own words, in the exist
   }
   expect(flat(REVIEWER_SYSTEM)).toContain('is it ONE specific move grounded in the prospect\'s words');
   // the prompts stay small (~4 characters per token; both prompts are sent once each per analysis)
-  expect(ANALYST_SYSTEM.length + REVIEWER_SYSTEM.length).toBeLessThan(13_500);
+  expect(ANALYST_SYSTEM.length + REVIEWER_SYSTEM.length).toBeLessThan(14_500); // v8: 13,684 (time and prediction rules)
 });
 
 test('no unverified operational claims; seller mistakes are observations, the cause of silence stays a hypothesis; verify first', () => {

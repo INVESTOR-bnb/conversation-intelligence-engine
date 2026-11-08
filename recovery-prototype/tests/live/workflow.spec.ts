@@ -312,3 +312,28 @@ test('access: a business cannot open another business’s case, nor the founder 
   expect(await call('/functions/v1/analyze-case', { case_id: CASE })).toBe(403);
   expect(await call('/rest/v1/rpc/founder_approve', { p_case_id: CASE })).toBe(403);
 });
+
+test('a draft withheld for verification (VERIFY FIRST) is visible in the recommendation but not pre-filled; the AI classification is kept and a verified message must be written', async ({ page }) => {
+  const out = reviewedOutput(messageId(CASE)) as Record<string, unknown> & { recommendation: Record<string, unknown> };
+  awaitingReview({ output: { ...out, recommendation: { ...out.recommendation,
+    strategy: 'BUYER SIGNAL: asked to view on a Saturday that has passed. VERIFY FIRST: that the car is still available. NEXT MOVE: reply once confirmed.' } } });
+  await login(page, 'founder');
+  await page.goto(`/app/founder/case/${CASE}`);
+  await expect(page.getByTestId('recommendation')).toContainText(MSG); // the draft can still be inspected
+  await expect(page.getByTestId('proposed-message')).toHaveCount(0);
+  await expect(page.getByTestId('message-withheld')).toContainText('VERIFY FIRST');
+  const decision = page.getByTestId('founder-decision');
+  await expect(decision.getByRole('radio', { name: /YELLOW/ })).toBeChecked();
+  await expect(decision.getByTestId('decision-verify-notice')).toBeVisible();
+  const box = decision.getByLabel('Message the business will send');
+  await expect(box).toHaveValue('');
+  await decision.getByRole('radio', { name: /GREEN/ }).check(); // switching classification never brings the draft back
+  await expect(box).toHaveValue('');
+  await decision.getByRole('button', { name: 'Approve' }).click();
+  await expect(decision.getByText('Write the message the business will send.')).toBeVisible();
+  await box.fill('Thanks for your patience. The car is still available. Which day would suit you to view it?');
+  await decision.getByRole('button', { name: 'Approve' }).click();
+  await page.getByRole('button', { name: 'Release' }).click();
+  await expect(page.getByTestId('released')).toBeVisible();
+  expect(mock.recommendations.get(CASE)).toMatchObject({ classification: 'GREEN', approval_type: 'EDITED' });
+});

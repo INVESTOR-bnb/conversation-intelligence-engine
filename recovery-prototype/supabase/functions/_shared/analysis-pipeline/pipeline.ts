@@ -159,12 +159,12 @@ export async function runAnalysisPipeline(caseId: string, deps: PipelineDeps): P
     terms = await readTerms(reservation);
 
     // A: forensic analyst
-    const analyst = parseAnalyst(await call('ANALYST', config.analyst, ANALYST_SYSTEM, analystContent(evidence), ANALYST_SCHEMA));
+    const analyst = parseAnalyst(await call('ANALYST', config.analyst, ANALYST_SYSTEM, analystContent(evidence, startedAt), ANALYST_SCHEMA));
     detected = analyst.detected;
 
     // B: adversarial reviewer — a separate request; sees the analyst's output as data only
     const review = parseReviewer(await call('REVIEWER', config.reviewer, REVIEWER_SYSTEM,
-      reviewerContent(evidence, reviewInput(analyst)), REVIEWER_SCHEMA));
+      reviewerContent(evidence, reviewInput(analyst), startedAt), REVIEWER_SCHEMA));
     reviewerVerdict = review.verdict as string;
 
     const merged = merge(analyst, review);

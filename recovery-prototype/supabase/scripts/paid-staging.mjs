@@ -37,7 +37,7 @@ export const KIMI = Object.freeze({ model: 'kimi-k3', in: 3, out: 15, cap: 8000 
 export const PER_ANALYSIS_CAP_USD = 1;
 export const ALLOWANCE_USD = 3;
 /** What the deployed bundle must contain besides the reviewed safeguards: the fixed model and the contract-id fix (9f5bf4c). */
-export const DEPLOYED_MARKERS = ["KIMI_MODEL = 'kimi-k3'", 'rre-6j-analyst-v7+reviewer-v6', 'provider.answer_unparsable'];
+export const DEPLOYED_MARKERS = ["KIMI_MODEL = 'kimi-k3'", 'rre-6k-analyst-v8+reviewer-v7', 'provider.answer_unparsable'];
 /** What the live frontend must contain: the founder's paid action, its confirmation, and the spending gate. */
 export const FRONTEND_MARKERS = ['Run paid analysis', 'The total permitted cost is capped at $1.', 'founder_ai_spend_summary'];
 const PAID_SETTINGS = ['ANALYSIS_PROVIDER', 'ALLOW_PAID_PROVIDER', 'KIMI_API_KEY'];
